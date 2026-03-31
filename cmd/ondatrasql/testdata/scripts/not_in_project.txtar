@@ -1,0 +1,9 @@
+# commands that need a project fail outside a project
+! exec ondatrasql run
+stderr 'not in an ondatrasql project'
+
+! exec ondatrasql stats
+stderr 'not in an ondatrasql project'
+
+! exec ondatrasql history
+stderr 'not in an ondatrasql project'

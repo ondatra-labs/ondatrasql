@@ -1,0 +1,14 @@
+# SQL file execution via default case (sql/<cmd>.sql)
+exec ondatrasql init
+
+# Verify that init created the sql/ files
+exists sql/merge.sql
+
+# Run the merge command (dispatches to sql/merge.sql)
+exec ondatrasql merge
+stdout 'Merge'
+stdout 'OK'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id

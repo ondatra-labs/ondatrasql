@@ -1,0 +1,5 @@
+# run without models shows message
+exec ondatrasql init
+
+exec ondatrasql run
+stdout 'No models found'

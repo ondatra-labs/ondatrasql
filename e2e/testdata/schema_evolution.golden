@@ -1,0 +1,14 @@
+--- run 1 ---
+target: staging.evolving
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+--- run 2 ---
+target: staging.evolving
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: sql changed
+columns: 3
+age: 30

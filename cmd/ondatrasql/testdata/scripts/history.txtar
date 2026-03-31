@@ -1,0 +1,20 @@
+# history command shows run history
+exec ondatrasql init
+
+mkdir models/staging
+cp model.sql models/staging/ht.sql
+
+# Run a model to generate history
+exec ondatrasql run staging.ht
+
+# History should succeed and show header
+exec ondatrasql history
+stdout 'Run History'
+
+# History with --limit flag
+exec ondatrasql history --limit 1
+stdout 'Run History'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id, 'hello' AS name

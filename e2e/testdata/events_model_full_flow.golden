@@ -1,0 +1,11 @@
+target: raw.events
+kind: events
+run_type: flush
+rows_affected: 3
+run_reason: event flush
+count: 3
+data:
+  event_name,page_url
+  click,/pricing
+  pageview,/home
+  signup,/register

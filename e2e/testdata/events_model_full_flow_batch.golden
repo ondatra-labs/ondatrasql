@@ -1,0 +1,6 @@
+target: raw.clicks
+kind: events
+run_type: flush
+rows_affected: 5
+run_reason: event flush
+count: 5

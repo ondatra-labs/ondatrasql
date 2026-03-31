@@ -1,0 +1,32 @@
+# sandbox runs a model in preview mode and shows diff vs prod
+exec ondatrasql init
+
+mkdir models/staging
+cp model.sql models/staging/sbox.sql
+
+# First run normally to populate prod catalog
+exec ondatrasql run staging.sbox
+
+# Now run in sandbox with same data - should skip (nothing changed)
+exec ondatrasql sandbox staging.sbox
+stdout 'skip'
+
+# Modify model and run sandbox again - should show diff
+cp model_v2.sql models/staging/sbox.sql
+exec ondatrasql sandbox staging.sbox
+stdout 'Diff vs Prod'
+stdout 'Added: 1 rows'
+stdout 'Charlie'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+UNION ALL
+SELECT 2, 'Bob'
+-- model_v2.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+UNION ALL
+SELECT 2, 'Bob'
+UNION ALL
+SELECT 3, 'Charlie'

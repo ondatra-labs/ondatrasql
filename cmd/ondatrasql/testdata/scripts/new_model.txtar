@@ -1,0 +1,8 @@
+# new command creates model files
+exec ondatrasql init
+
+exec ondatrasql new staging.orders.sql
+exists models/staging/orders.sql
+
+exec ondatrasql new staging.events.star
+exists models/staging/events.star

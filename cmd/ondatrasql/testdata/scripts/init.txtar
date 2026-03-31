@@ -1,0 +1,23 @@
+# init creates project structure
+exec ondatrasql init
+stdout 'Initialized'
+
+# Verify created files and directories
+exists config/catalog.sql
+exists config/extensions.sql
+exists config/macros.sql
+exists config/variables.sql
+exists config/sources.sql
+exists config/secrets.sql
+exists config/settings.sql
+exists models/raw
+exists models/staging
+exists models/intermediate
+exists models/mart
+exists sql/merge.sql
+exists sql/expire.sql
+exists sql/cleanup.sql
+exists sql/orphaned.sql
+exists .env
+exists .gitignore
+exists README.md

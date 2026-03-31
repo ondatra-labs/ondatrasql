@@ -1,0 +1,12 @@
+--- run 1 ---
+target: staging.derived
+kind: table
+run_type: backfill
+rows_affected: 3
+run_reason: first run
+--- run 2 ---
+target: staging.derived
+kind: table
+run_type: backfill
+rows_affected: 3
+run_reason: first run

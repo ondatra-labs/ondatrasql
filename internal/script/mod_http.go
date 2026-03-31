@@ -1,0 +1,322 @@
+// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// Copyright (C) 2026 Marcus Hernandez
+// Licensed under the GNU AGPL v3 - see LICENSE file
+
+package script
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"time"
+
+	"go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
+)
+
+// Default HTTP client settings
+const (
+	defaultTimeout    = 30 * time.Second
+	defaultMaxRetries = 0
+	defaultBackoffMs  = 1000
+)
+
+// httpOptions holds HTTP request options
+type httpOptions struct {
+	Timeout    time.Duration
+	Retry      int
+	Backoff    int
+	Insecure   bool
+	DigestAuth *digestCredentials
+	ClientCert *clientCertConfig
+}
+
+// clientCertConfig holds mTLS client certificate configuration.
+type clientCertConfig struct {
+	CertFile string
+	KeyFile  string
+	CAFile   string // optional, for custom CA
+}
+
+// httpModule provides HTTP client functions with kwargs support.
+func httpModule(ctx context.Context) *starlarkstruct.Module {
+	return &starlarkstruct.Module{
+		Name: "http",
+		Members: starlark.StringDict{
+			"get":    starlark.NewBuiltin("http.get", httpRequest(ctx, "GET")),
+			"post":   starlark.NewBuiltin("http.post", httpRequest(ctx, "POST")),
+			"put":    starlark.NewBuiltin("http.put", httpRequest(ctx, "PUT")),
+			"delete": starlark.NewBuiltin("http.delete", httpRequest(ctx, "DELETE")),
+			"patch":  starlark.NewBuiltin("http.patch", httpRequest(ctx, "PATCH")),
+		},
+	}
+}
+
+// httpRequest creates a unified handler for all HTTP methods using kwargs.
+// Signature: http.method(url, headers?, json?, data?, timeout?, retry?)
+func httpRequest(ctx context.Context, method string) func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var (
+			urlStr      string
+			headersDict *starlark.Dict
+			paramsDict  *starlark.Dict
+			jsonBody    starlark.Value
+			dataDict    *starlark.Dict
+			timeout     starlark.Value // float seconds
+			retry       int
+			backoff     starlark.Value // float seconds
+			auth        *starlark.Tuple
+			cert        string
+			key         string
+			ca          string
+		)
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
+			"url", &urlStr,
+			"headers?", &headersDict,
+			"params?", &paramsDict,
+			"json?", &jsonBody,
+			"data?", &dataDict,
+			"timeout?", &timeout,
+			"retry?", &retry,
+			"backoff?", &backoff,
+			"auth?", &auth,
+			"cert?", &cert,
+			"key?", &key,
+			"ca?", &ca,
+		); err != nil {
+			return nil, err
+		}
+
+		// Append query params to URL
+		if paramsDict != nil {
+			u, err := url.Parse(urlStr)
+			if err != nil {
+				return nil, fmt.Errorf("%s: invalid url: %w", fn.Name(), err)
+			}
+			q := u.Query()
+			for _, item := range paramsDict.Items() {
+				k, ok := starlark.AsString(item[0])
+				if !ok {
+					return nil, fmt.Errorf("%s: params key must be string, got %s", fn.Name(), item[0].Type())
+				}
+				v, ok := starlark.AsString(item[1])
+				if !ok {
+					return nil, fmt.Errorf("%s: params value must be string, got %s", fn.Name(), item[1].Type())
+				}
+				if k != "" {
+					q.Set(k, v)
+				}
+			}
+			u.RawQuery = q.Encode()
+			urlStr = u.String()
+		}
+
+		// Validate: cert and key must be provided together
+		if (cert != "") != (key != "") {
+			return nil, fmt.Errorf("%s: cert and key must be provided together", fn.Name())
+		}
+		if ca != "" && cert == "" {
+			return nil, fmt.Errorf("%s: ca requires cert and key", fn.Name())
+		}
+
+		// Validate: json and data are mutually exclusive
+		if jsonBody != nil && jsonBody != starlark.None && dataDict != nil {
+			return nil, fmt.Errorf("%s: json and data are mutually exclusive", fn.Name())
+		}
+
+		// Build headers
+		headers := make(map[string]string)
+		if headersDict != nil {
+			for _, item := range headersDict.Items() {
+				k, ok := starlark.AsString(item[0])
+				if !ok {
+					return nil, fmt.Errorf("%s: header key must be string, got %s", fn.Name(), item[0].Type())
+				}
+				v, ok := starlark.AsString(item[1])
+				if !ok {
+					return nil, fmt.Errorf("%s: header value must be string, got %s", fn.Name(), item[1].Type())
+				}
+				if k != "" {
+					headers[k] = v
+				}
+			}
+		}
+
+		// Build body
+		var body []byte
+		if jsonBody != nil && jsonBody != starlark.None {
+			switch jb := jsonBody.(type) {
+			case *starlark.Dict:
+				goVal, err := starlarkToGo(jb)
+				if err != nil {
+					return nil, err
+				}
+				body, err = json.Marshal(goVal)
+				if err != nil {
+					return nil, fmt.Errorf("%s: marshal json body: %w", fn.Name(), err)
+				}
+			case *starlark.List:
+				goVal, err := starlarkToGo(jb)
+				if err != nil {
+					return nil, err
+				}
+				body, err = json.Marshal(goVal)
+				if err != nil {
+					return nil, fmt.Errorf("%s: marshal json body: %w", fn.Name(), err)
+				}
+			case starlark.String:
+				body = []byte(string(jb))
+			default:
+				return nil, fmt.Errorf("%s: json must be a dict, list, or string, got %s", fn.Name(), jsonBody.Type())
+			}
+			if headers["Content-Type"] == "" {
+				headers["Content-Type"] = "application/json"
+			}
+		} else if dataDict != nil {
+			form := url.Values{}
+			for _, item := range dataDict.Items() {
+				k, ok := starlark.AsString(item[0])
+				if !ok {
+					return nil, fmt.Errorf("%s: data key must be string, got %s", fn.Name(), item[0].Type())
+				}
+				v, ok := starlark.AsString(item[1])
+				if !ok {
+					return nil, fmt.Errorf("%s: data value must be string, got %s", fn.Name(), item[1].Type())
+				}
+				form.Set(k, v)
+			}
+			body = []byte(form.Encode())
+			if headers["Content-Type"] == "" {
+				headers["Content-Type"] = "application/x-www-form-urlencoded"
+			}
+		}
+
+		// Build options
+		opts := httpOptions{
+			Timeout:  defaultTimeout,
+			Retry:    retry,
+			Backoff:  defaultBackoffMs,
+			Insecure: false,
+		}
+		if timeout != nil {
+			switch v := timeout.(type) {
+			case starlark.Float:
+				opts.Timeout = time.Duration(float64(v) * float64(time.Second))
+			case starlark.Int:
+				i, _ := v.Int64()
+				opts.Timeout = time.Duration(i) * time.Second
+			}
+		}
+		if backoff != nil {
+			switch v := backoff.(type) {
+			case starlark.Float:
+				opts.Backoff = int(float64(v) * 1000) // seconds → ms
+			case starlark.Int:
+				i, _ := v.Int64()
+				opts.Backoff = int(i) * 1000 // seconds → ms
+			}
+		}
+
+		// Parse auth kwarg: (user, pass) or (user, pass, "basic") or (user, pass, "digest")
+		if auth != nil {
+			n := auth.Len()
+			if n < 2 || n > 3 {
+				return nil, fmt.Errorf("%s: auth must be a tuple of (user, pass) or (user, pass, scheme)", fn.Name())
+			}
+			user, ok := starlark.AsString(auth.Index(0))
+			if !ok {
+				return nil, fmt.Errorf("%s: auth username must be string, got %s", fn.Name(), auth.Index(0).Type())
+			}
+			pass, ok := starlark.AsString(auth.Index(1))
+			if !ok {
+				return nil, fmt.Errorf("%s: auth password must be string, got %s", fn.Name(), auth.Index(1).Type())
+			}
+			if user == "" {
+				return nil, fmt.Errorf("%s: auth username must be a non-empty string", fn.Name())
+			}
+
+			scheme := "basic"
+			if n == 3 {
+				s, ok := starlark.AsString(auth.Index(2))
+				if !ok {
+					return nil, fmt.Errorf("%s: auth scheme must be string, got %s", fn.Name(), auth.Index(2).Type())
+				}
+				scheme = s
+			}
+
+			switch scheme {
+			case "basic":
+				headers["Authorization"] = BasicAuth(user, pass)
+			case "digest":
+				opts.DigestAuth = &digestCredentials{Username: user, Password: pass}
+				// Digest needs at least 1 retry for the challenge-response
+				if opts.Retry < 1 {
+					opts.Retry = 1
+				}
+			default:
+				return nil, fmt.Errorf("%s: auth scheme must be \"basic\" or \"digest\", got %q", fn.Name(), scheme)
+			}
+		}
+
+		// Build client cert config
+		if cert != "" {
+			opts.ClientCert = &clientCertConfig{
+				CertFile: cert,
+				KeyFile:  key,
+				CAFile:   ca,
+			}
+		}
+
+		resp, err := DoHTTPWithRetry(ctx, method, urlStr, body, headers, opts)
+		if err != nil {
+			return nil, err
+		}
+		return httpResponseToStarlark(resp), nil
+	}
+}
+
+// httpResponseToStarlark converts an HTTPResponse to a Starlark struct.
+func httpResponseToStarlark(resp *HTTPResponse) *starlarkstruct.Struct {
+	// Build response headers dict
+	headersDict := starlark.NewDict(len(resp.Headers))
+	for k, v := range resp.Headers {
+		if len(v) == 1 {
+			headersDict.SetKey(starlark.String(k), starlark.String(v[0]))
+		} else {
+			elems := make([]starlark.Value, len(v))
+			for i, val := range v {
+				elems[i] = starlark.String(val)
+			}
+			headersDict.SetKey(starlark.String(k), starlark.NewList(elems))
+		}
+	}
+
+	// Add parsed Link header
+	if len(resp.Links) > 0 {
+		linkDict := starlark.NewDict(len(resp.Links))
+		for rel, u := range resp.Links {
+			linkDict.SetKey(starlark.String(rel), starlark.String(u))
+		}
+		headersDict.SetKey(starlark.String("_links"), linkDict)
+	}
+
+	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+
+	members := starlark.StringDict{
+		"status_code": starlark.MakeInt(resp.StatusCode),
+		"text":        starlark.String(resp.Body),
+		"ok":          starlark.Bool(ok),
+		"headers":     headersDict,
+		"json":        starlark.None,
+	}
+
+	if resp.JSON != nil {
+		jsonObj, err := goToStarlark(resp.JSON)
+		if err == nil {
+			members["json"] = jsonObj
+		}
+	}
+
+	return starlarkstruct.FromStringDict(starlark.String("response"), members)
+}

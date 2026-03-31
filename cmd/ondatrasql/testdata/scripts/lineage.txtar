@@ -1,0 +1,13 @@
+# lineage overview shows model dependencies
+exec ondatrasql init
+
+mkdir models/staging
+cp model.sql models/staging/lin.sql
+
+exec ondatrasql run staging.lin
+exec ondatrasql lineage overview
+stdout 'lin'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id

@@ -1,0 +1,6 @@
+target: staging.appended
+kind: append
+run_type: skip
+rows_affected: 0
+run_reason: no upstream changes
+prod_count: 2

@@ -1,0 +1,16 @@
+# edit with model target finds and opens the source file
+exec ondatrasql init
+env EDITOR=true
+
+mkdir models/staging
+cp model.sql models/staging/editable.sql
+
+# Run to register in catalog
+exec ondatrasql run staging.editable
+
+# Edit the model
+exec ondatrasql edit staging.editable
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id

@@ -1,0 +1,24 @@
+# run without target executes all models in DAG order
+exec ondatrasql init
+
+mkdir models/staging
+cp source.sql models/staging/src.sql
+cp downstream.sql models/staging/ds.sql
+
+# Run all models (DAG mode)
+exec ondatrasql run
+stdout 'staging.src'
+stdout 'staging.ds'
+
+# Verify both models have data
+exec ondatrasql sql 'SELECT COUNT(*) AS cnt FROM staging.src'
+stdout '1'
+exec ondatrasql sql 'SELECT COUNT(*) AS cnt FROM staging.ds'
+stdout '1'
+
+-- source.sql --
+-- @kind: table
+SELECT 1 AS id, 'hello' AS name
+-- downstream.sql --
+-- @kind: table
+SELECT id, name FROM staging.src

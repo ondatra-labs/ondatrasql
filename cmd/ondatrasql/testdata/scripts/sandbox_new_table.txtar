@@ -1,0 +1,21 @@
+# sandbox shows new table when model has never been run in prod
+exec ondatrasql init
+
+mkdir models/staging
+cp existing.sql models/staging/base.sql
+cp fresh.sql models/staging/fresh.sql
+
+# Run one model normally so prod catalog exists
+exec ondatrasql run staging.base
+
+# Sandbox a model that only exists in sandbox (never run in prod)
+exec ondatrasql sandbox staging.fresh
+stdout 'SANDBOX MODE'
+stdout 'new table'
+
+-- existing.sql --
+-- @kind: table
+SELECT 1 AS id
+-- fresh.sql --
+-- @kind: table
+SELECT 1 AS id, 'test' AS val

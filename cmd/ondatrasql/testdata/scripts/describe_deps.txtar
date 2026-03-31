@@ -1,0 +1,26 @@
+# describe shows dependencies and downstream models
+exec ondatrasql init
+
+mkdir models/staging
+cp source.sql models/staging/src.sql
+cp middle.sql models/staging/mid.sql
+cp leaf.sql models/staging/leaf.sql
+
+exec ondatrasql run staging.src
+exec ondatrasql run staging.mid
+exec ondatrasql run staging.leaf
+
+# Middle model has both upstream and downstream
+exec ondatrasql describe staging.mid
+stdout 'staging.mid'
+stdout 'staging.src'
+
+-- source.sql --
+-- @kind: table
+SELECT 1 AS id, 'root' AS val
+-- middle.sql --
+-- @kind: table
+SELECT id, val FROM staging.src
+-- leaf.sql --
+-- @kind: table
+SELECT id FROM staging.mid

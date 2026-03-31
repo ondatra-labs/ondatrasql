@@ -1,0 +1,14 @@
+--- run 1 (backfill) ---
+target: staging.customers
+kind: scd2
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+--- run 2 (incremental) ---
+target: staging.customers
+kind: scd2
+run_type: backfill
+rows_affected: 1
+run_reason: sql changed
+table_comment: Customer history updated
+row_count: 1

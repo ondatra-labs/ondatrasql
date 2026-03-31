@@ -1,0 +1,29 @@
+# sandbox DAG runs all models and shows summary
+exec ondatrasql init
+
+mkdir models/staging
+cp src.sql models/staging/src.sql
+cp downstream.sql models/staging/ds.sql
+
+# Run both normally
+exec ondatrasql run staging.src
+exec ondatrasql run staging.ds
+
+# Modify source and run sandbox DAG
+cp src_v2.sql models/staging/src.sql
+exec ondatrasql sandbox
+stdout 'SANDBOX DAG RUN'
+stdout 'Changed:'
+stdout 'staging.src'
+
+-- src.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+-- downstream.sql --
+-- @kind: table
+SELECT * FROM staging.src
+-- src_v2.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+UNION ALL
+SELECT 2, 'Bob'

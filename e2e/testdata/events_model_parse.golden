@@ -1,0 +1,10 @@
+target: raw.events
+kind: events
+description: Website analytics events
+columns: 6
+  event_name VARCHAR NOT NULL
+  page_url VARCHAR
+  user_id VARCHAR
+  session_id VARCHAR
+  event_params JSON
+  received_at TIMESTAMPTZ

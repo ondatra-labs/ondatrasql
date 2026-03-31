@@ -1,0 +1,20 @@
+target: mart.final
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: deps unchanged
+---
+target: raw.source
+kind: table
+run_type: backfill
+rows_affected: 2
+run_reason: sql changed
+---
+target: staging.checked
+kind: table
+run_type: full
+rows_affected: 0
+run_reason: upstream changed in sandbox
+error: NOT NULL failed: id has 1 NULL values
+exec_error: constraint validation failed
+---

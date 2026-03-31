@@ -1,0 +1,23 @@
+# Binary
+/ondatrasql
+*.exe
+bin/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# Temp
+*.log
+.tmp/
+coverage*.out
+cmd_cov.out
+*_test.out
+
+# Runtime
+.sandbox/
+.ondatra/
+.env
+ducklake.sqlite
+ducklake.sqlite.files/

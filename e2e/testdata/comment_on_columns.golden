@@ -1,0 +1,10 @@
+target: mart.sales
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+table_comment: Sales summary
+column_comments:
+  column_name,comment
+  amount,Total revenue including tax
+  region,Geographic sales region

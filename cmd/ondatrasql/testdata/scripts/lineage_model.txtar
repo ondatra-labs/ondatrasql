@@ -1,0 +1,21 @@
+# lineage with model target shows model-focused lineage
+exec ondatrasql init
+
+mkdir models/staging
+cp source.sql models/staging/src.sql
+cp downstream.sql models/staging/ds.sql
+
+exec ondatrasql run staging.src
+exec ondatrasql run staging.ds
+
+# Model-focused lineage should show the model and its dependencies
+exec ondatrasql lineage staging.ds
+stdout 'staging.ds'
+stdout 'staging.src'
+
+-- source.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+-- downstream.sql --
+-- @kind: table
+SELECT id, name FROM staging.src

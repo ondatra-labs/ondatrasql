@@ -1,0 +1,6 @@
+# No arguments shows help text
+exec ondatrasql
+stdout 'OndatraSQL'
+stdout 'init'
+stdout 'run'
+stdout 'version'

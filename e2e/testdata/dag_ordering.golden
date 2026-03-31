@@ -1,0 +1,4 @@
+order: raw.events
+order: staging.events
+order: mart.events_summary
+mart.events_summary.cnt: 1

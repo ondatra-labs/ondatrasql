@@ -1,0 +1,4 @@
+# unknown command returns error
+exec ondatrasql init
+! exec ondatrasql nonexistent_cmd
+stderr 'unknown command'

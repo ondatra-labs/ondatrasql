@@ -1,0 +1,1 @@
+ALTER TABLE %s RENAME COLUMN %s TO %s;

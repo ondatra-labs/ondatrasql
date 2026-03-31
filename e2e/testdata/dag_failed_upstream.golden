@@ -1,0 +1,14 @@
+result: <nil>
+exec_error: create temp table: Catalog Error: Table with name nonexistent_table_xyz does not exist!
+Did you mean "pg_constraint"?
+
+LINE 1: CREATE TEMP TABLE tmp_raw_source AS SELECT * FROM nonexistent_table_xyz
+                                                          ^
+---
+target: staging.derived
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: deps unchanged
+---
+prod_derived_count: 2

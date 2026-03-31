@@ -1,0 +1,21 @@
+# lineage with column target shows column-level trace
+exec ondatrasql init
+
+mkdir models/staging
+cp source.sql models/staging/src.sql
+cp downstream.sql models/staging/ds.sql
+
+exec ondatrasql run staging.src
+exec ondatrasql run staging.ds
+
+# Column-focused lineage: schema.table.column
+exec ondatrasql lineage staging.ds.name
+stdout 'staging.ds'
+stdout 'name'
+
+-- source.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+-- downstream.sql --
+-- @kind: table
+SELECT id, name FROM staging.src

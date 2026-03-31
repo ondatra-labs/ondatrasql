@@ -1,0 +1,24 @@
+target: mart.combined
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: deps unchanged
+---
+target: raw.data
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: no dependencies
+---
+target: staging.left
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: deps unchanged
+---
+target: staging.right
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: deps unchanged
+---

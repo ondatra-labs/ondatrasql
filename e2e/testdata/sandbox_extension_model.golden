@@ -1,0 +1,6 @@
+target: staging.with_ext
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: sql changed
+sandbox_count: 1

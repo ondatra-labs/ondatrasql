@@ -1,0 +1,8 @@
+target: staging.bad_data
+kind: table
+run_type: backfill
+rows_affected: 0
+run_reason: first run
+error: NOT NULL failed: id has 1 NULL values
+exec_error: true
+table_exists: false

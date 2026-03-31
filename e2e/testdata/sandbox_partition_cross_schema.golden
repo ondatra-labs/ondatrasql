@@ -1,0 +1,6 @@
+target: staging.partitioned
+kind: partition
+run_type: backfill
+rows_affected: 3
+run_reason: first run
+count: 3

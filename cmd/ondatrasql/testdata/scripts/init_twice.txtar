@@ -1,0 +1,4 @@
+# init fails if project already exists
+mkdir config
+! exec ondatrasql init
+stderr 'already exists'

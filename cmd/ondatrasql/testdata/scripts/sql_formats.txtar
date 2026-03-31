@@ -1,0 +1,12 @@
+# sql command supports different output formats
+exec ondatrasql init
+
+exec ondatrasql sql 'SELECT 42 AS answer' --format csv
+stdout 'answer'
+stdout '42'
+
+exec ondatrasql sql 'SELECT 42 AS answer' --format json
+stdout '42'
+
+exec ondatrasql sql 'SELECT 42 AS answer' --format markdown
+stdout '42'

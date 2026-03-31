@@ -1,0 +1,6 @@
+# edit with nonexistent model target fails
+exec ondatrasql init
+env EDITOR=true
+
+! exec ondatrasql edit staging.nonexistent
+stderr 'not found'

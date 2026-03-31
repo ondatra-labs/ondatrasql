@@ -1,0 +1,9 @@
+target: staging.tagged
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+column_comments:
+  column_name,comment
+  metric,Revenue | Cost ratio
+  ssn,Social security number

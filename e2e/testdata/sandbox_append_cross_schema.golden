@@ -1,0 +1,5 @@
+target: staging.appended
+kind: append
+run_type: backfill
+rows_affected: 3
+run_reason: first run

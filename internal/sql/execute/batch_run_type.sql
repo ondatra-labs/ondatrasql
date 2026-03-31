@@ -1,0 +1,112 @@
+-- Batch query for run_type decisions (dependency-aware)
+-- Computes run_type for ALL models in one query instead of N individual queries
+-- Args: 1) VALUES list like ('t1','h1','k1'),('t2','h2','k2')  2) snapshot catalog alias
+-- Logic: table kind uses dependency tracking to skip when nothing changed
+WITH model_input AS (
+    SELECT * FROM (VALUES %s) AS t(target, current_hash, kind)
+),
+-- Get ALL latest commits in one scan (instead of N individual lookups)
+latest_commits AS (
+    SELECT
+        commit_extra_info->>'model' AS model,
+        commit_extra_info->>'sql_hash' AS prev_hash,
+        commit_extra_info->>'depends' AS depends_raw,
+        snapshot_id,
+        ROW_NUMBER() OVER (PARTITION BY commit_extra_info->>'model'
+                          ORDER BY snapshot_id DESC) AS rn
+    FROM %s.snapshots()
+    WHERE commit_extra_info->>'model' IS NOT NULL
+),
+model_status AS (
+    SELECT
+        m.target,
+        m.current_hash,
+        m.kind,
+        COALESCE(lc.prev_hash, '') AS prev_hash,
+        lc.depends_raw,
+        TRY_CAST(lc.depends_raw AS VARCHAR[]) AS depends_array,
+        CASE
+            WHEN lc.depends_raw IS NOT NULL AND TRY_CAST(lc.depends_raw AS VARCHAR[]) IS NULL THEN true
+            ELSE false
+        END AS depends_invalid,
+        lc.snapshot_id AS model_snapshot_id
+    FROM model_input m
+    LEFT JOIN latest_commits lc ON lc.model = m.target AND lc.rn = 1
+),
+-- Unnest table dependencies for models with valid depends arrays
+table_deps AS (
+    SELECT DISTINCT
+        ms.target,
+        UNNEST(ms.depends_array) AS dep
+    FROM model_status ms
+    WHERE ms.kind = 'table'
+      AND ms.depends_array IS NOT NULL
+      AND len(ms.depends_array) > 0
+),
+-- Check each dependency's latest snapshot against the model's snapshot
+dep_status AS (
+    SELECT
+        td.target,
+        td.dep,
+        CASE
+            WHEN lc.snapshot_id IS NULL THEN 'unverifiable'
+            WHEN lc.snapshot_id > ms.model_snapshot_id THEN 'changed'
+            ELSE 'unchanged'
+        END AS status
+    FROM table_deps td
+    JOIN model_status ms ON ms.target = td.target
+    LEFT JOIN latest_commits lc ON lc.model = td.dep AND lc.rn = 1
+),
+-- Summarize dependency status per table model
+table_dep_summary AS (
+    SELECT
+        target,
+        COUNT(*) AS dep_count,
+        COUNT(*) FILTER (WHERE status = 'unverifiable') AS unverifiable_dep_count,
+        COUNT(*) FILTER (WHERE status = 'changed') AS changed_dep_count,
+        MIN(CASE WHEN status = 'changed' THEN dep END) AS first_changed_dep,
+        MIN(CASE WHEN status = 'unverifiable' THEN dep END) AS first_unverifiable_dep
+    FROM dep_status
+    GROUP BY target
+)
+SELECT
+    ms.target,
+    ms.current_hash,
+    ms.kind,
+    ms.prev_hash,
+    CASE
+        -- Events kind: always flush (handled by runner, not batch logic)
+        WHEN ms.kind = 'events' THEN 'flush'
+        -- Non-table kinds: standard logic
+        WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'backfill'
+        WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'backfill'
+        WHEN ms.kind != 'table' THEN 'incremental'
+        -- Table kind: dependency-aware skip logic
+        WHEN ms.prev_hash = '' THEN 'backfill'
+        WHEN ms.prev_hash != ms.current_hash THEN 'backfill'
+        WHEN ms.depends_raw IS NULL THEN 'full'
+        WHEN ms.depends_invalid THEN 'full'
+        WHEN tds.dep_count IS NULL OR tds.dep_count = 0 THEN 'skip'
+        WHEN tds.unverifiable_dep_count > 0 THEN 'full'
+        WHEN tds.changed_dep_count > 0 THEN 'full'
+        ELSE 'skip'
+    END AS run_type,
+    CASE
+        -- Events kind
+        WHEN ms.kind = 'events' THEN 'event flush'
+        -- Non-table kinds
+        WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'first run'
+        WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'sql changed'
+        WHEN ms.kind != 'table' THEN 'unchanged'
+        -- Table kind
+        WHEN ms.prev_hash = '' THEN 'first run'
+        WHEN ms.prev_hash != ms.current_hash THEN 'sql changed'
+        WHEN ms.depends_raw IS NULL THEN 'missing depends metadata'
+        WHEN ms.depends_invalid THEN 'invalid depends metadata'
+        WHEN tds.dep_count IS NULL OR tds.dep_count = 0 THEN 'no dependencies'
+        WHEN tds.unverifiable_dep_count > 0 THEN 'unverifiable dep: ' || tds.first_unverifiable_dep
+        WHEN tds.changed_dep_count > 0 THEN 'dep changed: ' || tds.first_changed_dep
+        ELSE 'deps unchanged'
+    END AS run_reason
+FROM model_status ms
+LEFT JOIN table_dep_summary tds ON tds.target = ms.target

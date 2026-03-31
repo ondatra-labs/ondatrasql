@@ -1,0 +1,21 @@
+target: mart.summary
+kind: table
+run_type: full
+rows_affected: 1
+run_reason: upstream changed in sandbox
+---
+target: raw.source
+kind: table
+run_type: backfill
+rows_affected: 3
+run_reason: sql changed
+---
+target: staging.with_warning
+kind: table
+run_type: full
+rows_affected: 3
+run_reason: upstream changed in sandbox
+warning: amount > 0 failed: found 2 violations (example: -50)
+---
+staging_count: 3
+mart_total: 3

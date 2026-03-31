@@ -1,0 +1,13 @@
+target: raw.events
+kind: table
+run_type: backfill
+rows_affected: 4
+run_reason: sql changed
+---
+target: staging.inc_events
+kind: append
+run_type: full
+rows_affected: 4
+run_reason: upstream changed in sandbox
+---
+sandbox_count: 4

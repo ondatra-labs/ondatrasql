@@ -1,0 +1,6 @@
+target: staging.scd2_model
+kind: scd2
+run_type: backfill
+rows_affected: 3
+run_reason: first run
+current_rows: 3

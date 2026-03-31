@@ -1,0 +1,21 @@
+# query command reads model data in different formats
+exec ondatrasql init
+
+mkdir models/staging
+cp model.sql models/staging/qt.sql
+
+# Run the model to populate data
+exec ondatrasql run staging.qt
+
+# Query should show the data (default markdown format)
+exec ondatrasql query staging.qt
+stdout 'Alice'
+
+# CSV format
+exec ondatrasql query staging.qt --format csv
+stdout 'name'
+stdout 'Alice'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name

@@ -1,0 +1,25 @@
+# describe shows full model info box with statistics
+exec ondatrasql init
+
+mkdir models/staging
+cp model.sql models/staging/detail.sql
+
+# Run the model twice to generate history
+exec ondatrasql run staging.detail
+exec ondatrasql run staging.detail
+
+# Describe should show model box with details
+exec ondatrasql describe staging.detail
+stdout 'staging.detail'
+stdout 'Kind'
+stdout 'table'
+stdout 'Columns'
+stdout 'id'
+stdout 'name'
+stdout 'Commands'
+stdout 'edit'
+stdout 'lineage'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name, 42 AS age

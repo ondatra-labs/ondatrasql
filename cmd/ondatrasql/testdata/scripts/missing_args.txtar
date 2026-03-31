@@ -1,0 +1,17 @@
+# commands that require arguments fail without them
+exec ondatrasql init
+
+! exec ondatrasql lineage
+stderr 'usage'
+
+! exec ondatrasql describe
+stderr 'usage'
+
+! exec ondatrasql edit
+stderr 'usage'
+
+! exec ondatrasql new
+stderr 'usage'
+
+! exec ondatrasql sql
+stderr 'usage'

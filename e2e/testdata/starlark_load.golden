@@ -1,0 +1,10 @@
+target: staging.users
+kind: table
+run_type: backfill
+rows_affected: 3
+count: 3
+data:
+  id,name
+  1,user_1
+  2,user_2
+  3,user_3

@@ -1,0 +1,13 @@
+# edit with special targets finds config files
+# EDITOR=true just exits 0 without opening anything
+exec ondatrasql init
+env EDITOR=true
+
+# Edit special config targets
+exec ondatrasql edit catalog
+exec ondatrasql edit settings
+exec ondatrasql edit variables
+exec ondatrasql edit macros
+exec ondatrasql edit sources
+exec ondatrasql edit secrets
+exec ondatrasql edit extensions

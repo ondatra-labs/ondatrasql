@@ -1,0 +1,59 @@
+# sandbox with cross-schema references (upstream in raw, model in staging)
+exec ondatrasql init
+
+# Create source in raw schema
+mkdir models/raw
+cp source.sql models/raw/source.sql
+
+# Create downstream models in staging (all incremental kinds)
+mkdir models/staging
+cp append_model.sql models/staging/appended.sql
+cp merge_model.sql models/staging/merged.sql
+
+# Run source in prod
+exec ondatrasql run raw.source
+
+# Run append and merge in prod
+exec ondatrasql run staging.appended
+exec ondatrasql run staging.merged
+
+# Sandbox with no changes - incremental models should skip
+exec ondatrasql sandbox staging.appended
+stdout 'skip'
+
+exec ondatrasql sandbox staging.merged
+stdout 'skip'
+
+# Modify source and run in prod
+cp source_v2.sql models/raw/source.sql
+exec ondatrasql run raw.source
+
+# Now sandbox should detect upstream changes and show diff
+exec ondatrasql sandbox staging.appended
+stdout 'Diff vs Prod'
+stdout 'Added: 1 rows'
+stdout 'Dave'
+
+-- source.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+UNION ALL
+SELECT 2, 'Bob'
+UNION ALL
+SELECT 3, 'Charlie'
+-- source_v2.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+UNION ALL
+SELECT 2, 'Bob'
+UNION ALL
+SELECT 3, 'Charlie'
+UNION ALL
+SELECT 4, 'Dave'
+-- append_model.sql --
+-- @kind: append
+SELECT id, name FROM raw.source
+-- merge_model.sql --
+-- @kind: merge
+-- @unique_key: id
+SELECT id, name FROM raw.source

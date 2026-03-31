@@ -1,0 +1,10 @@
+target: staging.items
+kind: table
+run_type: backfill
+rows_affected: 3
+count: 3
+data:
+  id,name
+  1,product_1
+  2,product_2
+  3,product_3

@@ -1,0 +1,6 @@
+target: staging.merged
+kind: merge
+run_type: skip
+rows_affected: 0
+run_reason: no upstream changes
+prod_count: 1

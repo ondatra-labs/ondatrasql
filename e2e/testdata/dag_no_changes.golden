@@ -1,0 +1,42 @@
+target: mart.revenue
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: deps unchanged
+---
+target: raw.customers
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: no dependencies
+---
+target: raw.orders
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: no dependencies
+---
+target: staging.by_country
+kind: partition
+run_type: skip
+rows_affected: 0
+run_reason: no upstream changes
+---
+target: staging.enriched
+kind: append
+run_type: skip
+rows_affected: 0
+run_reason: no upstream changes
+---
+target: staging.history
+kind: scd2
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+---
+target: staging.latest
+kind: merge
+run_type: skip
+rows_affected: 0
+run_reason: no upstream changes
+---

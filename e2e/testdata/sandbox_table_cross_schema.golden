@@ -1,0 +1,6 @@
+target: staging.derived
+kind: table
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+count: 2

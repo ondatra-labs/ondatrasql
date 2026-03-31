@@ -1,0 +1,24 @@
+# sandbox DAG where all models skip (no changes) — summary should count them
+exec ondatrasql init
+
+mkdir models/raw
+mkdir models/staging
+cp source.sql models/raw/source.sql
+cp downstream.sql models/staging/ds.sql
+
+# Run both in prod
+exec ondatrasql run raw.source
+exec ondatrasql run staging.ds
+
+# DAG sandbox with no changes — all models should skip
+exec ondatrasql sandbox
+stdout 'SANDBOX DAG RUN'
+stdout 'Unchanged: 2 models'
+stdout 'Changed:   0 models'
+
+-- source.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+-- downstream.sql --
+-- @kind: table
+SELECT * FROM raw.source

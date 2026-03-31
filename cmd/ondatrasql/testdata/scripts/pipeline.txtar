@@ -1,0 +1,26 @@
+# Full pipeline: init, create model, run, query
+exec ondatrasql init
+stdout 'Initialized'
+
+# Create a model
+mkdir models/staging
+cp model.sql models/staging/users.sql
+
+# Run the model
+exec ondatrasql run staging.users
+
+# Query the result
+exec ondatrasql sql 'SELECT * FROM staging.users'
+stdout 'Alice'
+
+# Stats should show the model
+exec ondatrasql stats
+stdout 'users'
+
+# Describe should show model details
+exec ondatrasql describe staging.users
+stdout 'staging.users'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name

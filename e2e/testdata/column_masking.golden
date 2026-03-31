@@ -1,0 +1,9 @@
+target: staging.customers
+kind: merge
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+data:
+  id,name,email,ssn
+  1,Alice,a***@example.com,***-**-6789
+  2,Bob,b***@example.com,***-**-4321
