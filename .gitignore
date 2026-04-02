@@ -15,6 +15,9 @@ coverage*.out
 cmd_cov.out
 *_test.out
 
+# Docs (internal)
+docs/
+
 # Runtime
 .sandbox/
 .ondatra/
