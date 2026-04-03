@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -2710,7 +2710,7 @@ func TestXMLEncodeWrongArgs(t *testing.T) {
 func TestOAuthBasicAuthWrongArgs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	mod := oauthModule(ctx)
+	mod := oauthModule(ctx, "")
 	fn := mod.Members["basic_auth"].(*starlark.Builtin)
 	thread := &starlark.Thread{Name: "test"}
 	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)

@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -92,7 +92,7 @@ func (r *Runtime) libraryPredeclared(ctx context.Context) starlark.StringDict {
 		"crypto":      cryptoModule(),
 		"xml":         xmlModule(),
 		"csv":         csvModule(),
-		"oauth":       oauthModule(ctx),
+		"oauth":       oauthModule(ctx, r.projectDir),
 		"time":        starlarktime.Module,
 		"math":        starlarkmath.Module,
 		"json":        starlarkjson.Module,

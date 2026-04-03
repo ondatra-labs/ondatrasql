@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 

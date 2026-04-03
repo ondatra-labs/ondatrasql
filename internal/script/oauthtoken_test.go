@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -148,7 +149,7 @@ func TestTokenProviderStarlarkAttr(t *testing.T) {
 
 func TestNewTokenProviderValidation(t *testing.T) {
 	// Missing required fields for client_credentials
-	_, err := newTokenProvider(context.Background(), nil)
+	_, err := newTokenProvider(context.Background(), "", nil)
 	if err == nil {
 		t.Fatal("expected error for missing fields")
 	}
@@ -193,7 +194,7 @@ func TestNewTokenProvider_GoogleServiceAccount(t *testing.T) {
 		{starlark.String("scope"), starlark.String("https://www.googleapis.com/auth/cloud-platform")},
 	}
 
-	tp, err := newTokenProvider(context.Background(), kwargs)
+	tp, err := newTokenProvider(context.Background(), "", kwargs)
 	if err != nil {
 		t.Fatalf("newTokenProvider: %v", err)
 	}
@@ -210,7 +211,7 @@ func TestNewTokenProvider_ClientCredentials(t *testing.T) {
 		{starlark.String("scope"), starlark.String("read write")},
 	}
 
-	tp, err := newTokenProvider(context.Background(), kwargs)
+	tp, err := newTokenProvider(context.Background(), "", kwargs)
 	if err != nil {
 		t.Fatalf("newTokenProvider: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestNewTokenProvider_GoogleKeyFile(t *testing.T) {
 	kwargs := []starlark.Tuple{
 		{starlark.String("google_key_file"), starlark.String(tmpFile)},
 	}
-	tp, err := newTokenProvider(context.Background(), kwargs)
+	tp, err := newTokenProvider(context.Background(), "", kwargs)
 	if err != nil {
 		t.Fatalf("newTokenProvider: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestNewTokenProvider_GoogleKeyFile_NotFound(t *testing.T) {
 	kwargs := []starlark.Tuple{
 		{starlark.String("google_key_file"), starlark.String("/nonexistent/file.json")},
 	}
-	_, err := newTokenProvider(context.Background(), kwargs)
+	_, err := newTokenProvider(context.Background(), "", kwargs)
 	if err == nil {
 		t.Fatal("expected error for missing key file")
 	}
@@ -256,7 +257,7 @@ func TestNewTokenProvider_InvalidJSON(t *testing.T) {
 	kwargs := []starlark.Tuple{
 		{starlark.String("google_service_account"), starlark.String("{invalid json")},
 	}
-	_, err := newTokenProvider(context.Background(), kwargs)
+	_, err := newTokenProvider(context.Background(), "", kwargs)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -267,7 +268,7 @@ func TestNewTokenProvider_PartialClientCredentials(t *testing.T) {
 	kwargs := []starlark.Tuple{
 		{starlark.String("token_url"), starlark.String("https://example.com/token")},
 	}
-	_, err := newTokenProvider(context.Background(), kwargs)
+	_, err := newTokenProvider(context.Background(), "", kwargs)
 	if err == nil {
 		t.Fatal("expected error for partial client credentials")
 	}
@@ -330,6 +331,128 @@ func TestTokenProviderFreeze(t *testing.T) {
 	tp := &tokenProvider{}
 	// Freeze should not panic
 	tp.Freeze()
+}
+
+func TestNewTokenProvider_Provider(t *testing.T) {
+	t.Parallel()
+	kwargs := []starlark.Tuple{
+		{starlark.String("provider"), starlark.String("fortnox")},
+	}
+	tp, err := newTokenProvider(context.Background(), "/tmp/test-project", kwargs)
+	if err != nil {
+		t.Fatalf("newTokenProvider: %v", err)
+	}
+	if tp.provider != "fortnox" {
+		t.Errorf("provider = %q, want fortnox", tp.provider)
+	}
+	if tp.projectDir != "/tmp/test-project" {
+		t.Errorf("projectDir = %q, want /tmp/test-project", tp.projectDir)
+	}
+}
+
+func TestNewTokenProvider_ProviderNoProjectDir(t *testing.T) {
+	t.Parallel()
+	kwargs := []starlark.Tuple{
+		{starlark.String("provider"), starlark.String("fortnox")},
+	}
+	_, err := newTokenProvider(context.Background(), "", kwargs)
+	if err == nil {
+		t.Fatal("expected error for provider without project dir")
+	}
+}
+
+func TestNewTokenProvider_ProviderInvalid(t *testing.T) {
+	t.Parallel()
+	kwargs := []starlark.Tuple{
+		{starlark.String("provider"), starlark.String("../evil")},
+	}
+	_, err := newTokenProvider(context.Background(), "/tmp/test", kwargs)
+	if err == nil {
+		t.Fatal("expected error for invalid provider name")
+	}
+}
+
+func TestFetchProviderToken(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "AT_provider",
+			"refresh_token": "RT_new",
+			"expires_in":    3600,
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	// Write initial token
+	tokDir := filepath.Join(dir, ".ondatra", "tokens")
+	os.MkdirAll(tokDir, 0700)
+	os.WriteFile(filepath.Join(tokDir, "test-provider.json"),
+		[]byte(`{"provider":"test-provider","refresh_token":"RT_old","updated_at":1}`), 0600)
+
+	t.Setenv("ONDATRA_KEY", "osk_test")
+	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
+
+	tp := &tokenProvider{
+		ctx:        context.Background(),
+		provider:   "test-provider",
+		projectDir: dir,
+	}
+
+	tok, err := tp.AccessToken()
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok != "AT_provider" {
+		t.Errorf("access_token = %q, want AT_provider", tok)
+	}
+
+	// Verify new refresh token was saved
+	data, _ := os.ReadFile(filepath.Join(tokDir, "test-provider.json"))
+	if !strings.Contains(string(data), "RT_new") {
+		t.Errorf("expected new refresh token in file, got: %s", data)
+	}
+}
+
+func TestFetchProviderToken_NoTokenFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	t.Setenv("ONDATRA_KEY", "osk_test")
+
+	tp := &tokenProvider{
+		ctx:        context.Background(),
+		provider:   "fortnox",
+		projectDir: dir,
+	}
+
+	_, err := tp.AccessToken()
+	if err == nil {
+		t.Fatal("expected error for missing token file")
+	}
+}
+
+func TestFetchProviderToken_NoKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tokDir := filepath.Join(dir, ".ondatra", "tokens")
+	os.MkdirAll(tokDir, 0700)
+	os.WriteFile(filepath.Join(tokDir, "fortnox.json"),
+		[]byte(`{"provider":"fortnox","refresh_token":"RT_x","updated_at":1}`), 0600)
+
+	t.Setenv("ONDATRA_KEY", "")
+
+	tp := &tokenProvider{
+		ctx:        context.Background(),
+		provider:   "fortnox",
+		projectDir: dir,
+	}
+
+	_, err := tp.AccessToken()
+	if err == nil {
+		t.Fatal("expected error for missing ONDATRA_KEY")
+	}
 }
 
 func TestFetchGoogleToken(t *testing.T) {

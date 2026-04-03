@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 	"go.starlark.net/starlark"
 )
 
@@ -30,6 +31,10 @@ type tokenProvider struct {
 
 	// Config for Google service account flow
 	googleSAKey *ServiceAccountKey
+
+	// Config for provider flow (via oauth2.ondatra.sh)
+	provider   string
+	projectDir string
 
 	// Cached token state
 	accessToken string
@@ -97,10 +102,48 @@ func (tp *tokenProvider) AccessToken() (string, error) {
 }
 
 func (tp *tokenProvider) fetchToken() (map[string]interface{}, error) {
+	if tp.provider != "" {
+		return tp.fetchProviderToken()
+	}
 	if tp.googleSAKey != nil {
 		return tp.fetchGoogleToken()
 	}
 	return tp.fetchClientCredentials()
+}
+
+func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
+	tokenFile, err := oauth2host.ReadToken(tp.projectDir, tp.provider)
+	if err != nil {
+		return nil, err
+	}
+
+	licenseKey := os.Getenv("ONDATRA_KEY")
+	if licenseKey == "" {
+		return nil, fmt.Errorf("ONDATRA_KEY not set in .env")
+	}
+
+	host := oauth2host.Host()
+	result, err := oauth2host.Refresh(tp.ctx, host, tp.provider, tokenFile.RefreshToken, licenseKey)
+	if err != nil {
+		return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
+	}
+
+	// Save new refresh token — fail if write fails, otherwise next refresh will use stale token
+	if result.RefreshToken != "" {
+		if err := oauth2host.WriteToken(tp.projectDir, tp.provider, result.RefreshToken); err != nil {
+			return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
+		}
+	}
+
+	expiresIn := float64(3600)
+	if result.ExpiresIn > 0 {
+		expiresIn = float64(result.ExpiresIn)
+	}
+
+	return map[string]interface{}{
+		"access_token": result.AccessToken,
+		"expires_in":   expiresIn,
+	}, nil
 }
 
 func (tp *tokenProvider) fetchClientCredentials() (map[string]interface{}, error) {
@@ -123,11 +166,13 @@ func (tp *tokenProvider) fetchGoogleToken() (map[string]interface{}, error) {
 }
 
 // newTokenProvider creates a managed token from Starlark kwargs.
-func newTokenProvider(ctx context.Context, kwargs []starlark.Tuple) (*tokenProvider, error) {
+func newTokenProvider(ctx context.Context, projectDir string, kwargs []starlark.Tuple) (*tokenProvider, error) {
+	var providerName string
 	var tokenURL, clientID, clientSecret, scope string
 	var googleServiceAccount, googleKeyFile string
 
 	if err := starlark.UnpackArgs("oauth.token", nil, kwargs,
+		"provider?", &providerName,
 		"token_url?", &tokenURL,
 		"client_id?", &clientID,
 		"client_secret?", &clientSecret,
@@ -136,6 +181,21 @@ func newTokenProvider(ctx context.Context, kwargs []starlark.Tuple) (*tokenProvi
 		"google_key_file?", &googleKeyFile,
 	); err != nil {
 		return nil, err
+	}
+
+	// Provider flow (via oauth2.ondatra.sh)
+	if providerName != "" {
+		if err := oauth2host.ValidateProvider(providerName); err != nil {
+			return nil, fmt.Errorf("oauth.token: %w", err)
+		}
+		if projectDir == "" {
+			return nil, fmt.Errorf("oauth.token: provider flow requires a project directory")
+		}
+		return &tokenProvider{
+			ctx:        ctx,
+			provider:   providerName,
+			projectDir: projectDir,
+		}, nil
 	}
 
 	tp := &tokenProvider{

@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -55,6 +55,10 @@ func run(args []string) error {
 	case "version":
 		fmt.Println(version)
 		return nil
+	case "auth":
+		if len(args) < 2 {
+			return runAuthList(context.Background())
+		}
 	}
 
 	// Find project root
@@ -142,6 +146,12 @@ func run(args []string) error {
 	case "daemon":
 		return runDaemon(ctx, cfg)
 
+	case "auth":
+		if len(args) < 2 {
+			return runAuthList(ctx)
+		}
+		return runAuth(ctx, cfg, args[1])
+
 	default:
 		// Reject path traversal in command name
 		if strings.Contains(cmd, "/") || strings.Contains(cmd, "\\") || strings.Contains(cmd, "..") {
@@ -192,6 +202,10 @@ Development:
         settings          config/settings.sql
         catalog           config/catalog.sql
         extensions        config/extensions.sql
+
+Auth:
+  auth                    List available OAuth2 providers
+  auth <provider>         Authenticate with an OAuth2 provider
 
 SQL Commands (from sql/ folder):
   merge [sandbox]         Merge small files (ducklake_merge_adjacent_files)

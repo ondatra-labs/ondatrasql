@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -8,16 +8,21 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/collect"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
+	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
@@ -2850,4 +2855,248 @@ SELECT COUNT(*) AS total, SUM(score) AS total_score FROM staging.scores
 	snap.addDAGResults(results)
 	snap.addQuery(p.Sess, "total_score", "SELECT total_score FROM mart.summary")
 	assertGolden(t, "yaml_model_in_dag", snap)
+}
+
+func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("skipping: cannot bind IPv4 loopback: %v", err)
+	}
+	srv := &httptest.Server{
+		Listener: l,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
+
+// TestE2E_OAuthProviderFlow tests the OAuth2 provider flow at the package level:
+// oauth2host (register, poll, refresh, token storage) and oauth.token("provider") in Starlark.
+// This does NOT test the CLI command (runAuth, runAuthList, browser opening, auth URL building)
+// — those are covered by unit tests in cmd/ondatrasql/auth_cmd_test.go.
+func TestE2E_OAuthProviderFlow(t *testing.T) {
+	// --- Mock OAuth2 provider (e.g. Fortnox) ---
+	provider := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		r.ParseForm()
+		grantType := r.FormValue("grant_type")
+		switch grantType {
+		case "authorization_code":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "AT_initial",
+				"refresh_token": "RT_from_provider",
+				"expires_in":    3600,
+			})
+		case "refresh_token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "AT_refreshed",
+				"refresh_token": "RT_rotated",
+				"expires_in":    3600,
+			})
+		default:
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unsupported_grant_type"})
+		}
+	}))
+	defer provider.Close()
+
+	// --- Mock edge script (oauth2.ondatra.sh) ---
+	var mu sync.Mutex
+	pendingStates := map[string]string{}         // state → provider
+	completedTokens := map[string]string{}       // state → refresh_token
+
+	edge := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		// GET /providers/<name>.json
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/providers/"):
+			json.NewEncoder(w).Encode(map[string]string{
+				"name":         "mock-provider",
+				"auth_url":     provider.URL + "/authorize",
+				"token_url":    provider.URL + "/token",
+				"client_id":    "test-client-id",
+				"scope":        "read",
+				"redirect_uri": "http://localhost/callback",
+			})
+
+		// POST /oauth/register
+		case r.Method == "POST" && r.URL.Path == "/oauth/register":
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["license_key"] != "osk_e2e_test" {
+				w.WriteHeader(403)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid key"})
+				return
+			}
+			mu.Lock()
+			pendingStates[body["state"]] = body["provider"]
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+
+		// GET /oauth/callback — simulated provider redirect
+		case r.Method == "GET" && r.URL.Path == "/oauth/callback":
+			code := r.URL.Query().Get("code")
+			state := r.URL.Query().Get("state")
+			if code == "" || state == "" {
+				w.WriteHeader(400)
+				return
+			}
+			mu.Lock()
+			prov, ok := pendingStates[state]
+			if !ok {
+				mu.Unlock()
+				w.WriteHeader(400)
+				return
+			}
+			delete(pendingStates, state)
+			mu.Unlock()
+			// Exchange code at provider
+			_ = prov // would use to look up provider config
+			// Simulate token exchange
+			completedTokens[state] = "RT_from_provider"
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<h1>Done</h1>")
+
+		// GET /oauth/poll/<state>
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/oauth/poll/"):
+			state := strings.TrimPrefix(r.URL.Path, "/oauth/poll/")
+			mu.Lock()
+			rt, ok := completedTokens[state]
+			if ok {
+				delete(completedTokens, state)
+			}
+			mu.Unlock()
+			if !ok {
+				w.WriteHeader(404)
+				json.NewEncoder(w).Encode(map[string]string{"status": "pending"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{
+				"provider":      "mock-provider",
+				"refresh_token": rt,
+			})
+
+		// POST /oauth/refresh
+		case r.Method == "POST" && r.URL.Path == "/oauth/refresh":
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["license_key"] != "osk_e2e_test" {
+				w.WriteHeader(403)
+				return
+			}
+			// Call the real mock provider's token endpoint
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "AT_refreshed",
+				"refresh_token": "RT_rotated",
+				"expires_in":    3600,
+			})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer edge.Close()
+
+	// --- Setup project ---
+	p := testutil.NewProject(t)
+	t.Setenv("ONDATRA_KEY", "osk_e2e_test")
+	t.Setenv("ONDATRA_OAUTH_HOST", edge.URL)
+
+	// --- Step 1: Register auth request ---
+	ctx := context.Background()
+	state := "e2e_test_state_0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+
+	err := oauth2host.Register(ctx, edge.URL, "mock-provider", state, "osk_e2e_test")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// --- Step 2: Simulate browser callback ---
+	callbackURL := edge.URL + "/oauth/callback?code=AUTH_CODE&state=" + state
+	resp, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("Callback: %v", err)
+	}
+	resp.Body.Close()
+
+	// --- Step 3: Poll for token ---
+	result, err := oauth2host.Poll(ctx, edge.URL, state)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if result.Provider != "mock-provider" {
+		t.Errorf("provider = %q, want mock-provider", result.Provider)
+	}
+	if result.RefreshToken != "RT_from_provider" {
+		t.Errorf("refresh_token = %q, want RT_from_provider", result.RefreshToken)
+	}
+
+	// --- Step 4: Save token ---
+	err = oauth2host.WriteToken(p.Dir, "mock-provider", result.RefreshToken)
+	if err != nil {
+		t.Fatalf("WriteToken: %v", err)
+	}
+
+	// --- Step 5: Verify token file ---
+	tf, err := oauth2host.ReadToken(p.Dir, "mock-provider")
+	if err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	if tf.RefreshToken != "RT_from_provider" {
+		t.Errorf("stored refresh_token = %q, want RT_from_provider", tf.RefreshToken)
+	}
+
+	// --- Step 6: Refresh via edge script ---
+	refreshResult, err := oauth2host.Refresh(ctx, edge.URL, "mock-provider", tf.RefreshToken, "osk_e2e_test")
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if refreshResult.AccessToken != "AT_refreshed" {
+		t.Errorf("access_token = %q, want AT_refreshed", refreshResult.AccessToken)
+	}
+	if refreshResult.RefreshToken != "RT_rotated" {
+		t.Errorf("new refresh_token = %q, want RT_rotated", refreshResult.RefreshToken)
+	}
+
+	// --- Step 7: Save rotated token ---
+	err = oauth2host.WriteToken(p.Dir, "mock-provider", refreshResult.RefreshToken)
+	if err != nil {
+		t.Fatalf("WriteToken rotated: %v", err)
+	}
+	tf2, _ := oauth2host.ReadToken(p.Dir, "mock-provider")
+	if tf2.RefreshToken != "RT_rotated" {
+		t.Errorf("rotated refresh_token = %q, want RT_rotated", tf2.RefreshToken)
+	}
+
+	// --- Step 8: Use oauth.token("mock-provider") in Starlark ---
+	libDir := filepath.Join(p.Dir, "lib")
+	os.MkdirAll(libDir, 0755)
+	os.WriteFile(filepath.Join(libDir, "api.star"), []byte(`
+def api_fetch(save):
+    token = oauth.token(provider="mock-provider")
+    save.row({"access_token": token.access_token})
+`), 0644)
+	p.AddModel("raw/oauth_test.star", `# @kind: table
+load("lib/api.star", "api_fetch")
+api_fetch(save)
+`)
+
+	runResult := runModel(t, p, "raw/oauth_test.star")
+	if runResult.RowsAffected != 1 {
+		t.Errorf("rows = %d, want 1", runResult.RowsAffected)
+	}
+
+	// Verify the access token was fetched via the provider flow
+	tok, err := p.Sess.QueryValue("SELECT access_token FROM raw.oauth_test")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if tok != "AT_refreshed" {
+		t.Errorf("access_token in table = %q, want AT_refreshed", tok)
+	}
 }

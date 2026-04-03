@@ -1,4 +1,4 @@
-// OndatraSQL - A data pipeline framework for DuckDB + DuckLake
+// OndatraSQL - You don't need a data stack anymore
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -12,13 +12,13 @@ import (
 )
 
 // oauthModule provides OAuth 2.0 helpers with kwargs.
-func oauthModule(ctx context.Context) *starlarkstruct.Module {
+func oauthModule(ctx context.Context, projectDir string) *starlarkstruct.Module {
 	return &starlarkstruct.Module{
 		Name: "oauth",
 		Members: starlark.StringDict{
-			// token(token_url?, client_id?, client_secret?, scope?, google_service_account?, google_key_file?) -> managed token
+			// token(provider?, token_url?, client_id?, client_secret?, scope?, google_service_account?, google_key_file?) -> managed token
 			"token": starlark.NewBuiltin("oauth.token", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-				return newTokenProvider(ctx, kwargs)
+				return newTokenProvider(ctx, projectDir, kwargs)
 			}),
 
 			// basic_auth(username, password) -> "Basic base64..."
