@@ -125,11 +125,16 @@ type PollResult struct {
 }
 
 // Poll checks if the refresh token is available.
-func Poll(ctx context.Context, host, state string) (*PollResult, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", host+"/oauth/poll/"+state, nil)
+func Poll(ctx context.Context, host, state, licenseKey string) (*PollResult, error) {
+	body, _ := json.Marshal(map[string]string{
+		"state":       state,
+		"license_key": licenseKey,
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", host+"/oauth/poll", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("poll: %w", err)
@@ -137,6 +142,9 @@ func Poll(ctx context.Context, host, state string) (*PollResult, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
 		return nil, ErrPending
+	}
+	if resp.StatusCode == 403 {
+		return nil, fmt.Errorf("license key mismatch")
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("poll: HTTP %d", resp.StatusCode)

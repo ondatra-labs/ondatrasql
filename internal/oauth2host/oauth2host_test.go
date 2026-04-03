@@ -101,7 +101,7 @@ func TestPoll_Pending(t *testing.T) {
 	srv := newTestServer(t, http.NotFoundHandler())
 	defer srv.Close()
 
-	_, err := Poll(context.Background(), srv.URL, "abc123")
+	_, err := Poll(context.Background(), srv.URL, "abc123", "test-key")
 	if err != ErrPending {
 		t.Fatalf("expected ErrPending, got %v", err)
 	}
@@ -117,7 +117,7 @@ func TestPoll_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := Poll(context.Background(), srv.URL, "abc123")
+	result, err := Poll(context.Background(), srv.URL, "abc123", "test-key")
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}

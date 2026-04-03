@@ -53,7 +53,7 @@ func TestRunAuth_Success(t *testing.T) {
 			})
 		case r.Method == "POST" && r.URL.Path == "/oauth/register":
 			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-		case r.Method == "GET" && r.URL.Path[:12] == "/oauth/poll/":
+		case r.Method == "POST" && r.URL.Path == "/oauth/poll":
 			if pollCount.Add(1) < 2 {
 				w.WriteHeader(404)
 				return
@@ -128,7 +128,7 @@ func TestRunAuth_ProviderMismatch(t *testing.T) {
 			})
 		case r.Method == "POST" && r.URL.Path == "/oauth/register":
 			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-		case r.Method == "GET" && r.URL.Path[:12] == "/oauth/poll/":
+		case r.Method == "POST" && r.URL.Path == "/oauth/poll":
 			// Return wrong provider
 			json.NewEncoder(w).Encode(map[string]string{
 				"provider":      "wrong-provider",
@@ -164,7 +164,7 @@ func TestRunAuth_Timeout(t *testing.T) {
 			})
 		case r.Method == "POST" && r.URL.Path == "/oauth/register":
 			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-		case r.Method == "GET" && r.URL.Path[:12] == "/oauth/poll/":
+		case r.Method == "POST" && r.URL.Path == "/oauth/poll":
 			w.WriteHeader(404) // Always pending
 		default:
 			http.NotFound(w, r)

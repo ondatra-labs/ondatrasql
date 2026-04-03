@@ -108,7 +108,7 @@ func runAuth(ctx context.Context, cfg *config.Config, provider string) error {
 		case <-deadline:
 			return fmt.Errorf("authentication timed out after 5 minutes")
 		case <-ticker.C:
-			result, err := oauth2host.Poll(ctx, host, state)
+			result, err := oauth2host.Poll(ctx, host, state, licenseKey)
 			if err != nil {
 				if errors.Is(err, oauth2host.ErrPending) {
 					continue

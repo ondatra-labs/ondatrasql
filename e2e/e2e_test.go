@@ -3025,7 +3025,7 @@ func TestE2E_OAuthProviderFlow(t *testing.T) {
 	resp.Body.Close()
 
 	// --- Step 3: Poll for token ---
-	result, err := oauth2host.Poll(ctx, edge.URL, state)
+	result, err := oauth2host.Poll(ctx, edge.URL, state, "osk_e2e_test")
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
