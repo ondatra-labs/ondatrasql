@@ -62,7 +62,7 @@ func FuzzLoadEnvFile(f *testing.F) {
 		path := filepath.Join(dir, ".env")
 		os.WriteFile(path, []byte(content), 0o644)
 
-		err := loadEnvFile(path)
+		err := LoadEnvFile(path)
 		// Property: empty or comment-only content should never error
 		if err != nil {
 			allBlank := true
@@ -74,7 +74,7 @@ func FuzzLoadEnvFile(f *testing.F) {
 				}
 			}
 			if allBlank {
-				t.Errorf("loadEnvFile should not error on blank/comment content: %v", err)
+				t.Errorf("LoadEnvFile should not error on blank/comment content: %v", err)
 			}
 		}
 	})

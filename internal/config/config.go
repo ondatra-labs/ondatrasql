@@ -53,7 +53,7 @@ type Config struct {
 func Load(projectDir string) (*Config, error) {
 	// Load .env file first (sets environment variables)
 	envFile := filepath.Join(projectDir, ".env")
-	if err := loadEnvFile(envFile); err != nil && !os.IsNotExist(err) {
+	if err := LoadEnvFile(envFile); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 
@@ -71,8 +71,8 @@ func Load(projectDir string) (*Config, error) {
 	return cfg, nil
 }
 
-// loadEnvFile reads a .env file and sets environment variables.
-func loadEnvFile(path string) error {
+// LoadEnvFile reads a .env file and sets environment variables.
+func LoadEnvFile(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err

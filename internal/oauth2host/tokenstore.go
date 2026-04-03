@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -17,6 +18,8 @@ import (
 type TokenFile struct {
 	Provider     string `json:"provider"`
 	RefreshToken string `json:"refresh_token"`
+	Local        bool   `json:"local,omitempty"`
+	TokenURL     string `json:"token_url,omitempty"`
 	UpdatedAt    int64  `json:"updated_at"`
 }
 
@@ -78,4 +81,35 @@ func WriteToken(projectDir, provider, refreshToken string) error {
 	}
 	path := filepath.Join(dir, provider+".json")
 	return os.WriteFile(path, data, 0600)
+}
+
+// WriteLocalToken writes a refresh token for a locally-managed provider.
+func WriteLocalToken(projectDir, provider, refreshToken, tokenURL string) error {
+	if err := ValidateProvider(provider); err != nil {
+		return err
+	}
+	dir := TokensDir(projectDir)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create tokens dir: %w", err)
+	}
+	tf := TokenFile{
+		Provider:     provider,
+		RefreshToken: refreshToken,
+		Local:        true,
+		TokenURL:     tokenURL,
+		UpdatedAt:    time.Now().Unix(),
+	}
+	data, err := json.Marshal(tf)
+	if err != nil {
+		return fmt.Errorf("marshal token: %w", err)
+	}
+	path := filepath.Join(dir, provider+".json")
+	return os.WriteFile(path, data, 0600)
+}
+
+// ProviderEnvPrefix returns the env variable prefix for a provider name.
+// e.g. "google-sheets" → "GOOGLE_SHEETS"
+func ProviderEnvPrefix(provider string) string {
+	s := strings.ToUpper(provider)
+	return strings.ReplaceAll(s, "-", "_")
 }

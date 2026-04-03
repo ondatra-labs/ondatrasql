@@ -34,8 +34,8 @@ PROD_DATA_PATH='/data/prod'
 	os.Unsetenv("PROD_DATA_PATH")
 
 	// Load
-	if err := loadEnvFile(envFile); err != nil {
-		t.Fatalf("loadEnvFile failed: %v", err)
+	if err := LoadEnvFile(envFile); err != nil {
+		t.Fatalf("LoadEnvFile failed: %v", err)
 	}
 
 	tests := []struct {

@@ -12,10 +12,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 )
 
 // newTestServer creates an httptest server bound to IPv4 localhost
@@ -226,6 +228,7 @@ func TestRunAuthList_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv("ONDATRA_KEY", "osk_testkey")
 	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
 
 	err := runAuthList(context.Background())
@@ -240,6 +243,7 @@ func TestRunAuthList_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv("ONDATRA_KEY", "osk_testkey")
 	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
 
 	err := runAuthList(context.Background())
@@ -254,10 +258,143 @@ func TestRunAuthList_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv("ONDATRA_KEY", "osk_testkey")
 	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
 
 	err := runAuthList(context.Background())
 	if err == nil {
 		t.Fatal("expected error for server error")
+	}
+}
+
+func TestRunAuthList_Local(t *testing.T) {
+	t.Setenv("ONDATRA_KEY", "")
+	t.Setenv("MYAPI_CLIENT_ID", "id")
+	t.Setenv("MYAPI_CLIENT_SECRET", "secret")
+	t.Setenv("MYAPI_AUTH_URL", "https://example.com/auth")
+	t.Setenv("MYAPI_TOKEN_URL", "https://example.com/token")
+	t.Setenv("MYAPI_SCOPE", "read")
+
+	err := runAuthList(context.Background())
+	if err != nil {
+		t.Fatalf("runAuthList local: %v", err)
+	}
+}
+
+func TestRunAuthList_LocalEmpty(t *testing.T) {
+	t.Setenv("ONDATRA_KEY", "")
+
+	err := runAuthList(context.Background())
+	if err != nil {
+		t.Fatalf("runAuthList local empty: %v", err)
+	}
+}
+
+func TestRunAuthLocal_MissingEnv(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "config"), 0755)
+
+	t.Setenv("ONDATRA_KEY", "")
+	t.Setenv("FORTNOX_CLIENT_ID", "")
+	t.Setenv("FORTNOX_CLIENT_SECRET", "")
+	t.Setenv("FORTNOX_AUTH_URL", "")
+	t.Setenv("FORTNOX_TOKEN_URL", "")
+
+	cfg := &config.Config{ProjectDir: dir}
+	err := runAuthLocal(context.Background(), cfg, "fortnox")
+	if err == nil {
+		t.Fatal("expected error for missing env variables")
+	}
+}
+
+// TestRunAuthLocal_Success tests the local auth flow by directly testing the components:
+// ExchangeCode + WriteLocalToken. The full localhost callback flow with browser
+// is tested manually and in e2e.
+func TestRunAuthLocal_Success(t *testing.T) {
+	dir := t.TempDir()
+
+	// Mock token endpoint
+	tokenSrv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if r.FormValue("grant_type") != "authorization_code" {
+			t.Errorf("grant_type = %q", r.FormValue("grant_type"))
+		}
+		if r.FormValue("code") != "TEST_CODE" {
+			t.Errorf("code = %q", r.FormValue("code"))
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "AT_local",
+			"refresh_token": "RT_local",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	// Exchange code directly
+	result, err := oauth2host.ExchangeCode(context.Background(), tokenSrv.URL, "cid", "csecret", "TEST_CODE", "http://127.0.0.1:8888/callback")
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if result.RefreshToken != "RT_local" {
+		t.Errorf("refresh_token = %q", result.RefreshToken)
+	}
+
+	// Save as local token
+	err = oauth2host.WriteLocalToken(dir, "testlocal", result.RefreshToken, tokenSrv.URL)
+	if err != nil {
+		t.Fatalf("WriteLocalToken: %v", err)
+	}
+
+	// Verify
+	tf, err := oauth2host.ReadToken(dir, "testlocal")
+	if err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	if !tf.Local {
+		t.Error("expected Local = true")
+	}
+	if tf.RefreshToken != "RT_local" {
+		t.Errorf("refresh_token = %q", tf.RefreshToken)
+	}
+}
+
+func TestRunAuth_DispatchLocal(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "config"), 0755)
+
+	t.Setenv("ONDATRA_KEY", "")
+	t.Setenv("FORTNOX_CLIENT_ID", "")
+
+	cfg := &config.Config{ProjectDir: dir}
+	err := runAuth(context.Background(), cfg, "fortnox")
+	if err == nil {
+		t.Fatal("expected error (missing env)")
+	}
+	// Verify it went local path (error mentions .env variables, not ONDATRA_KEY)
+	if !strings.Contains(err.Error(), "FORTNOX_CLIENT_ID") {
+		t.Errorf("expected local path error, got: %v", err)
+	}
+}
+
+func TestRunAuth_DispatchManaged(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "config"), 0755)
+
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	t.Setenv("ONDATRA_KEY", "osk_testkey")
+	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
+
+	cfg := &config.Config{ProjectDir: dir}
+	err := runAuth(context.Background(), cfg, "fortnox")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// Verify it went managed path (error mentions provider, not .env variables)
+	if strings.Contains(err.Error(), "FORTNOX_CLIENT_ID") {
+		t.Errorf("expected managed path error, got: %v", err)
 	}
 }

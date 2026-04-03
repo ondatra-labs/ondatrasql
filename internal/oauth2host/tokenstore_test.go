@@ -107,3 +107,74 @@ func TestWriteToken_Overwrite(t *testing.T) {
 		t.Errorf("refresh_token = %q, want new_token", tf.RefreshToken)
 	}
 }
+
+func TestWriteAndReadLocalToken(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	err := WriteLocalToken(dir, "fortnox", "RT_local", "https://apps.fortnox.se/oauth-v1/token")
+	if err != nil {
+		t.Fatalf("WriteLocalToken: %v", err)
+	}
+
+	tf, err := ReadToken(dir, "fortnox")
+	if err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	if !tf.Local {
+		t.Error("expected Local = true")
+	}
+	if tf.TokenURL != "https://apps.fortnox.se/oauth-v1/token" {
+		t.Errorf("token_url = %q", tf.TokenURL)
+	}
+	if tf.RefreshToken != "RT_local" {
+		t.Errorf("refresh_token = %q, want RT_local", tf.RefreshToken)
+	}
+}
+
+func TestProviderEnvPrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{"fortnox", "FORTNOX"},
+		{"google-sheets", "GOOGLE_SHEETS"},
+		{"hub-spot", "HUB_SPOT"},
+	}
+	for _, tt := range tests {
+		got := ProviderEnvPrefix(tt.provider)
+		if got != tt.want {
+			t.Errorf("ProviderEnvPrefix(%q) = %q, want %q", tt.provider, got, tt.want)
+		}
+	}
+}
+
+func TestListLocalProviders(t *testing.T) {
+	t.Setenv("TESTPROV_CLIENT_ID", "id")
+	t.Setenv("TESTPROV_CLIENT_SECRET", "secret")
+	t.Setenv("TESTPROV_AUTH_URL", "https://example.com/auth")
+	t.Setenv("TESTPROV_TOKEN_URL", "https://example.com/token")
+	t.Setenv("TESTPROV_SCOPE", "read")
+	t.Setenv("NOPAIR_CLIENT_ID", "id") // missing everything else
+	t.Setenv("PARTIAL_CLIENT_ID", "id")
+	t.Setenv("PARTIAL_CLIENT_SECRET", "secret") // missing AUTH_URL, TOKEN_URL, SCOPE
+
+	providers := ListLocalProviders()
+
+	found := false
+	for _, p := range providers {
+		if p == "testprov" {
+			found = true
+		}
+		if p == "nopair" {
+			t.Error("should not list provider without CLIENT_SECRET")
+		}
+		if p == "partial" {
+			t.Error("should not list provider without AUTH_URL and TOKEN_URL")
+		}
+	}
+	if !found {
+		t.Error("expected testprov in list")
+	}
+}

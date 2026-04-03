@@ -117,21 +117,45 @@ func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	licenseKey := os.Getenv("ONDATRA_KEY")
-	if licenseKey == "" {
-		return nil, fmt.Errorf("ONDATRA_KEY not set in .env")
-	}
+	var result *oauth2host.RefreshResult
 
-	host := oauth2host.Host()
-	result, err := oauth2host.Refresh(tp.ctx, host, tp.provider, tokenFile.RefreshToken, licenseKey)
-	if err != nil {
-		return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
-	}
-
-	// Save new refresh token — fail if write fails, otherwise next refresh will use stale token
-	if result.RefreshToken != "" {
-		if err := oauth2host.WriteToken(tp.projectDir, tp.provider, result.RefreshToken); err != nil {
-			return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
+	if tokenFile.Local {
+		// Local: refresh directly against provider
+		if tokenFile.TokenURL == "" {
+			return nil, fmt.Errorf("invalid token file for %s: missing token_url (re-run: ondatrasql auth %s)", tp.provider, tp.provider)
+		}
+		prefix := oauth2host.ProviderEnvPrefix(tp.provider)
+		clientID := os.Getenv(prefix + "_CLIENT_ID")
+		clientSecret := os.Getenv(prefix + "_CLIENT_SECRET")
+		if clientID == "" || clientSecret == "" {
+			return nil, fmt.Errorf("%s_CLIENT_ID and %s_CLIENT_SECRET must be set in .env", prefix, prefix)
+		}
+		result, err = oauth2host.RefreshLocal(tp.ctx, tokenFile.TokenURL, clientID, clientSecret, tokenFile.RefreshToken)
+		if err != nil {
+			return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
+		}
+		// Save new refresh token locally
+		if result.RefreshToken != "" {
+			if err := oauth2host.WriteLocalToken(tp.projectDir, tp.provider, result.RefreshToken, tokenFile.TokenURL); err != nil {
+				return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
+			}
+		}
+	} else {
+		// Managed: refresh via edge script
+		licenseKey := os.Getenv("ONDATRA_KEY")
+		if licenseKey == "" {
+			return nil, fmt.Errorf("ONDATRA_KEY not set in .env")
+		}
+		host := oauth2host.Host()
+		result, err = oauth2host.Refresh(tp.ctx, host, tp.provider, tokenFile.RefreshToken, licenseKey)
+		if err != nil {
+			return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
+		}
+		// Save new refresh token (managed)
+		if result.RefreshToken != "" {
+			if err := oauth2host.WriteToken(tp.projectDir, tp.provider, result.RefreshToken); err != nil {
+				return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
+			}
 		}
 	}
 

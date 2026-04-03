@@ -455,6 +455,78 @@ func TestFetchProviderToken_NoKey(t *testing.T) {
 	}
 }
 
+func TestFetchProviderToken_Local(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if r.FormValue("grant_type") != "refresh_token" {
+			t.Errorf("grant_type = %q", r.FormValue("grant_type"))
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "AT_local_refreshed",
+			"refresh_token": "RT_local_new",
+			"expires_in":    3600,
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	tokDir := filepath.Join(dir, ".ondatra", "tokens")
+	os.MkdirAll(tokDir, 0700)
+	os.WriteFile(filepath.Join(tokDir, "test-local.json"),
+		[]byte(`{"provider":"test-local","refresh_token":"RT_old","local":true,"token_url":"`+srv.URL+`","updated_at":1}`), 0600)
+
+	t.Setenv("TEST_LOCAL_CLIENT_ID", "cid")
+	t.Setenv("TEST_LOCAL_CLIENT_SECRET", "csecret")
+
+	tp := &tokenProvider{
+		ctx:        context.Background(),
+		provider:   "test-local",
+		projectDir: dir,
+	}
+
+	tok, err := tp.AccessToken()
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok != "AT_local_refreshed" {
+		t.Errorf("access_token = %q, want AT_local_refreshed", tok)
+	}
+
+	// Verify new refresh token saved with local flag
+	data, _ := os.ReadFile(filepath.Join(tokDir, "test-local.json"))
+	if !strings.Contains(string(data), "RT_local_new") {
+		t.Errorf("expected new refresh token, got: %s", data)
+	}
+	if !strings.Contains(string(data), `"local":true`) {
+		t.Errorf("expected local:true in token file, got: %s", data)
+	}
+}
+
+func TestFetchProviderToken_LocalMissingSecret(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tokDir := filepath.Join(dir, ".ondatra", "tokens")
+	os.MkdirAll(tokDir, 0700)
+	os.WriteFile(filepath.Join(tokDir, "fortnox.json"),
+		[]byte(`{"provider":"fortnox","refresh_token":"RT_x","local":true,"token_url":"https://example.com/token","updated_at":1}`), 0600)
+
+	t.Setenv("FORTNOX_CLIENT_ID", "")
+	t.Setenv("FORTNOX_CLIENT_SECRET", "")
+
+	tp := &tokenProvider{
+		ctx:        context.Background(),
+		provider:   "fortnox",
+		projectDir: dir,
+	}
+
+	_, err := tp.AccessToken()
+	if err == nil {
+		t.Fatal("expected error for missing client credentials")
+	}
+}
+
 func TestFetchGoogleToken(t *testing.T) {
 	// Mock Google token endpoint
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

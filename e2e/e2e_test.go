@@ -2962,9 +2962,11 @@ func TestE2E_OAuthProviderFlow(t *testing.T) {
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprint(w, "<h1>Done</h1>")
 
-		// GET /oauth/poll/<state>
-		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/oauth/poll/"):
-			state := strings.TrimPrefix(r.URL.Path, "/oauth/poll/")
+		// POST /oauth/poll
+		case r.Method == "POST" && r.URL.Path == "/oauth/poll":
+			var pollBody map[string]string
+			json.NewDecoder(r.Body).Decode(&pollBody)
+			state := pollBody["state"]
 			mu.Lock()
 			rt, ok := completedTokens[state]
 			if ok {

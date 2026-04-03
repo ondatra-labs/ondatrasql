@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.2.0"
+var version = "0.3.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -57,6 +57,14 @@ func run(args []string) error {
 		return nil
 	case "auth":
 		if len(args) < 2 {
+			// Try to load .env from current project for local provider detection
+			if cwd, err := os.Getwd(); err == nil {
+				if root, err := config.FindProjectRoot(cwd); err == nil {
+					if err := config.LoadEnvFile(filepath.Join(root, ".env")); err != nil && !os.IsNotExist(err) {
+						return fmt.Errorf("load .env: %w", err)
+					}
+				}
+			}
 			return runAuthList(context.Background())
 		}
 	}
