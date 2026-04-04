@@ -343,6 +343,68 @@ unique_key: id
 	}
 }
 
+func TestParseYAMLModel_ExposeWithKey_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelsDir, 0755)
+
+	yamlContent := `
+kind: table
+source: my_source
+expose: order_id
+`
+	path := filepath.Join(modelsDir, "test.yaml")
+	os.WriteFile(path, []byte(yamlContent), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error: @expose not supported for scripts (YAML)")
+	}
+}
+
+func TestParseYAMLModel_ExposeRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelsDir, 0755)
+
+	yamlContent := `
+kind: table
+source: my_source
+expose: true
+`
+	path := filepath.Join(modelsDir, "test.yaml")
+	os.WriteFile(path, []byte(yamlContent), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error: @expose not supported for scripts")
+	}
+}
+
+func TestParseYAMLModel_ExposeInvalidType(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelsDir, 0755)
+
+	yamlContent := `
+source: my_source
+expose: 123
+`
+	path := filepath.Join(modelsDir, "test.yaml")
+	os.WriteFile(path, []byte(yamlContent), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for non-bool/non-string expose value")
+	}
+	if !contains(err.Error(), "expose") {
+		t.Fatalf("expected expose error, got: %v", err)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstring(s, sub))
 }

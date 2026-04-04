@@ -1105,6 +1105,133 @@ SELECT 'test@test.com' AS email, 'Alice' AS name`
 	}
 }
 
+func TestParseModel_Expose(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: table\n-- @expose\nSELECT 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("ParseModel: %v", err)
+	}
+	if !model.Expose {
+		t.Error("expected Expose = true")
+	}
+	if model.ExposeKey != "" {
+		t.Errorf("expected empty ExposeKey, got %q", model.ExposeKey)
+	}
+}
+
+func TestParseModel_ExposeWithKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: table\n-- @expose order_id\nSELECT 1 AS order_id, 100 AS amount"
+	path := filepath.Join(modelDir, "orders.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("ParseModel: %v", err)
+	}
+	if !model.Expose {
+		t.Error("expected Expose = true")
+	}
+	if model.ExposeKey != "order_id" {
+		t.Errorf("expected ExposeKey = 'order_id', got %q", model.ExposeKey)
+	}
+}
+
+func TestParseModel_ExposeInvalidKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: table\n-- @expose bad-key\nSELECT 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for invalid expose key")
+	}
+}
+
+func TestParseModel_NoExpose(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "staging")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: table\nSELECT 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("ParseModel: %v", err)
+	}
+	if model.Expose {
+		t.Error("expected Expose = false")
+	}
+}
+
+func TestParseModel_ExposeStarlark_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "# @kind: table\n# @expose\nfor i in range(1):\n    save.row({\"id\": i})"
+	path := filepath.Join(modelDir, "test.star")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error: @expose not supported for scripts")
+	}
+}
+
+func TestParseModel_ExposeView_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "mart")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: view\n-- @expose\nSELECT 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error: @expose not supported for views")
+	}
+}
+
+func TestParseModel_ExposeEvents_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: events\n-- @expose\nid INTEGER NOT NULL"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error: @expose not supported for events")
+	}
+}
+
 func TestIsModelFile(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

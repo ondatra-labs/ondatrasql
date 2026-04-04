@@ -1,0 +1,7 @@
+--- $select=customer,amount&$top=3 ---
+  [0] amount=150, customer="Alice"
+  [1] amount=250.5, customer="Bob"
+  [2] amount=0, customer="Carol"
+--- $select=order_id&$top=2 ---
+  [0] order_id=1
+  [1] order_id=2

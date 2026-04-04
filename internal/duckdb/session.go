@@ -284,6 +284,59 @@ func (s *Session) QueryRowsMap(sqlStr string) ([]map[string]string, error) {
 	return s.QueryRowsMapContext(context.Background(), sqlStr)
 }
 
+// QueryRowsAny returns rows as maps with native Go types preserved.
+// NULL values are nil, DuckDB types map to their Go equivalents.
+func (s *Session) QueryRowsAny(sqlStr string) ([]map[string]any, error) {
+	return s.QueryRowsAnyContext(context.Background(), sqlStr)
+}
+
+// QueryRowsAnyContext returns rows as maps with native Go types preserved.
+func (s *Session) QueryRowsAnyContext(ctx context.Context, sqlStr string) ([]map[string]any, error) {
+	sqlStr = strings.TrimSpace(sqlStr)
+	if sqlStr == "" || isOnlyComments(sqlStr) {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil, errors.New("session closed")
+	}
+
+	rows, err := s.conn.QueryContext(ctx, sqlStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var results []map[string]any
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+
+		row := make(map[string]any, len(cols))
+		for i, col := range cols {
+			row[col] = vals[i]
+		}
+		results = append(results, row)
+	}
+
+	return results, rows.Err()
+}
+
 // QueryPrint executes SQL and prints results in the specified format.
 // Supported formats: "markdown", "box", "table", "json", "csv"
 func (s *Session) QueryPrint(sqlQuery, format string) error {

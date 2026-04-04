@@ -99,6 +99,13 @@ type Model struct {
 	// Set via @sorted_by directive. Applied as ALTER TABLE SET SORTED BY after materialization.
 	SortedBy []string
 
+	// Expose marks the model for OData serving via `ondatrasql serve`.
+	Expose bool
+
+	// ExposeKey is the optional primary key column for OData EntityType Key.
+	// Set via @expose <column>. If empty, all columns are used as composite key.
+	ExposeKey string
+
 	// Columns holds column definitions for @kind: events models.
 	// Parsed from the model body (DDL-style column definitions instead of SQL).
 	Columns []ColumnDef
@@ -131,6 +138,7 @@ var (
 	descriptionRe        = regexp.MustCompile(`^` + c + `\s*@description:\s*(.+)$`)
 	columnRe             = regexp.MustCompile(`^` + c + `\s*@column:\s*(.+)$`)
 	sortedByRe           = regexp.MustCompile(`^` + c + `\s*@sorted_by:\s*(.+)$`)
+	exposeRe             = regexp.MustCompile(`^` + c + `\s*@expose(?:\s+(.+))?$`)
 	commentRe = regexp.MustCompile(`^(?:--|//|#)`)
 )
 
@@ -290,6 +298,12 @@ func ParseModel(path, projectDir string) (*Model, error) {
 				}
 			}
 
+		case exposeRe.MatchString(trimmed):
+			model.Expose = true
+			if matches := exposeRe.FindStringSubmatch(trimmed); matches[1] != "" {
+				model.ExposeKey = strings.TrimSpace(matches[1])
+			}
+
 		case descriptionRe.MatchString(trimmed):
 			matches := descriptionRe.FindStringSubmatch(trimmed)
 			model.Description = strings.TrimSpace(matches[1])
@@ -429,6 +443,24 @@ func validateModel(m *Model) error {
 		}
 		if len(m.ColumnDescriptions) > 0 {
 			return fmt.Errorf("@column is not supported for views (DuckLake does not support column comments on views)")
+		}
+	}
+
+	// @expose is only allowed on materialized SQL models
+	if m.Expose {
+		if m.ScriptType != "" {
+			return fmt.Errorf("@expose is only supported for SQL models (not scripts)")
+		}
+		switch m.Kind {
+		case "table", "merge", "scd2", "append", "partition":
+			// OK — materialized with fixed schema
+		default:
+			return fmt.Errorf("@expose is not supported for %s kind (only table, merge, scd2, append, partition)", m.Kind)
+		}
+		if m.ExposeKey != "" {
+			if err := ValidateColumnName(m.ExposeKey); err != nil {
+				return fmt.Errorf("invalid @expose key: %w", err)
+			}
 		}
 	}
 

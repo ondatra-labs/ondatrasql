@@ -1,0 +1,4 @@
+total_count: 3
+rows_returned: 2
+  [0] amount=150, customer="Alice", order_id=1
+  [1] amount=0, customer="Carol", order_id=3

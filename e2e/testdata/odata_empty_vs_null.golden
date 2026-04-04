@@ -1,0 +1,6 @@
+--- empty string (Carol) ---
+  [0] name="Carol", score=0, tier=""
+--- null (Bob) ---
+  [0] name="Bob", score=null, tier=null
+--- empty string customer ---
+  [0] customer="", order_id=5

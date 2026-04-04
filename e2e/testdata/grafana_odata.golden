@@ -1,0 +1,10 @@
+datasource_created: true
+frames: 1
+fields: 3
+  field: order_id (type=number)
+  field: customer (type=string)
+  field: amount (type=number)
+rows: 3
+  [0] order_id=1, customer="Alice", amount=150
+  [1] order_id=2, customer="Bob", amount=250.5
+  [2] order_id=3, customer="Carol", amount=75

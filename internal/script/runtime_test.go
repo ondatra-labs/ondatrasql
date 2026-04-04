@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2888,6 +2890,216 @@ func TestHTTPBackoffInt(t *testing.T) {
 	_, err := fn(thread, starlark.NewBuiltin("http.get", fn), args, kwargs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- http.upload() tests ---
+
+// newIPv4Server creates an httptest server bound to IPv4 loopback only.
+// Avoids IPv6 panics in restrictive environments.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot bind IPv4 loopback: %v", err)
+	}
+	srv := &httptest.Server{Listener: l, Config: &http.Server{Handler: handler}}
+	srv.Start()
+	t.Cleanup(func() { srv.Close() })
+	return srv
+}
+
+func TestHTTPUpload(t *testing.T) {
+	t.Parallel()
+	var receivedContentType string
+	var receivedFilename string
+	var receivedFileContent string
+	var receivedPurpose string
+
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType = r.Header.Get("Content-Type")
+		r.ParseMultipartForm(10 << 20)
+		file, header, _ := r.FormFile("file")
+		if file != nil {
+			data, _ := io.ReadAll(file)
+			receivedFileContent = string(data)
+			receivedFilename = header.Filename
+		}
+		receivedPurpose = r.FormValue("purpose")
+		w.Write([]byte(`{"id": "file-123"}`))
+	}))
+
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "test.txt")
+	os.WriteFile(testFile, []byte("hello upload"), 0644)
+
+	rt := NewRuntime(nil, nil)
+	code := fmt.Sprintf(`
+resp = http.upload("%s", file="%s", fields={"purpose": "ocr"})
+if not resp.ok:
+    fail("upload failed")
+if resp.json["id"] != "file-123":
+    fail("wrong id: " + resp.json["id"])
+`, srv.URL, testFile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := rt.Run(ctx, "test", code); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(receivedContentType, "multipart/form-data") {
+		t.Errorf("content-type = %q, want multipart/form-data", receivedContentType)
+	}
+	if receivedFileContent != "hello upload" {
+		t.Errorf("file content = %q", receivedFileContent)
+	}
+	if receivedFilename != "test.txt" {
+		t.Errorf("filename = %q, want test.txt", receivedFilename)
+	}
+	if receivedPurpose != "ocr" {
+		t.Errorf("purpose = %q, want ocr", receivedPurpose)
+	}
+}
+
+func TestHTTPUploadCustomFieldAndFilename(t *testing.T) {
+	t.Parallel()
+	var receivedFilename string
+	var receivedField bool
+
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseMultipartForm(10 << 20)
+		file, header, _ := r.FormFile("document")
+		if file != nil {
+			receivedField = true
+			receivedFilename = header.Filename
+		}
+		w.Write([]byte(`{}`))
+	}))
+
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "data.bin")
+	os.WriteFile(testFile, []byte("binary"), 0644)
+
+	rt := NewRuntime(nil, nil)
+	code := fmt.Sprintf(`
+resp = http.upload("%s", file="%s", field="document", filename="report.pdf")
+`, srv.URL, testFile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := rt.Run(ctx, "test", code); err != nil {
+		t.Fatal(err)
+	}
+
+	if !receivedField {
+		t.Error("expected file in 'document' field")
+	}
+	if receivedFilename != "report.pdf" {
+		t.Errorf("filename = %q, want report.pdf", receivedFilename)
+	}
+}
+
+func TestHTTPUploadWithBasicAuth(t *testing.T) {
+	t.Parallel()
+	var receivedAuth string
+
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{}`))
+	}))
+
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "f.txt")
+	os.WriteFile(testFile, []byte("x"), 0644)
+
+	rt := NewRuntime(nil, nil)
+	code := fmt.Sprintf(`
+resp = http.upload("%s", file="%s", auth=("user", "pass"))
+`, srv.URL, testFile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := rt.Run(ctx, "test", code); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.HasPrefix(receivedAuth, "Basic ") {
+		t.Errorf("auth = %q, want Basic", receivedAuth)
+	}
+}
+
+func TestHTTPUploadWithDigestAuth(t *testing.T) {
+	t.Parallel()
+	var gotDigestAuth bool
+
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			// First request: send challenge
+			w.Header().Set("Www-Authenticate", `Digest realm="test", nonce="abc123", qop="auth"`)
+			w.WriteHeader(401)
+			return
+		}
+		if strings.HasPrefix(auth, "Digest ") {
+			gotDigestAuth = true
+		}
+		w.Write([]byte(`{}`))
+	}))
+
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "f.txt")
+	os.WriteFile(testFile, []byte("x"), 0644)
+
+	rt := NewRuntime(nil, nil)
+	code := fmt.Sprintf(`
+resp = http.upload("%s", file="%s", auth=("user", "pass", "digest"))
+`, srv.URL, testFile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := rt.Run(ctx, "test", code); err != nil {
+		t.Fatal(err)
+	}
+
+	if !gotDigestAuth {
+		t.Error("expected Digest auth header after challenge")
+	}
+}
+
+func TestHTTPUploadBadAuthScheme(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "f.txt")
+	os.WriteFile(testFile, []byte("x"), 0644)
+
+	rt := NewRuntime(nil, nil)
+	code := fmt.Sprintf(`
+resp = http.upload("http://example.com", file="%s", auth=("user", "pass", "bearer"))
+`, testFile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := rt.Run(ctx, "test", code)
+	if err == nil {
+		t.Fatal("expected error for invalid auth scheme")
+	}
+	if !strings.Contains(err.Error(), "bearer") {
+		t.Errorf("error = %v, want mention of 'bearer'", err)
+	}
+}
+
+func TestHTTPUploadMissingFile(t *testing.T) {
+	t.Parallel()
+	rt := NewRuntime(nil, nil)
+	code := `
+resp = http.upload("http://example.com", file="/nonexistent/file.txt")
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := rt.Run(ctx, "test", code)
+	if err == nil {
+		t.Fatal("expected error for missing file")
 	}
 }
 

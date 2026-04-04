@@ -1,0 +1,7 @@
+--- all rows ---
+  [0] active=true, amount=150, big_num=100, created_at="2026-01-01T08:30:00Z", customer="Alice", double_val=2.71, float_val=3.140000104904175, order_date="2026-01-01", order_id=1
+  [1] active=false, amount=250.5, big_num=200, created_at="2026-01-02T14:15:30Z", customer="Bob", double_val=9.99, float_val=1.5, order_date="2026-01-02", order_id=2
+  [2] active=true, amount=0, big_num=0, created_at="2026-01-03T00:00:00Z", customer="Carol", double_val=0, float_val=0, order_date="2026-01-03", order_id=3
+  [3] active=true, amount=999.99, big_num=null, created_at=null, customer="Dave", double_val=null, float_val=null, order_date=null, order_id=4
+  [4] active=false, amount=50, big_num=-1, created_at="2026-01-05T23:59:59Z", customer="", double_val=-100.123, float_val=-0.5, order_date="2026-01-05", order_id=5
+  [5] active=null, amount=-75.25, big_num=9999999999, created_at="2026-01-06T12:00:00Z", customer="Frank", double_val=1.7e+308, float_val=3.3999999521443642e+38, order_date="2026-01-06", order_id=6

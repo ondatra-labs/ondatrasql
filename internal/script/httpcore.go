@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -193,6 +195,44 @@ func parseRetryAfter(value string) time.Duration {
 	}
 
 	return 0
+}
+
+// DoMultipartUpload performs a multipart form-data POST with a file and optional fields.
+func DoMultipartUpload(ctx context.Context, urlStr, filePath, fieldName, fileName string, headers map[string]string, fields map[string]string, opts httpOptions) (*HTTPResponse, error) {
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read file %s: %w", filePath, err)
+	}
+
+	if fileName == "" {
+		fileName = filepath.Base(filePath)
+	}
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add the file field
+	part, err := writer.CreateFormFile(fieldName, fileName)
+	if err != nil {
+		return nil, fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(fileData); err != nil {
+		return nil, fmt.Errorf("write file data: %w", err)
+	}
+
+	// Add extra form fields
+	for k, v := range fields {
+		if err := writer.WriteField(k, v); err != nil {
+			return nil, fmt.Errorf("write field %s: %w", k, err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	headers["Content-Type"] = writer.FormDataContentType()
+	return DoHTTPWithRetry(ctx, "POST", urlStr, buf.Bytes(), headers, opts)
 }
 
 // ParseLinkHeader parses RFC 5988 Link headers into a map of rel -> URL.

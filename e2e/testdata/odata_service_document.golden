@@ -1,0 +1,6 @@
+entity_count: 2
+entity: mart_revenue (kind=EntitySet, url=mart_revenue)
+entity: mart_customers (kind=EntitySet, url=mart_customers)
+staging_internal: not exposed
+odata-version: 4.0
+content-type: application/json;odata.metadata=minimal

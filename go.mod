@@ -3,6 +3,7 @@ module github.com/ondatra-labs/ondatrasql
 go 1.25.0
 
 require (
+	github.com/CiscoM31/godata v1.0.11
 	github.com/clbanning/mxj/v2 v2.7.0
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/duckdb/duckdb-go/v2 v2.10500.0

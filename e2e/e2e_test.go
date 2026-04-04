@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/collect"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
 	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
+	"github.com/ondatra-labs/ondatrasql/internal/odata"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
@@ -3100,5 +3102,221 @@ api_fetch(save)
 	}
 	if tok != "AT_refreshed" {
 		t.Errorf("access_token in table = %q, want AT_refreshed", tok)
+	}
+}
+
+// TestE2E_ODataServer tests the OData server with a real DuckDB session.
+func TestE2E_ODataServer(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Create test data
+	p.AddModel("mart/revenue.sql", `-- @kind: table
+-- @expose
+SELECT * FROM (VALUES
+    (1, 'Alice', 100.0),
+    (2, 'Bob', 250.0),
+    (3, 'Carol', 75.5)
+) AS t(id, customer, amount)
+`)
+
+	// Run pipeline to materialize
+	runModel(t, p, "mart/revenue.sql")
+
+	// Discover schemas
+	schemas, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{{Target: "mart.revenue", KeyColumn: "id"}})
+	if err != nil {
+		t.Fatalf("DiscoverSchemas: %v", err)
+	}
+	if len(schemas) != 1 {
+		t.Fatalf("schemas = %d, want 1", len(schemas))
+	}
+	if len(schemas[0].Columns) != 3 {
+		t.Fatalf("columns = %d, want 3", len(schemas[0].Columns))
+	}
+
+	// Start OData server
+	handler := odata.NewServer(p.Sess, schemas, "http://localhost")
+	srv := newTestServer(t, handler)
+	defer srv.Close()
+
+	// Test service document
+	resp, err := http.Get(srv.URL + "/odata")
+	if err != nil {
+		t.Fatalf("GET /odata: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("service doc status = %d", resp.StatusCode)
+	}
+
+	// Test $metadata
+	resp, err = http.Get(srv.URL + "/odata/$metadata")
+	if err != nil {
+		t.Fatalf("GET $metadata: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "mart_revenue") {
+		t.Error("metadata missing entity")
+	}
+
+	// Test query all
+	resp, err = http.Get(srv.URL + "/odata/mart_revenue")
+	if err != nil {
+		t.Fatalf("GET collection: %v", err)
+	}
+	var result odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	resp.Body.Close()
+	if len(result.Value) != 3 {
+		t.Errorf("rows = %d, want 3", len(result.Value))
+	}
+
+	// Test $top
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$top=1")
+	var topResult odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&topResult)
+	resp.Body.Close()
+	if len(topResult.Value) != 1 {
+		t.Errorf("top rows = %d, want 1", len(topResult.Value))
+	}
+
+	// Test $filter
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$filter=amount%20gt%20100")
+	var filterResult odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&filterResult)
+	resp.Body.Close()
+	if len(filterResult.Value) != 1 {
+		t.Errorf("filter rows = %d, want 1 (Bob)", len(filterResult.Value))
+	}
+
+	// Test $select
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$select=customer")
+	var selectResult odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&selectResult)
+	resp.Body.Close()
+	if len(selectResult.Value) != 3 {
+		t.Errorf("select rows = %d, want 3", len(selectResult.Value))
+	}
+
+	// Test $orderby
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$orderby=amount%20desc&$top=1")
+	var orderResult odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&orderResult)
+	resp.Body.Close()
+	if len(orderResult.Value) != 1 {
+		t.Fatalf("orderby rows = %d", len(orderResult.Value))
+	}
+	if orderResult.Value[0]["customer"] != "Bob" {
+		t.Errorf("first = %v, want Bob", orderResult.Value[0]["customer"])
+	}
+
+	// Test $count
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$count=true")
+	var countResult odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&countResult)
+	resp.Body.Close()
+	if countResult.Count == nil || *countResult.Count != 3 {
+		t.Errorf("count = %v, want 3", countResult.Count)
+	}
+
+	// Test unknown entity → 404
+	resp, _ = http.Get(srv.URL + "/odata/nonexistent_table")
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown entity status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Test invalid $filter → 400
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$filter=)))bad")
+	if resp.StatusCode != 400 {
+		t.Errorf("bad filter status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Test entity-by-key → 501 Not Implemented
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue(1)")
+	if resp.StatusCode != 501 {
+		t.Errorf("entity-by-key status = %d, want 501", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Test empty result
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue?$filter=id%20eq%20999")
+	var emptyResult odata.ODataResponse
+	json.NewDecoder(resp.Body).Decode(&emptyResult)
+	resp.Body.Close()
+	if len(emptyResult.Value) != 0 {
+		t.Errorf("empty rows = %d, want 0", len(emptyResult.Value))
+	}
+
+	// Test /$count endpoint (plain text integer)
+	resp, _ = http.Get(srv.URL + "/odata/mart_revenue/$count")
+	if resp.StatusCode != 200 {
+		t.Errorf("/$count status = %d, want 200", resp.StatusCode)
+	}
+	countBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.TrimSpace(string(countBody)) != "3" {
+		t.Errorf("/$count = %q, want 3", string(countBody))
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain" {
+		t.Errorf("/$count Content-Type = %q, want text/plain", ct)
+	}
+
+	// Test OData-Version header present on all responses
+	resp, _ = http.Get(srv.URL + "/odata")
+	if v := resp.Header.Get("OData-Version"); v != "4.0" {
+		t.Errorf("OData-Version = %q, want 4.0", v)
+	}
+	resp.Body.Close()
+}
+
+func TestE2E_ODataServer_NameCollision(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Create two models whose targets collide after dot→underscore mapping:
+	// a.b_c → a_b_c and a_b.c → a_b_c
+	p.AddModel("a/b_c.sql", `-- @kind: table
+-- @expose
+SELECT 1 AS id`)
+	p.AddModel("a_b/c.sql", `-- @kind: table
+-- @expose
+SELECT 1 AS id`)
+
+	// Materialize both
+	runModel(t, p, "a/b_c.sql")
+	runModel(t, p, "a_b/c.sql")
+
+	// DiscoverSchemas should detect the collision
+	_, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "a.b_c"},
+		{Target: "a_b.c"},
+	})
+	if err == nil {
+		t.Fatal("expected collision error")
+	}
+	if !strings.Contains(err.Error(), "collision") {
+		t.Errorf("expected collision error, got: %v", err)
+	}
+}
+
+func TestE2E_ODataServer_InvalidKey(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	p.AddModel("mart/test.sql", `-- @kind: table
+-- @expose bad_col
+SELECT 1 AS id, 'x' AS name`)
+
+	runModel(t, p, "mart/test.sql")
+
+	_, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "mart.test", KeyColumn: "bad_col"},
+	})
+	if err == nil {
+		t.Fatal("expected error for nonexistent key column")
+	}
+	if !strings.Contains(err.Error(), "bad_col") {
+		t.Errorf("expected key column error, got: %v", err)
 	}
 }

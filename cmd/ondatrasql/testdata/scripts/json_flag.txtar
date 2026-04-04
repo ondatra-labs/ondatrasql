@@ -1,3 +1,3 @@
 # --json flag works with version
 exec ondatrasql --json version
-stdout '0\.1\.0'
+stdout '^\d+\.\d+\.\d+$'

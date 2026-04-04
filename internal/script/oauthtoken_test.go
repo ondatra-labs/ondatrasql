@@ -373,8 +373,6 @@ func TestNewTokenProvider_ProviderInvalid(t *testing.T) {
 }
 
 func TestFetchProviderToken(t *testing.T) {
-	t.Parallel()
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "AT_provider",
@@ -416,7 +414,6 @@ func TestFetchProviderToken(t *testing.T) {
 }
 
 func TestFetchProviderToken_NoTokenFile(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 
 	t.Setenv("ONDATRA_KEY", "osk_test")
@@ -434,7 +431,6 @@ func TestFetchProviderToken_NoTokenFile(t *testing.T) {
 }
 
 func TestFetchProviderToken_NoKey(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	tokDir := filepath.Join(dir, ".ondatra", "tokens")
 	os.MkdirAll(tokDir, 0700)
@@ -456,8 +452,6 @@ func TestFetchProviderToken_NoKey(t *testing.T) {
 }
 
 func TestFetchProviderToken_Local(t *testing.T) {
-	t.Parallel()
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		if r.FormValue("grant_type") != "refresh_token" {
@@ -505,7 +499,6 @@ func TestFetchProviderToken_Local(t *testing.T) {
 }
 
 func TestFetchProviderToken_LocalMissingSecret(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	tokDir := filepath.Join(dir, ".ondatra", "tokens")
 	os.MkdirAll(tokDir, 0700)

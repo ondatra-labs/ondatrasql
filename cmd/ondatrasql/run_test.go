@@ -81,8 +81,8 @@ func TestRun_Version(t *testing.T) {
 			t.Fatalf("run() error: %v", err)
 		}
 	})
-	if !strings.Contains(got, "0.1.0") {
-		t.Errorf("expected version, got: %s", got)
+	if !strings.Contains(got, version) {
+		t.Errorf("expected version %s, got: %s", version, got)
 	}
 }
 
@@ -375,8 +375,8 @@ func TestRun_JsonFlag(t *testing.T) {
 			t.Fatalf("run --json version: %v", err)
 		}
 	})
-	if !strings.Contains(got, "0.1.0") {
-		t.Errorf("expected version with --json, got: %s", got)
+	if !strings.Contains(got, version) {
+		t.Errorf("expected version %s with --json, got: %s", version, got)
 	}
 }
 

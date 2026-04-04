@@ -53,6 +53,7 @@ type yamlModel struct {
 	Constraints        []string       `yaml:"constraints"`
 	Audits             []string       `yaml:"audits"`
 	Warnings           []string       `yaml:"warnings"`
+	Expose             any            `yaml:"expose"`
 }
 
 // parseYAMLModel parses a YAML model file into a Model struct.
@@ -103,6 +104,21 @@ func parseYAMLModel(path, projectDir string) (*Model, error) {
 	// SQL is set to the expanded YAML content as a canonical hash source.
 	// This ensures that changes to source/config are detected by backfill/run_type logic,
 	// which hashes model.SQL. The actual Starlark wrapper is generated at execution time.
+	// Parse expose field: bool (true/false) or string (key column name)
+	var expose bool
+	var exposeKey string
+	switch v := ym.Expose.(type) {
+	case bool:
+		expose = v
+	case string:
+		expose = true
+		exposeKey = v
+	case nil:
+		// not set — ok
+	default:
+		return nil, fmt.Errorf("invalid expose value: expected true or column name string, got %T", v)
+	}
+
 	model := &Model{
 		Kind:               ym.Kind,
 		SQL:                expanded,
@@ -120,6 +136,8 @@ func parseYAMLModel(path, projectDir string) (*Model, error) {
 		Constraints:        ym.Constraints,
 		Audits:             ym.Audits,
 		Warnings:           ym.Warnings,
+		Expose:             expose,
+		ExposeKey:          exposeKey,
 	}
 
 	if model.Kind == "" {

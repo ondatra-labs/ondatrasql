@@ -49,6 +49,7 @@ func httpModule(ctx context.Context) *starlarkstruct.Module {
 			"put":    starlark.NewBuiltin("http.put", httpRequest(ctx, "PUT")),
 			"delete": starlark.NewBuiltin("http.delete", httpRequest(ctx, "DELETE")),
 			"patch":  starlark.NewBuiltin("http.patch", httpRequest(ctx, "PATCH")),
+			"upload": starlark.NewBuiltin("http.upload", httpUpload(ctx)),
 		},
 	}
 }
@@ -269,6 +270,164 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 		}
 
 		resp, err := DoHTTPWithRetry(ctx, method, urlStr, body, headers, opts)
+		if err != nil {
+			return nil, err
+		}
+		return httpResponseToStarlark(resp), nil
+	}
+}
+
+// httpUpload creates a multipart form-data POST request.
+// Signature: http.upload(url, file, field?, filename?, headers?, fields?, timeout?, retry?, backoff?, auth?)
+//
+// Parameters:
+//   - url: target URL
+//   - file: path to file on disk
+//   - field: form field name for the file (default: "file")
+//   - filename: override filename sent in the form (default: basename of file)
+//   - headers: extra headers dict
+//   - fields: dict of additional form fields (string key-value pairs)
+//   - timeout, retry, backoff, auth: same as http.post
+func httpUpload(ctx context.Context) func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var (
+			urlStr      string
+			filePath    string
+			field       string
+			filename    string
+			headersDict *starlark.Dict
+			fieldsDict  *starlark.Dict
+			timeout     starlark.Value
+			retry       int
+			backoff     starlark.Value
+			authVal     starlark.Value
+		)
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
+			"url", &urlStr,
+			"file", &filePath,
+			"field?", &field,
+			"filename?", &filename,
+			"headers?", &headersDict,
+			"fields?", &fieldsDict,
+			"timeout?", &timeout,
+			"retry?", &retry,
+			"backoff?", &backoff,
+			"auth?", &authVal,
+		); err != nil {
+			return nil, err
+		}
+
+		if field == "" {
+			field = "file"
+		}
+
+		// Build headers
+		headers := make(map[string]string)
+		if headersDict != nil {
+			for _, item := range headersDict.Items() {
+				k, ok := starlark.AsString(item[0])
+				if !ok {
+					return nil, fmt.Errorf("%s: header key must be string", fn.Name())
+				}
+				v, ok := starlark.AsString(item[1])
+				if !ok {
+					return nil, fmt.Errorf("%s: header value must be string", fn.Name())
+				}
+				if k != "" {
+					headers[k] = v
+				}
+			}
+		}
+
+		// Build extra form fields
+		var extraFields map[string]string
+		if fieldsDict != nil {
+			extraFields = make(map[string]string)
+			for _, item := range fieldsDict.Items() {
+				k, ok := starlark.AsString(item[0])
+				if !ok {
+					return nil, fmt.Errorf("%s: fields key must be string", fn.Name())
+				}
+				v, ok := starlark.AsString(item[1])
+				if !ok {
+					return nil, fmt.Errorf("%s: fields value must be string", fn.Name())
+				}
+				extraFields[k] = v
+			}
+		}
+
+		// Build options
+		opts := httpOptions{
+			Timeout: defaultTimeout,
+			Retry:   retry,
+			Backoff: defaultBackoffMs,
+		}
+		if timeout != nil {
+			switch v := timeout.(type) {
+			case starlark.Float:
+				opts.Timeout = time.Duration(float64(v) * float64(time.Second))
+			case starlark.Int:
+				i, _ := v.Int64()
+				opts.Timeout = time.Duration(i) * time.Second
+			}
+		}
+		if backoff != nil {
+			switch v := backoff.(type) {
+			case starlark.Float:
+				opts.Backoff = int(float64(v) * 1000)
+			case starlark.Int:
+				i, _ := v.Int64()
+				opts.Backoff = int(i) * 1000
+			}
+		}
+
+		// Parse auth (same logic as httpRequest)
+		if authVal != nil && authVal != starlark.None {
+			auth, ok := authVal.(*starlark.Tuple)
+			if !ok {
+				// Starlark runtime may pass Tuple (not *Tuple)
+				if t, ok2 := authVal.(starlark.Tuple); ok2 {
+					auth = &t
+				} else {
+					return nil, fmt.Errorf("%s: auth must be a tuple", fn.Name())
+				}
+			}
+			n := auth.Len()
+			if n < 2 || n > 3 {
+				return nil, fmt.Errorf("%s: auth must be (user, pass) or (user, pass, scheme)", fn.Name())
+			}
+			user, ok := starlark.AsString(auth.Index(0))
+			if !ok {
+				return nil, fmt.Errorf("%s: auth username must be string", fn.Name())
+			}
+			pass, ok := starlark.AsString(auth.Index(1))
+			if !ok {
+				return nil, fmt.Errorf("%s: auth password must be string", fn.Name())
+			}
+
+			scheme := "basic"
+			if n == 3 {
+				s, ok := starlark.AsString(auth.Index(2))
+				if !ok {
+					return nil, fmt.Errorf("%s: auth scheme must be string", fn.Name())
+				}
+				scheme = s
+			}
+
+			switch scheme {
+			case "basic":
+				headers["Authorization"] = BasicAuth(user, pass)
+			case "digest":
+				opts.DigestAuth = &digestCredentials{Username: user, Password: pass}
+				if opts.Retry < 1 {
+					opts.Retry = 1
+				}
+			default:
+				return nil, fmt.Errorf("%s: auth scheme must be \"basic\" or \"digest\", got %q", fn.Name(), scheme)
+			}
+		}
+
+		resp, err := DoMultipartUpload(ctx, urlStr, filePath, field, filename, headers, extraFields, opts)
 		if err != nil {
 			return nil, err
 		}

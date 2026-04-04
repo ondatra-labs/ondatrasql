@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.4.0"
+var version = "0.5.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -154,6 +154,9 @@ func run(args []string) error {
 	case "daemon":
 		return runDaemon(ctx, cfg)
 
+	case "serve":
+		return runServe(ctx, cfg)
+
 	case "auth":
 		if len(args) < 2 {
 			return runAuthList(ctx)
@@ -186,6 +189,7 @@ Run:
   run [model]             Run all models or specific model
   sandbox [model]         Preview changes without affecting data
   daemon                  Start event collection daemon
+  serve                   Start OData server for @expose models
 
 Introspection:
   stats                   Project overview and all models
