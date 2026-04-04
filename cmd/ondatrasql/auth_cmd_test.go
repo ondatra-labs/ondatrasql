@@ -6,6 +6,9 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -22,6 +25,21 @@ import (
 
 // newTestServer creates an httptest server bound to IPv4 localhost
 // to avoid failures in environments where IPv6 loopback is unavailable.
+func encryptTestToken(plaintext, keyHex string) (string, error) {
+	keyBytes, _ := hex.DecodeString(keyHex)
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	iv := make([]byte, 12)
+	ciphertext := gcm.Seal(nil, iv, []byte(plaintext), nil)
+	return hex.EncodeToString(iv) + ":" + hex.EncodeToString(ciphertext), nil
+}
+
 func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -41,6 +59,7 @@ func TestRunAuth_Success(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "config"), 0755)
 
 	var pollCount atomic.Int32
+	var capturedEphemeralKey string
 
 	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -54,15 +73,21 @@ func TestRunAuth_Success(t *testing.T) {
 				"redirect_uri": "https://oauth2.ondatra.sh/oauth/callback",
 			})
 		case r.Method == "POST" && r.URL.Path == "/oauth/register":
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			capturedEphemeralKey = body["ephemeral_key"]
 			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		case r.Method == "POST" && r.URL.Path == "/oauth/poll":
 			if pollCount.Add(1) < 2 {
 				w.WriteHeader(404)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]string{
+			// Encrypt with captured ephemeral key
+			encrypted, _ := encryptTestToken("RT_success", capturedEphemeralKey)
+			json.NewEncoder(w).Encode(map[string]interface{}{
 				"provider":      "test-provider",
-				"refresh_token": "RT_success",
+				"refresh_token": encrypted,
+				"encrypted":     true,
 			})
 		default:
 			http.NotFound(w, r)

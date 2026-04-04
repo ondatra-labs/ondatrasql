@@ -7,6 +7,9 @@ package oauth2host
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,12 +94,16 @@ func FetchProviderConfig(ctx context.Context, host, provider string) (*ProviderC
 }
 
 // Register registers an auth request with the edge service.
-func Register(ctx context.Context, host, provider, state, licenseKey string) error {
-	body, _ := json.Marshal(map[string]string{
+func Register(ctx context.Context, host, provider, state, licenseKey, ephemeralKey string) error {
+	payload := map[string]string{
 		"provider":    provider,
 		"state":       state,
 		"license_key": licenseKey,
-	})
+	}
+	if ephemeralKey != "" {
+		payload["ephemeral_key"] = ephemeralKey
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, "POST", host+"/oauth/register", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -124,6 +131,7 @@ var ErrPending = fmt.Errorf("pending")
 type PollResult struct {
 	Provider     string `json:"provider"`
 	RefreshToken string `json:"refresh_token"`
+	Encrypted    bool   `json:"encrypted,omitempty"`
 }
 
 // Poll checks if the refresh token is available.
@@ -253,6 +261,40 @@ func RefreshLocal(ctx context.Context, tokenURL, clientID, clientSecret, refresh
 		return nil, fmt.Errorf("parse refresh result: %w", err)
 	}
 	return &localResult, nil
+}
+
+// DecryptToken decrypts an AES-256-GCM encrypted token using the given hex key.
+// Format: hex(iv) + ":" + hex(ciphertext+tag)
+func DecryptToken(encrypted, keyHex string) (string, error) {
+	parts := strings.SplitN(encrypted, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid encrypted token format")
+	}
+	iv, err := hex.DecodeString(parts[0])
+	if err != nil {
+		return "", fmt.Errorf("decode iv: %w", err)
+	}
+	data, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("decode ciphertext: %w", err)
+	}
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return "", fmt.Errorf("decode key: %w", err)
+	}
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create gcm: %w", err)
+	}
+	plaintext, err := gcm.Open(nil, iv, data, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt: %w", err)
+	}
+	return string(plaintext), nil
 }
 
 // ListLocalProviders scans environment for *_CLIENT_ID patterns and returns provider names.

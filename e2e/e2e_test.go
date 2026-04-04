@@ -3013,7 +3013,7 @@ func TestE2E_OAuthProviderFlow(t *testing.T) {
 	ctx := context.Background()
 	state := "e2e_test_state_0123456789abcdef0123456789abcdef0123456789abcdef01234567"
 
-	err := oauth2host.Register(ctx, edge.URL, "mock-provider", state, "osk_e2e_test")
+	err := oauth2host.Register(ctx, edge.URL, "mock-provider", state, "osk_e2e_test", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}

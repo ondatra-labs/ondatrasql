@@ -90,7 +90,14 @@ func runAuthManaged(ctx context.Context, cfg *config.Config, provider string) er
 	hash := sha256.Sum256(buf)
 	state := fmt.Sprintf("%x", hash)
 
-	if err := oauth2host.Register(ctx, host, provider, state, licenseKey); err != nil {
+	// Generate ephemeral key for client-side encryption
+	ekBuf := make([]byte, 32)
+	if _, err := rand.Read(ekBuf); err != nil {
+		return fmt.Errorf("generate ephemeral key: %w", err)
+	}
+	ephemeralKey := fmt.Sprintf("%x", ekBuf)
+
+	if err := oauth2host.Register(ctx, host, provider, state, licenseKey, ephemeralKey); err != nil {
 		return err
 	}
 
@@ -140,7 +147,18 @@ func runAuthManaged(ctx context.Context, cfg *config.Config, provider string) er
 				return fmt.Errorf("provider mismatch: expected %q, got %q", provider, result.Provider)
 			}
 
-			if err := oauth2host.WriteToken(cfg.ProjectDir, provider, result.RefreshToken); err != nil {
+			refreshToken := result.RefreshToken
+			if !result.Encrypted {
+				return fmt.Errorf("server did not encrypt token with ephemeral key — aborting for safety")
+			}
+			decrypted, err := oauth2host.DecryptToken(refreshToken, ephemeralKey)
+			if err != nil {
+				return fmt.Errorf("decrypt token: %w", err)
+			}
+			refreshToken = decrypted
+			output.Fprintf("Token decrypted locally (end-to-end encrypted)\n")
+
+			if err := oauth2host.WriteToken(cfg.ProjectDir, provider, refreshToken); err != nil {
 				return fmt.Errorf("save token: %w", err)
 			}
 

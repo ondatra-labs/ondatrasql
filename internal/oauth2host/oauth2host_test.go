@@ -6,6 +6,9 @@ package oauth2host
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -85,12 +88,12 @@ func TestRegister(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := Register(context.Background(), srv.URL, "fortnox", "abc123", "good-key")
+	err := Register(context.Background(), srv.URL, "fortnox", "abc123", "good-key", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	err = Register(context.Background(), srv.URL, "fortnox", "abc123", "bad")
+	err = Register(context.Background(), srv.URL, "fortnox", "abc123", "bad", "")
 	if err == nil {
 		t.Fatal("expected error for bad key")
 	}
@@ -270,6 +273,96 @@ func TestRefreshLocal_Error(t *testing.T) {
 	_, err := RefreshLocal(context.Background(), srv.URL, "id", "secret", "bad")
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestDecryptToken(t *testing.T) {
+	t.Parallel()
+	// Generate a known key, encrypt, then decrypt
+	keyHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	// Manually construct encrypted token using Go's crypto
+	plaintext := "RT_test_refresh_token"
+	keyBytes, _ := hex.DecodeString(keyHex)
+	block, _ := aes.NewCipher(keyBytes)
+	gcm, _ := cipher.NewGCM(block)
+	iv := make([]byte, 12)
+	for i := range iv {
+		iv[i] = byte(i)
+	}
+	ciphertext := gcm.Seal(nil, iv, []byte(plaintext), nil)
+	encrypted := hex.EncodeToString(iv) + ":" + hex.EncodeToString(ciphertext)
+
+	decrypted, err := DecryptToken(encrypted, keyHex)
+	if err != nil {
+		t.Fatalf("DecryptToken: %v", err)
+	}
+	if decrypted != plaintext {
+		t.Errorf("decrypted = %q, want %q", decrypted, plaintext)
+	}
+}
+
+func TestDecryptToken_WrongKey(t *testing.T) {
+	t.Parallel()
+	keyHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	wrongKey := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+	keyBytes, _ := hex.DecodeString(keyHex)
+	block, _ := aes.NewCipher(keyBytes)
+	gcm, _ := cipher.NewGCM(block)
+	iv := make([]byte, 12)
+	ciphertext := gcm.Seal(nil, iv, []byte("secret"), nil)
+	encrypted := hex.EncodeToString(iv) + ":" + hex.EncodeToString(ciphertext)
+
+	_, err := DecryptToken(encrypted, wrongKey)
+	if err == nil {
+		t.Fatal("expected error with wrong key")
+	}
+}
+
+func TestDecryptToken_InvalidFormat(t *testing.T) {
+	t.Parallel()
+	_, err := DecryptToken("not-valid", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err == nil {
+		t.Fatal("expected error for invalid format")
+	}
+}
+
+func TestRegisterWithEphemeralKey(t *testing.T) {
+	t.Parallel()
+	var receivedKey string
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		receivedKey = body["ephemeral_key"]
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer srv.Close()
+
+	err := Register(context.Background(), srv.URL, "fortnox", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "key", "aabbccdd0123456789abcdef0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if receivedKey != "aabbccdd0123456789abcdef0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("ephemeral_key = %q", receivedKey)
+	}
+}
+
+func TestRegisterWithoutEphemeralKey(t *testing.T) {
+	t.Parallel()
+	var receivedBody map[string]interface{}
+	srv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer srv.Close()
+
+	err := Register(context.Background(), srv.URL, "fortnox", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "key", "")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, exists := receivedBody["ephemeral_key"]; exists {
+		t.Error("ephemeral_key should not be sent when empty")
 	}
 }
 
