@@ -5,13 +5,12 @@
 <h1 align="center">OndatraSQL</h1>
 
 <p align="center">
-  <b>The data runtime for teams that ship</b><br>
-  Build pipelines without infrastructure.
+  <b>You don't need a data stack anymore</b><br>
+  One binary replaces ingestion, transformation, validation, serving, and reverse ETL.
 </p>
 
 <p align="center">
-  One binary replaces ingestion, transformation, and orchestration.<br>
-  No setup. No services. No stack.
+  No setup. No services. No infrastructure.
 </p>
 
 <p align="center">
@@ -43,11 +42,19 @@ It runs on a single machine, requires no services, and works in minutes.
 
 ## Install
 
+**Linux / macOS:**
+
 ```bash
 curl -fsSL https://ondatra.sh/install.sh | sh
 ```
 
-Windows: [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install). From source: `go install github.com/ondatra-labs/ondatrasql/cmd/ondatrasql@latest` (Go 1.25+ and gcc/clang).
+**Windows:**
+
+```powershell
+irm https://ondatra.sh/install.ps1 | iex
+```
+
+**From source:** `go install github.com/ondatra-labs/ondatrasql/cmd/ondatrasql@latest` (Go 1.25+ and gcc/clang).
 
 ## Quick Start
 
@@ -100,6 +107,10 @@ You now have a versioned table in DuckLake with automatic change tracking and a 
 
 **No separate tools for quality or lineage** — built into execution.
 
+**No reverse ETL tool** — push data to APIs with `@kind: tracked`.
+
+**No BI middleware** — serve data to Power BI, Excel, and Grafana via OData v4.
+
 ## Three Ways to Write Models
 
 **SQL** — transformations:
@@ -111,14 +122,16 @@ SELECT date, SUM(total) AS revenue
 FROM staging.orders GROUP BY date
 ```
 
-**Starlark** — API ingestion (no Python):
+**Starlark** — API ingestion and reverse ETL (no Python):
 
 ```python
-# @kind: append
+# @kind: tracked
+# @unique_key: customer_id
 
-resp = http.get("https://api.example.com/users")
-for user in resp.json:
-    save.row(user)
+rows = query("SELECT * FROM mart.customers")
+for row in rows:
+    http.post("https://api.example.com/contacts", json=row)
+    save.row(row)
 ```
 
 **YAML** — declarative config:
@@ -147,6 +160,7 @@ You don't build pipelines. You run data.
 - Airflow for orchestration
 - Kafka for events
 - Snowflake for storage
+- Census for reverse ETL
 
 **OndatraSQL:**
 
@@ -167,7 +181,9 @@ OndatraSQL is designed for simplicity over horizontal scale.
 ```text
 run [model]          Run pipeline or specific model
 sandbox [model]      Preview changes safely
+serve                Serve data via OData v4
 daemon               Start event collection
+auth [provider]      Authenticate with OAuth2 providers
 sql "SELECT ..."     Query your data
 lineage overview     See all dependencies
 ```

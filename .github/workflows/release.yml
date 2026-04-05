@@ -32,6 +32,10 @@ jobs:
             goos: darwin
             goarch: arm64
             cc: cc
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            cc: gcc
 
     runs-on: ${{ matrix.os }}
 
@@ -54,12 +58,20 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          go build -ldflags "-s -w -X main.version=${VERSION}" -o ondatrasql ./cmd/ondatrasql
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          go build -ldflags "-s -w -X main.version=${VERSION}" -o "ondatrasql${EXT}" ./cmd/ondatrasql
 
       - name: Package
         run: |
-          ARCHIVE="ondatrasql_${GITHUB_REF_NAME#v}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-          tar czf "${ARCHIVE}" ondatrasql
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ARCHIVE="ondatrasql_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+            zip "${ARCHIVE}" ondatrasql.exe
+          else
+            ARCHIVE="ondatrasql_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+            tar czf "${ARCHIVE}" ondatrasql
+          fi
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
@@ -82,7 +94,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum *.tar.gz > checksums.txt
+          sha256sum *.tar.gz *.zip 2>/dev/null > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -90,4 +102,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
             artifacts/checksums.txt
