@@ -51,6 +51,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -63,6 +64,7 @@ jobs:
           go build -ldflags "-s -w -X main.version=${VERSION}" -o "ondatrasql${EXT}" ./cmd/ondatrasql
 
       - name: Package
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
