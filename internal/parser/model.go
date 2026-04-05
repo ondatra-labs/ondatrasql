@@ -41,7 +41,7 @@ type Model struct {
 	// Target is the fully qualified table name (schema.table).
 	Target string
 
-	// Kind is the materialization type: table, append, merge, scd2, or partition.
+	// Kind is the materialization type: table, append, merge, scd2, partition, or tracked.
 	Kind string
 
 	// IsScript indicates if this is a script model (Starlark).
@@ -204,11 +204,11 @@ func ParseModel(path, projectDir string) (*Model, error) {
 
 		// Validate path components
 		for _, part := range parts {
+			if err := ValidatePathSegment(part); err != nil {
+				return nil, fmt.Errorf("invalid model path: %w", err)
+			}
 			if strings.Contains(part, "__") {
 				return nil, fmt.Errorf("path component %q contains reserved pattern '__' (used as folder separator in table names)", part)
-			}
-			if strings.Contains(part, ".") {
-				return nil, fmt.Errorf("path component %q contains a dot; use subdirectories instead (e.g. models/raw/api/orders.sql)", part)
 			}
 		}
 
@@ -407,10 +407,10 @@ func extractColumnTags(desc string) (string, []string) {
 func validateModel(m *Model) error {
 	// Validate kind
 	switch m.Kind {
-	case "table", "view", "append", "merge", "scd2", "partition", "events":
+	case "table", "view", "append", "merge", "scd2", "partition", "events", "tracked":
 		// OK
 	default:
-		return fmt.Errorf("invalid kind %q: must be table, view, append, merge, scd2, partition, or events", m.Kind)
+		return fmt.Errorf("invalid kind %q: must be table, view, append, merge, scd2, partition, events, or tracked", m.Kind)
 	}
 
 	// Validate target
@@ -452,10 +452,10 @@ func validateModel(m *Model) error {
 			return fmt.Errorf("@expose is only supported for SQL models (not scripts)")
 		}
 		switch m.Kind {
-		case "table", "merge", "scd2", "append", "partition":
+		case "table", "merge", "scd2", "append", "partition", "tracked":
 			// OK — materialized with fixed schema
 		default:
-			return fmt.Errorf("@expose is not supported for %s kind (only table, merge, scd2, append, partition)", m.Kind)
+			return fmt.Errorf("@expose is not supported for %s kind (only table, merge, scd2, append, partition, tracked)", m.Kind)
 		}
 		if m.ExposeKey != "" {
 			if err := ValidateColumnName(m.ExposeKey); err != nil {
@@ -535,6 +535,11 @@ func validateModel(m *Model) error {
 		return fmt.Errorf("partition kind requires @unique_key directive")
 	}
 
+	// Tracked kind requires unique_key (single column only)
+	if m.Kind == "tracked" && m.UniqueKey == "" {
+		return fmt.Errorf("tracked kind requires @unique_key directive")
+	}
+
 	// @partitioned_by is a storage hint — not supported on partition kind
 	// (partition kind uses @unique_key for DELETE+INSERT, not DuckLake file layout)
 	if m.Kind == "partition" && len(m.PartitionedBy) > 0 {
@@ -591,6 +596,22 @@ func ValidateIdentifier(s string) error {
 	validRe := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$`)
 	if !validRe.MatchString(s) {
 		return fmt.Errorf("invalid identifier %q: only letters, numbers, underscores, and dots allowed", s)
+	}
+
+	return nil
+}
+
+// ValidatePathSegment checks that a model path segment (directory or filename) is safe for SQL.
+// Only allows letters, numbers, and underscores. Rejects special characters
+// that could break SQL interpolation (apostrophes, spaces, hyphens, etc.).
+func ValidatePathSegment(s string) error {
+	if s == "" {
+		return fmt.Errorf("path segment cannot be empty")
+	}
+
+	validRe := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	if !validRe.MatchString(s) {
+		return fmt.Errorf("invalid path segment %q: only letters, numbers, and underscores allowed", s)
 	}
 
 	return nil

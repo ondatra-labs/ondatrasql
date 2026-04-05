@@ -1,0 +1,14 @@
+--- run 1 (backfill 3 rows) ---
+target: raw.data
+kind: tracked
+run_type: backfill
+rows_affected: 3
+run_reason: first run
+--- run 2 (Bob deleted) ---
+target: raw.data
+kind: tracked
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+total_rows: 2
+names: Alice,Carol

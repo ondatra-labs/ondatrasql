@@ -12,6 +12,7 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
+	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
 // runNew creates a new model file or directory.
@@ -43,6 +44,10 @@ func runNew(cfg *config.Config, target string) error {
 		// Reject path traversal attempts
 		if p == ".." || strings.ContainsAny(p, `/\`) {
 			return fmt.Errorf("invalid path segment in %q", target)
+		}
+		// Validate characters (same rules as model path parsing)
+		if err := parser.ValidatePathSegment(p); err != nil {
+			return fmt.Errorf("invalid model name: %w", err)
 		}
 	}
 

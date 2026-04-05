@@ -368,6 +368,14 @@ func TestGenerateMetadata_WithKey(t *testing.T) {
 	if strings.Contains(xml, `<PropertyRef Name="name"`) {
 		t.Error("should not include non-key column in Key")
 	}
+	// Key property must be Nullable="false"
+	if !strings.Contains(xml, `Name="id" Type="Edm.Int32" Nullable="false"`) {
+		t.Errorf("key property missing Nullable=false: %s", xml)
+	}
+	// Non-key property should not have Nullable attribute
+	if strings.Contains(xml, `Name="name" Type="Edm.String" Nullable`) {
+		t.Error("non-key property should not have Nullable attribute")
+	}
 }
 
 func TestFormatResponse(t *testing.T) {

@@ -1463,3 +1463,106 @@ func TestValidateIdentifier_ConsecutiveDots(t *testing.T) {
 		})
 	}
 }
+
+func TestParseModel_PathSegmentValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		segment string
+	}{
+		{"apostrophe", "o'malley"},
+		{"space", "my file"},
+		{"hyphen", "test-data"},
+		{"at sign", "user@home"},
+		{"semicolon", "drop;table"},
+		{"starts with digit", "1orders"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			modelDir := filepath.Join(dir, "models", "raw", tt.segment)
+			os.MkdirAll(modelDir, 0755)
+
+			path := filepath.Join(modelDir, "test.sql")
+			os.WriteFile(path, []byte("SELECT 1"), 0644)
+
+			_, err := ParseModel(path, dir)
+			if err == nil {
+				t.Fatalf("expected error for path segment %q", tt.segment)
+			}
+		})
+	}
+}
+
+func TestParseModel_PathSegmentFilename(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelDir, 0755)
+
+	// Filename with apostrophe
+	path := filepath.Join(modelDir, "o'malley.sql")
+	os.WriteFile(path, []byte("SELECT 1"), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for filename with apostrophe")
+	}
+}
+
+func TestParseModel_TrackedKind(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: tracked\n-- @unique_key: source_file\nSELECT 'a.pdf' AS source_file, 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("ParseModel: %v", err)
+	}
+	if model.Kind != "tracked" {
+		t.Errorf("kind = %q, want tracked", model.Kind)
+	}
+	if model.UniqueKey != "source_file" {
+		t.Errorf("unique_key = %q, want source_file", model.UniqueKey)
+	}
+}
+
+func TestParseModel_TrackedKind_RequiresUniqueKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: tracked\nSELECT 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for tracked without unique_key")
+	}
+}
+
+func TestParseModel_TrackedKind_CompositeKeyRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: tracked\n-- @unique_key: a, b\nSELECT 1 AS a, 2 AS b"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for composite unique_key on tracked")
+	}
+}

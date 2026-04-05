@@ -191,11 +191,11 @@ func targetFromPath(absPath, projectDir string) (string, error) {
 
 	// Validate path components (same rules as SQL parser)
 	for _, part := range parts {
+		if err := ValidatePathSegment(part); err != nil {
+			return "", fmt.Errorf("invalid model path: %w", err)
+		}
 		if strings.Contains(part, "__") {
 			return "", fmt.Errorf("path component %q contains reserved pattern '__' (used as folder separator in table names)", part)
-		}
-		if strings.Contains(part, ".") {
-			return "", fmt.Errorf("path component %q contains a dot; use subdirectories instead", part)
 		}
 	}
 

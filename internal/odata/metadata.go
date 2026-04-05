@@ -162,8 +162,9 @@ type propertyRef struct {
 }
 
 type property struct {
-	Name string `xml:"Name,attr"`
-	Type string `xml:"Type,attr"`
+	Name     string `xml:"Name,attr"`
+	Type     string `xml:"Type,attr"`
+	Nullable *bool  `xml:"Nullable,attr,omitempty"`
 }
 
 type entityContainer struct {
@@ -194,20 +195,28 @@ func GenerateMetadata(schemas []EntitySchema) ([]byte, error) {
 
 		// Key element: use explicit key column or all columns as composite key
 		key := &entityKey{}
+		keyColumns := make(map[string]bool)
 		if es.KeyColumn != "" {
 			key.PropertyRefs = []propertyRef{{Name: es.KeyColumn}}
+			keyColumns[es.KeyColumn] = true
 		} else {
 			for _, col := range es.Columns {
 				key.PropertyRefs = append(key.PropertyRefs, propertyRef{Name: col.Name})
+				keyColumns[col.Name] = true
 			}
 		}
 		et.Key = key
 
+		notNullable := false
 		for _, col := range es.Columns {
-			et.Properties = append(et.Properties, property{
+			p := property{
 				Name: col.Name,
 				Type: col.EdmType,
-			})
+			}
+			if keyColumns[col.Name] {
+				p.Nullable = &notNullable
+			}
+			et.Properties = append(et.Properties, p)
 		}
 		doc.DataServices.Schema.Types = append(doc.DataServices.Schema.Types, et)
 		doc.DataServices.Schema.Container.Sets = append(doc.DataServices.Schema.Container.Sets, entitySet{

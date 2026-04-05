@@ -1,0 +1,9 @@
+target: raw.invoices
+kind: tracked
+run_type: backfill
+rows_affected: 3
+run_reason: first run
+row_count: 3
+has_content_hash: 1
+group_count: 2
+inv001_hashes: 1

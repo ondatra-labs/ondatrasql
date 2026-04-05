@@ -405,7 +405,7 @@ func TestRapid_Validation_InvalidKind(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		invalid := rapid.StringMatching(`^[a-z]{3,10}$`).Filter(func(s string) bool {
 			switch s {
-			case "table", "view", "append", "merge", "scd2", "partition", "events":
+			case "table", "view", "append", "merge", "scd2", "partition", "events", "tracked":
 				return false
 			}
 			return true

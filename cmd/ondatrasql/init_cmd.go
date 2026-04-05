@@ -36,6 +36,7 @@ func runInit() error {
 		"models/staging",
 		"models/intermediate",
 		"models/mart",
+		"models/sync",
 		"sql",
 	}
 	for _, d := range dirs {
@@ -70,7 +71,7 @@ func runInit() error {
 	}
 
 	// Create .gitkeep files in empty model directories
-	for _, d := range []string{"lib", "models/raw", "models/staging", "models/intermediate", "models/mart"} {
+	for _, d := range []string{"lib", "models/raw", "models/staging", "models/intermediate", "models/mart", "models/sync"} {
 		gitkeep := filepath.Join(dir, d, ".gitkeep")
 		if err := os.WriteFile(gitkeep, nil, 0o644); err != nil {
 			return fmt.Errorf("write %s/.gitkeep: %w", d, err)

@@ -165,6 +165,13 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		// Partition handles its own transaction - return early
 		return r.materializePartition(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
 
+	case "tracked":
+		if model.UniqueKey == "" {
+			return 0, fmt.Errorf("tracked kind requires unique_key directive")
+		}
+		// Tracked handles its own transaction - return early
+		return r.materializeTracked(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
+
 	default:
 		return 0, fmt.Errorf("unknown kind: %s", model.Kind)
 	}
@@ -677,6 +684,217 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 	if err := r.sess.Exec(txnSQL); err != nil {
 		r.trace(result, "commit", stepStart, "error")
 		return 0, fmt.Errorf("update partition table: %w", err)
+	}
+	r.trace(result, "commit", stepStart, "ok")
+
+	r.applyComments(model)
+
+	return rowsAffected, nil
+}
+
+// materializeTracked creates or updates a tracked table with content-hash change detection.
+// Groups rows by unique_key and computes an md5 hash of all non-key columns per group.
+// On incremental runs, only groups with changed or new hashes are replaced (DELETE + INSERT).
+// The _content_hash column is added automatically, like SCD2's valid_from_snapshot.
+func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+	uk := duckdb.QuoteIdentifier(model.UniqueKey)
+
+	// Ensure schema exists
+	if err := r.ensureSchemaExists(model.Target); err != nil {
+		return 0, fmt.Errorf("ensure schema: %w", err)
+	}
+
+	// Check if target table exists
+	tableExists, err := r.tableExistsCheck(model.Target)
+	if err != nil {
+		return 0, fmt.Errorf("check table exists: %w", err)
+	}
+
+	// Get source columns, filter out _content_hash if present in source
+	allCols, err := r.getTableColumns(tmpTable)
+	if err != nil {
+		return 0, fmt.Errorf("get columns: %w", err)
+	}
+	var cleanCols []string
+	for _, col := range allCols {
+		if col != "_content_hash" {
+			cleanCols = append(cleanCols, col)
+		}
+	}
+
+	// Build hash columns (all except unique_key)
+	var hashCols []string
+	for _, col := range cleanCols {
+		if col != model.UniqueKey {
+			hashCols = append(hashCols, col)
+		}
+	}
+
+	// Build deterministic hash expression:
+	// md5(string_agg(concat_ws('|', COALESCE(col1::VARCHAR,''), ...), '|' ORDER BY col1, col2, ...))
+	var hashAggExpr string
+	if len(hashCols) == 0 {
+		// Only unique_key column — no content to hash, use constant
+		hashAggExpr = "md5('')"
+	} else {
+		var concatParts []string
+		for _, col := range hashCols {
+			concatParts = append(concatParts, fmt.Sprintf("COALESCE(%s::VARCHAR, '')", duckdb.QuoteIdentifier(col)))
+		}
+		concatExpr := fmt.Sprintf("concat_ws('|', %s)", strings.Join(concatParts, ", "))
+
+		var orderParts []string
+		for _, col := range hashCols {
+			orderParts = append(orderParts, duckdb.QuoteIdentifier(col))
+		}
+		orderExpr := strings.Join(orderParts, ", ")
+
+		hashAggExpr = fmt.Sprintf("md5(string_agg(%s, '|' ORDER BY %s))", concatExpr, orderExpr)
+	}
+
+	// Build qualified column list for SELECT (s."col1", s."col2", ...)
+	var qualifiedCols []string
+	for _, col := range cleanCols {
+		qualifiedCols = append(qualifiedCols, "s."+duckdb.QuoteIdentifier(col))
+	}
+	qualifiedColList := strings.Join(qualifiedCols, ", ")
+
+	// Create temp table with _content_hash joined per row
+	hashTmpSQL := fmt.Sprintf(`CREATE TEMP TABLE tracked_hashed AS
+WITH group_hash AS (
+    SELECT %s, %s AS _content_hash FROM %s GROUP BY %s
+)
+SELECT %s, g._content_hash
+FROM %s s JOIN group_hash g ON s.%s = g.%s`,
+		uk, hashAggExpr, tmpTable, uk,
+		qualifiedColList, tmpTable, uk, uk)
+
+	if err := r.sess.Exec(hashTmpSQL); err != nil {
+		return 0, fmt.Errorf("compute content hash: %w", err)
+	}
+	defer r.sess.Exec("DROP TABLE IF EXISTS tracked_hashed")
+
+	// Count rows
+	countResult, err := r.sess.QueryValue("SELECT COUNT(*) FROM tracked_hashed")
+	if err != nil {
+		return 0, fmt.Errorf("count rows: %w", err)
+	}
+	var totalRows int64
+	fmt.Sscanf(countResult, "%d", &totalRows)
+
+	// Build commit metadata
+	stepStart := time.Now()
+	columns, _ := backfill.CaptureSchema(r.sess, "tracked_hashed")
+	schemaHash := backfill.ComputeSchemaHash(columns)
+	colLineage, tableDeps, _ := r.extractLineage(model.SQL)
+	r.trace(result, "metadata", stepStart, "ok")
+
+	endTime := time.Now()
+	steps := ConvertTraceToSteps(result.Trace)
+	info := backfill.CommitInfo{
+		Model:         model.Target,
+		SQLHash:       sqlHash,
+		SchemaHash:    schemaHash,
+		Columns:       columns,
+		ColumnLineage: colLineage,
+		RunType:       runType,
+		DagRunID:      r.dagRunID,
+		Depends:       tableDeps,
+		Kind:          model.Kind,
+		SourceFile:    model.FilePath,
+		StartTime:     startTime.UTC().Format(time.RFC3339),
+		EndTime:       endTime.UTC().Format(time.RFC3339),
+		DurationMs:    endTime.Sub(startTime).Milliseconds(),
+		DuckDBVersion: r.sess.GetVersion(),
+		Steps:         steps,
+		GitCommit:     r.gitInfo.Commit,
+		GitBranch:     r.gitInfo.Branch,
+		GitRepoURL:    r.gitInfo.RepoURL,
+	}
+
+	if !tableExists || isBackfill {
+		// Backfill: CREATE OR REPLACE from hashed temp table
+		info.RowsAffected = totalRows
+		jsonBytes, _ := json.Marshal(info)
+
+		createSQL := sql.MustFormat("execute/table.sql", model.Target, "tracked_hashed")
+		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, model.Target, escapeSQL(string(jsonBytes)))
+
+		stepStart = time.Now()
+		if err := r.sess.Exec(txnSQL); err != nil {
+			r.trace(result, "commit", stepStart, "error")
+			return 0, fmt.Errorf("create tracked table: %w", err)
+		}
+		r.trace(result, "commit", stepStart, "ok")
+
+		r.applyComments(model)
+		r.applyStorageHints(model)
+
+		return totalRows, nil
+	}
+
+	// Incremental: find changed/new/deleted groups
+	// - LEFT JOIN detects new and changed groups (in source but not matching target)
+	// - UNION detects deleted groups (in target but not in source)
+	detectSQL := fmt.Sprintf(`CREATE TEMP TABLE tracked_changes AS
+SELECT n.%[1]s, 'upsert' AS _action FROM (
+    SELECT DISTINCT %[1]s, _content_hash FROM tracked_hashed
+) n
+LEFT JOIN (
+    SELECT DISTINCT %[1]s, _content_hash FROM %[2]s
+) o ON n.%[1]s = o.%[1]s AND n._content_hash = o._content_hash
+WHERE o.%[1]s IS NULL
+UNION ALL
+SELECT o.%[1]s, 'delete' AS _action FROM (
+    SELECT DISTINCT %[1]s FROM %[2]s
+) o
+WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Target)
+
+	if err := r.sess.Exec(detectSQL); err != nil {
+		return 0, fmt.Errorf("detect tracked changes: %w", err)
+	}
+	defer r.sess.Exec("DROP TABLE IF EXISTS tracked_changes")
+
+	// Count changed groups
+	changeCount, err := r.sess.QueryValue("SELECT COUNT(*) FROM tracked_changes")
+	if err != nil {
+		return 0, fmt.Errorf("count changes: %w", err)
+	}
+	var changedGroups int64
+	fmt.Sscanf(changeCount, "%d", &changedGroups)
+
+	if changedGroups == 0 {
+		// Nothing changed — commit with 0 rows
+		info.RowsAffected = 0
+		jsonBytes, _ := json.Marshal(info)
+		noopSQL := fmt.Sprintf("SELECT 1") // DuckLake needs a statement in the transaction
+		txnSQL := sql.MustFormat("execute/commit.sql", noopSQL, model.Target, escapeSQL(string(jsonBytes)))
+		stepStart = time.Now()
+		r.sess.Exec(txnSQL)
+		r.trace(result, "commit", stepStart, "ok")
+		return 0, nil
+	}
+
+	// Count rows being inserted (upsert groups only, not deletes)
+	rowCountSQL := fmt.Sprintf("SELECT COUNT(*) FROM tracked_hashed WHERE %s IN (SELECT %s FROM tracked_changes WHERE _action = 'upsert')", uk, uk)
+	rowCountResult, _ := r.sess.QueryValue(rowCountSQL)
+	var rowsAffected int64
+	fmt.Sscanf(rowCountResult, "%d", &rowsAffected)
+
+	info.RowsAffected = rowsAffected
+	jsonBytes, _ := json.Marshal(info)
+
+	// DELETE old rows for all changed/deleted groups, INSERT new rows for upsert groups only
+	mainSQL := fmt.Sprintf(`DELETE FROM %[1]s WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes);
+INSERT INTO %[1]s SELECT * FROM tracked_hashed WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes WHERE _action = 'upsert')`,
+		model.Target, uk)
+
+	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))
+
+	stepStart = time.Now()
+	if err := r.sess.Exec(txnSQL); err != nil {
+		r.trace(result, "commit", stepStart, "error")
+		return 0, fmt.Errorf("update tracked table: %w", err)
 	}
 	r.trace(result, "commit", stepStart, "ok")
 
