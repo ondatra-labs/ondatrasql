@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.7.0"
+var version = "0.7.1"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -179,7 +179,7 @@ func run(args []string) error {
 }
 
 func printHelp() {
-	help := fmt.Sprintf(`OndatraSQL v%s - Data Pipeline Framework
+	help := fmt.Sprintf(`OndatraSQL v%s - Write models, not infrastructure
 
 Project:
   init                    Initialize project in current directory
@@ -225,7 +225,6 @@ SQL Commands (from sql/ folder):
   cleanup [sandbox]       Delete old files (ducklake_cleanup_old_files)
   orphaned [sandbox]      Delete orphaned files (ducklake_delete_orphaned_files)
   rewrite [sandbox]       Rewrite files with deletes (ducklake_rewrite_data_files)
-  flush [sandbox]         Flush inlined data to Parquet (ducklake_flush_inlined_data)
   checkpoint [sandbox]    Run all maintenance in order
 
 Global Options:
