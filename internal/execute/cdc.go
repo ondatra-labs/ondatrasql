@@ -25,7 +25,7 @@ func (r *Runner) applySmartCDC(astJSON, kind string, cdcTables []string, snapsho
 	// Validate kind supports CDC
 	switch kind {
 	case "append", "merge", "scd2", "partition":
-		// OK
+		// OK (tracked excluded: does its own hash-based change detection)
 	default:
 		return r.deserializeAST(astJSON)
 	}

@@ -104,39 +104,65 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		return 0, fmt.Errorf("ensure schema: %w", err)
 	}
 
-	// Apply schema evolution if needed (before INSERT)
-	// This adds new columns or widens types on the target table
+	// Apply schema evolution if needed (before any materialization).
+	// Must happen before SCD2/tracked/partition dispatch since their change
+	// detection compares temp table columns against the target table.
+	// Schema evolution SQL is built here but applied inside the data transaction
+	// for table/append/merge kinds (DuckLake requires ALTER + INSERT in same txn).
+	// For SCD2/tracked/partition, applied immediately since their change detection
+	// needs the updated schema before building comparison queries.
+	var schemaEvolutionSQL string
 	if schemaChange != nil && !isBackfill {
-		if err := r.applySchemaEvolution(model.Target, *schemaChange); err != nil {
-			return 0, fmt.Errorf("schema evolution: %w", err)
+		schemaEvolutionSQL = r.buildSchemaEvolutionSQL(model.Target, *schemaChange)
+		// SCD2/tracked/partition need schema applied before change detection
+		if model.Kind == "scd2" || model.Kind == "tracked" || model.Kind == "partition" {
+			if err := r.sess.Exec(schemaEvolutionSQL); err != nil {
+				return 0, fmt.Errorf("schema evolution: %w", err)
+			}
+			schemaEvolutionSQL = "" // already applied
 		}
 	}
 
 	// In sandbox mode, force backfill if target table doesn't exist in sandbox.
-	// Incremental operations (INSERT INTO, MERGE) require the table to exist.
-	if !isBackfill && model.Kind != "table" && r.sess.ProdAlias() != "" {
+	// TRUNCATE + INSERT and incremental operations require the table to exist.
+	if !isBackfill && r.sess.ProdAlias() != "" {
 		if !r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias()) {
 			isBackfill = true
 		}
 	}
+
+	// Check if target table already exists. If it does, never use CREATE OR REPLACE —
+	// it breaks DuckLake's snapshot chain. Use TRUNCATE + INSERT BY NAME instead.
+	targetExists, _ := r.tableExistsCheck(model.Target)
 
 	// Build the main SQL statement
 	var mainSQL string
 
 	switch model.Kind {
 	case "table":
-		mainSQL = sql.MustFormat("execute/table.sql", model.Target, tmpTable)
+		if !targetExists {
+			mainSQL = sql.MustFormat("execute/table.sql", model.Target, tmpTable)
+		} else {
+			mainSQL = fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
+				model.Target, model.Target, tmpTable)
+		}
 
 	case "append":
-		if isBackfill {
+		if !targetExists {
 			mainSQL = sql.MustFormat("execute/table.sql", model.Target, tmpTable)
+		} else if isBackfill {
+			mainSQL = fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
+				model.Target, model.Target, tmpTable)
 		} else {
 			mainSQL = sql.MustFormat("execute/append.sql", model.Target, tmpTable)
 		}
 
 	case "merge":
-		if isBackfill {
+		if !targetExists {
 			mainSQL = sql.MustFormat("execute/table.sql", model.Target, tmpTable)
+		} else if isBackfill {
+			mainSQL = fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
+				model.Target, model.Target, tmpTable)
 		} else {
 			// Use MERGE INTO for upsert (DuckLake doesn't support INSERT OR REPLACE)
 			if model.UniqueKey == "" {
@@ -240,6 +266,9 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 
 	// Prepend extra SQL (e.g. ack inserts) and registry upsert to main SQL (within same transaction)
 	var preParts []string
+	// Schema evolution (ALTER TABLE) goes BEFORE the BEGIN in the final SQL string.
+	// ALTER is auto-commit DDL in DuckLake — it creates its own snapshot.
+	// Placing it before BEGIN ensures the data transaction sees the updated schema.
 	for _, extra := range extraPreSQL {
 		if extra != "" {
 			preParts = append(preParts, extra)
@@ -251,8 +280,17 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	mainSQL = strings.Join(preParts, ";\n") + ";\n" + mainSQL
 
 	// Execute everything in a single transaction
+	// Schema evolution (ALTER) is prepended BEFORE BEGIN since it's auto-commit DDL
 	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
 	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(extraInfo))
+	if schemaEvolutionSQL != "" {
+		// Schema evolution must be applied separately and committed before data transaction.
+		// DuckLake ALTER is auto-commit DDL, but inlined data tables are keyed by the
+		// ALTER snapshot. Running them in the same Exec confuses the data file mapping.
+		if err := r.sess.Exec(schemaEvolutionSQL); err != nil {
+			return 0, fmt.Errorf("schema evolution: %w", err)
+		}
+	}
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {
@@ -326,6 +364,15 @@ func (r *Runner) applySchemaEvolution(target string, change backfill.SchemaChang
 		}
 	}
 
+	// Drop removed columns
+	for _, col := range change.Dropped {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc)
+		if err := r.sess.Exec(dropSQL); err != nil {
+			return fmt.Errorf("drop column %s: %w", col.Name, err)
+		}
+	}
+
 	// Apply additive changes (new columns)
 	for _, col := range change.Added {
 		qc := duckdb.QuoteIdentifier(col.Name)
@@ -345,6 +392,68 @@ func (r *Runner) applySchemaEvolution(target string, change backfill.SchemaChang
 	}
 
 	return nil
+}
+
+// buildSchemaEvolutionSQL builds ALTER TABLE statements for schema evolution without executing them.
+// Returns a single SQL string with all ALTER statements separated by semicolons.
+func (r *Runner) buildSchemaEvolutionSQL(target string, change backfill.SchemaChange) string {
+	var stmts []string
+
+	for _, rename := range change.Renamed {
+		oldName := duckdb.QuoteIdentifier(rename.OldName)
+		newName := duckdb.QuoteIdentifier(rename.NewName)
+		stmts = append(stmts, sql.MustFormat("schema/alter_rename_column.sql", target, oldName, newName))
+	}
+	for _, col := range change.Dropped {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc))
+	}
+	for _, col := range change.Added {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		stmts = append(stmts, sql.MustFormat("schema/alter_add_column.sql", target, qc, col.Type))
+	}
+	for _, tc := range change.TypeChanged {
+		qc := duckdb.QuoteIdentifier(tc.Column)
+		stmts = append(stmts, sql.MustFormat("schema/alter_column_type.sql", target, qc, tc.NewType))
+	}
+
+	return strings.Join(stmts, ";\n")
+}
+
+// reverseSchemaEvolution undoes schema changes applied by applySchemaEvolution.
+// Called during rollback to restore the table schema to match the previous snapshot
+// before inserting historical data. Best-effort: errors are logged but not fatal,
+// since a partially reversed schema is better than aborting the rollback entirely.
+func (r *Runner) reverseSchemaEvolution(target string, change backfill.SchemaChange) {
+	// Reverse type promotions (old type)
+	for _, tc := range change.TypeChanged {
+		qc := duckdb.QuoteIdentifier(tc.Column)
+		alterSQL := sql.MustFormat("schema/alter_column_type.sql", target, qc, tc.OldType)
+		r.sess.Exec(alterSQL) // best-effort
+	}
+
+	// Re-add dropped columns
+	for _, col := range change.Dropped {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		alterSQL := sql.MustFormat("schema/alter_add_column.sql", target, qc, col.Type)
+		r.sess.Exec(alterSQL) // best-effort
+	}
+
+	// Drop added columns
+	for _, col := range change.Added {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc)
+		r.sess.Exec(dropSQL) // best-effort
+	}
+
+	// Reverse renames
+	for _, rename := range change.Renamed {
+		oldName := duckdb.QuoteIdentifier(rename.OldName)
+		newName := duckdb.QuoteIdentifier(rename.NewName)
+		// Reverse: rename newName back to oldName
+		alterSQL := sql.MustFormat("schema/alter_rename_column.sql", target, newName, oldName)
+		r.sess.Exec(alterSQL) // best-effort
+	}
 }
 
 // materializeSCD2 creates or updates an SCD2 table with history tracking.
@@ -392,7 +501,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 
 	var rowsAffected int64
 
-	if !tableExists || isBackfill {
+	if !tableExists {
 		// First run: Create table with SCD2 columns
 		createSQL := sql.MustFormat("execute/scd2_init.sql", model.Target, colList, currSnapshot, tmpTable)
 
@@ -460,6 +569,53 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		r.applyComments(model)
 		r.applyStorageHints(model)
 
+		return rowsAffected, nil
+	}
+
+	if isBackfill {
+		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain.
+		// SCD2 history resets (all rows become current with new valid_from_snapshot).
+		countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable)
+		countResult, err := r.sess.QueryValue(countSQL)
+		if err != nil {
+			return 0, fmt.Errorf("count rows: %w", err)
+		}
+		fmt.Sscanf(countResult, "%d", &rowsAffected)
+
+		stepStart := time.Now()
+		columns, _ := backfill.CaptureSchema(r.sess, tmpTable)
+		schemaHash := backfill.ComputeSchemaHash(columns)
+		colLineage, tableDeps, _ := r.extractLineage(model.SQL)
+		r.trace(result, "metadata", stepStart, "ok")
+
+		endTime := time.Now()
+		steps := ConvertTraceToSteps(result.Trace)
+		info := backfill.CommitInfo{
+			Model: model.Target, SQLHash: sqlHash, SchemaHash: schemaHash,
+			Columns: columns, ColumnLineage: colLineage, RunType: runType,
+			RowsAffected: rowsAffected, DagRunID: r.dagRunID, Depends: tableDeps,
+			Kind: model.Kind, SourceFile: model.FilePath,
+			StartTime: startTime.UTC().Format(time.RFC3339),
+			EndTime: endTime.UTC().Format(time.RFC3339),
+			DurationMs: endTime.Sub(startTime).Milliseconds(),
+			DuckDBVersion: r.sess.GetVersion(), Steps: steps,
+			GitCommit: r.gitInfo.Commit, GitBranch: r.gitInfo.Branch, GitRepoURL: r.gitInfo.RepoURL,
+		}
+		jsonBytes, _ := json.Marshal(info)
+
+		mainSQL := fmt.Sprintf(
+			"TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT %s, %d::BIGINT AS valid_from_snapshot, CAST(NULL AS BIGINT) AS valid_to_snapshot, true AS is_current FROM %s",
+			model.Target, model.Target, colList, currSnapshot, tmpTable)
+		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))
+
+		stepStart = time.Now()
+		if err := r.sess.Exec(txnSQL); err != nil {
+			r.trace(result, "commit", stepStart, "error")
+			return 0, fmt.Errorf("backfill scd2 table: %w", err)
+		}
+		r.trace(result, "commit", stepStart, "ok")
+
+		r.applyComments(model)
 		return rowsAffected, nil
 	}
 
@@ -549,6 +705,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// Step 4: Insert new versions (new + changed)
 	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
 	txnSQL := sql.MustFormat("execute/scd2_update.sql",
+		escapeSQL(model.Target), escapeSQL(model.Target),
 		model.Target, currSnapshot-1, uk, uk,
 		model.Target, currSnapshot-1, uk, uk,
 		model.Target, colList, colList, currSnapshot,
@@ -649,7 +806,7 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 	}
 	extraInfo := string(jsonBytes)
 
-	if !tableExists || isBackfill {
+	if !tableExists {
 		// First run: Create table from temp table
 		createSQL := sql.MustFormat("execute/table.sql", model.Target, tmpTable)
 
@@ -669,13 +826,29 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 		return rowsAffected, nil
 	}
 
+	if isBackfill {
+		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain
+		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
+			model.Target, model.Target, tmpTable)
+		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(extraInfo))
+
+		stepStart = time.Now()
+		if err := r.sess.Exec(txnSQL); err != nil {
+			r.trace(result, "commit", stepStart, "error")
+			return 0, fmt.Errorf("backfill partition table: %w", err)
+		}
+		r.trace(result, "commit", stepStart, "ok")
+
+		r.applyComments(model)
+		return rowsAffected, nil
+	}
+
 	// Incremental run: Delete matching partitions, then insert new data
-	// Step 1: Get distinct partition values from temp table
-	// Step 2: Delete rows in target where partition values match
-	// Step 3: Insert new rows from temp table
+	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
+		escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
 
 	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
-	txnSQL := sql.MustFormat("execute/partition_delete.sql",
+	txnSQL := registrySQL + ";\n" + sql.MustFormat("execute/partition_delete.sql",
 		model.Target, partitionCols, partitionCols, tmpTable,
 		model.Target, tmpTable,
 		model.Target, escapeSQL(extraInfo))
@@ -812,8 +985,8 @@ FROM %s s JOIN group_hash g ON s.%s = g.%s`,
 		GitRepoURL:    r.gitInfo.RepoURL,
 	}
 
-	if !tableExists || isBackfill {
-		// Backfill: CREATE OR REPLACE from hashed temp table
+	if !tableExists {
+		// First run: CREATE table from hashed temp table
 		info.RowsAffected = totalRows
 		jsonBytes, _ := json.Marshal(info)
 
@@ -830,6 +1003,26 @@ FROM %s s JOIN group_hash g ON s.%s = g.%s`,
 		r.applyComments(model)
 		r.applyStorageHints(model)
 
+		return totalRows, nil
+	}
+
+	if isBackfill {
+		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain
+		info.RowsAffected = totalRows
+		jsonBytes, _ := json.Marshal(info)
+
+		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM tracked_hashed",
+			model.Target, model.Target)
+		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))
+
+		stepStart = time.Now()
+		if err := r.sess.Exec(txnSQL); err != nil {
+			r.trace(result, "commit", stepStart, "error")
+			return 0, fmt.Errorf("backfill tracked table: %w", err)
+		}
+		r.trace(result, "commit", stepStart, "ok")
+
+		r.applyComments(model)
 		return totalRows, nil
 	}
 
@@ -864,11 +1057,13 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 	fmt.Sscanf(changeCount, "%d", &changedGroups)
 
 	if changedGroups == 0 {
-		// Nothing changed — commit with 0 rows
+		// Nothing changed — commit with 0 rows.
+		// Registry upsert ensures DuckLake creates a snapshot (so schema metadata is committed).
 		info.RowsAffected = 0
 		jsonBytes, _ := json.Marshal(info)
-		noopSQL := fmt.Sprintf("SELECT 1") // DuckLake needs a statement in the transaction
-		txnSQL := sql.MustFormat("execute/commit.sql", noopSQL, model.Target, escapeSQL(string(jsonBytes)))
+		registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
+			escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
+		txnSQL := sql.MustFormat("execute/commit.sql", registrySQL, model.Target, escapeSQL(string(jsonBytes)))
 		stepStart = time.Now()
 		r.sess.Exec(txnSQL)
 		r.trace(result, "commit", stepStart, "ok")
@@ -886,7 +1081,7 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 
 	// DELETE old rows for all changed/deleted groups, INSERT new rows for upsert groups only
 	mainSQL := fmt.Sprintf(`DELETE FROM %[1]s WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes);
-INSERT INTO %[1]s SELECT * FROM tracked_hashed WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes WHERE _action = 'upsert')`,
+INSERT INTO %[1]s BY NAME SELECT * FROM tracked_hashed WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes WHERE _action = 'upsert')`,
 		model.Target, uk)
 
 	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))

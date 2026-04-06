@@ -6,7 +6,7 @@ DELETE FROM %s
 WHERE (%s) IN (SELECT DISTINCT %s FROM %s);
 
 -- Insert new rows
-INSERT INTO %s SELECT * FROM %s;
+INSERT INTO %s BY NAME SELECT * FROM %s;
 
-CALL ducklake_set_commit_message('{{catalog}}', 'ondatrasql', 'Pipeline run: %s', extra_info => '%s');
+CALL {{catalog}}.set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');
 COMMIT

@@ -1,0 +1,29 @@
+--- run 1 (backfill) ---
+target: raw.orders
+kind: merge
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+target: mart.revenue
+kind: append
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+--- run 2 (CDC through view) ---
+target: raw.orders
+kind: merge
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+target: mart.revenue
+kind: append
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+total_rows: 4
+data:
+  customer,total
+  alice,100
+  bob,200
+  bob,250
+  carol,300

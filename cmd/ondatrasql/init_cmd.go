@@ -60,11 +60,18 @@ func runInit() error {
 		"sql/expire.sql":        initExpire(),
 		"sql/cleanup.sql":       initCleanup(),
 		"sql/orphaned.sql":      initOrphaned(),
+		"sql/rewrite.sql":       initRewrite(),
+		"sql/flush.sql":         initFlush(),
+		"sql/checkpoint.sql":    initCheckpoint(),
 		"README.md":             initReadmeMD(name),
 	}
 
 	for path, content := range files {
 		fullPath := filepath.Join(dir, path)
+		// Don't overwrite existing files
+		if _, err := os.Stat(fullPath); err == nil {
+			continue
+		}
 		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
@@ -137,6 +144,11 @@ func initCatalog() string {
 
 -- SQLite catalog with local Parquet files
 ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.files');
+
+-- DuckLake options (uncomment to customize)
+-- CALL lake.set_option('parquet_compression', 'zstd');          -- default: snappy
+-- CALL lake.set_option('target_file_size', '256MB');             -- default: 512MB
+-- CALL lake.set_option('rewrite_delete_threshold', 0.5);        -- default: 0.95
 
 --------------------------------------------------------------------------------
 -- CLOUD STORAGE (S3)
@@ -372,6 +384,55 @@ func initOrphaned() string {
 -- Delete orphaned files (files not referenced by any snapshot).
 -- Useful after failed writes or interrupted operations.
 
+CALL ducklake_delete_orphaned_files('lake', older_than => now() - INTERVAL '7 days');
+`
+}
+
+func initRewrite() string {
+	return `-- rewrite.sql - Rewrite data files with many deletes
+-- Run with: ondatrasql rewrite
+-- Preview with: ondatrasql rewrite sandbox
+--
+-- Rewrites Parquet files that contain a high proportion of deleted rows.
+-- Improves read performance by physically removing deleted data.
+-- Default threshold: 95% (rewrite if >95% of rows in a file are deleted).
+-- Run periodically on tables with frequent updates/deletes.
+
+CALL ducklake_rewrite_data_files('lake');
+`
+}
+
+func initFlush() string {
+	return `-- flush.sql - Flush inlined data to Parquet files
+-- Run with: ondatrasql flush
+-- Preview with: ondatrasql flush sandbox
+--
+-- Small writes (below inlining threshold) are stored in the catalog database.
+-- This command materializes them as Parquet files for better query performance.
+-- Run after many small incremental loads.
+
+CALL ducklake_flush_inlined_data('lake');
+`
+}
+
+func initCheckpoint() string {
+	return `-- checkpoint.sql - Run all maintenance in order
+-- Run with: ondatrasql checkpoint
+-- Preview with: ondatrasql checkpoint sandbox
+--
+-- Runs all maintenance operations in the correct order:
+-- 1. Flush inlined data to Parquet
+-- 2. Expire old snapshots (30 days)
+-- 3. Merge small adjacent files
+-- 4. Rewrite files with many deletes
+-- 5. Clean up old files (7 days)
+-- 6. Delete orphaned files (7 days)
+
+CALL ducklake_flush_inlined_data('lake');
+CALL ducklake_expire_snapshots('lake', older_than => now() - INTERVAL '30 days');
+CALL ducklake_merge_adjacent_files('lake');
+CALL ducklake_rewrite_data_files('lake');
+CALL ducklake_cleanup_old_files('lake', older_than => now() - INTERVAL '7 days');
 CALL ducklake_delete_orphaned_files('lake', older_than => now() - INTERVAL '7 days');
 `
 }

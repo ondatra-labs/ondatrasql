@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
+	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
 	"github.com/ondatra-labs/ondatrasql/internal/validation"
@@ -129,8 +130,10 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// Execute the Starlark script to collect data into temp table
 	rt := script.NewRuntime(r.sess, incrState, r.projectDir)
 
-	// Enable durable Badger-backed buffering when projectDir is set
-	if r.projectDir != "" {
+	// Enable durable Badger-backed buffering when projectDir is set.
+	// Exception: @kind: table uses in-memory collector because it does CREATE OR REPLACE
+	// (all-or-nothing) — partial Badger recovery would create duplicates.
+	if r.projectDir != "" && model.Kind != "table" {
 		rt.SetIngestDir(filepath.Join(r.projectDir, ".ondatra", "ingest"))
 	}
 
@@ -176,6 +179,34 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	}
 
 	tmpTable := scriptResult.TempTable
+
+	// Deduplicate temp table by unique_key for kinds that may have Badger duplicates.
+	// When a script crashes after save.row() but before materialization, Badger retains
+	// the rows. On the next run, the script produces the same rows again, resulting in
+	// duplicates in the temp table. Dedup keeps only the last row per unique_key.
+	if model.UniqueKey != "" {
+		switch model.Kind {
+		case "merge", "tracked", "scd2", "partition":
+			// Handle composite unique_key (comma-separated, used by partition kind)
+			var groupByCols string
+			if strings.Contains(model.UniqueKey, ",") {
+				var parts []string
+				for _, col := range strings.Split(model.UniqueKey, ",") {
+					parts = append(parts, duckdb.QuoteIdentifier(strings.TrimSpace(col)))
+				}
+				groupByCols = strings.Join(parts, ", ")
+			} else {
+				groupByCols = duckdb.QuoteIdentifier(model.UniqueKey)
+			}
+			dedupSQL := fmt.Sprintf(
+				"DELETE FROM %s WHERE rowid NOT IN (SELECT MAX(rowid) FROM %s GROUP BY %s)",
+				tmpTable, tmpTable, groupByCols)
+			if err := r.sess.Exec(dedupSQL); err != nil {
+				// Non-fatal: if dedup fails, proceed with potential duplicates
+				result.Warnings = append(result.Warnings, fmt.Sprintf("dedup warning: %v", err))
+			}
+		}
+	}
 
 	// Schema evolution check (same as SQL models)
 	if needsBackfill && (model.Kind == "append" || model.Kind == "merge" || model.Kind == "scd2" || model.Kind == "partition") {
@@ -269,6 +300,9 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	stepStart = time.Now()
 	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, scriptHash, result.RunType, result, start, extraPreSQL...)
 	if err != nil {
+		if schemaChange != nil {
+			r.reverseSchemaEvolution(model.Target, *schemaChange)
+		}
 		scriptResult.NackClaims()
 		r.cleanup(tmpTable)
 		return nil, fmt.Errorf("materialize: %w", err)
@@ -309,7 +343,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// next run re-fetches from the API and re-materializes.
 	if len(result.Errors) > 0 {
 		stepStart = time.Now()
-		if err := r.rollback(model.Target, prevSnapshot); err != nil {
+		if err := r.rollback(model.Target, prevSnapshot, schemaChange); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("rollback failed: %v", err))
 		}
 		r.trace(result, "rollback", stepStart, "error")

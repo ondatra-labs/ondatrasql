@@ -657,7 +657,7 @@ UNION ALL SELECT 2, 'Bob', 'LA'
 	}
 
 	// All records should be current
-	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_users WHERE is_current = true")
+	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_users WHERE is_current IS true")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -675,7 +675,7 @@ UNION ALL SELECT 3, 'Charlie', 'Chicago'
 
 	// Since SQL hash changed, it's a backfill → full recreate
 	// Alice should be in SF, Charlie should be present
-	val, err = p.Sess.QueryValue("SELECT city FROM staging.scd2_users WHERE id = 1 AND is_current = true")
+	val, err = p.Sess.QueryValue("SELECT city FROM staging.scd2_users WHERE id = 1 AND is_current IS true")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -684,7 +684,7 @@ UNION ALL SELECT 3, 'Charlie', 'Chicago'
 	}
 
 	// Should have at least 2 current records
-	val, err = p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_users WHERE is_current = true")
+	val, err = p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_users WHERE is_current IS true")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -920,7 +920,7 @@ SELECT 1 AS id, 'Alice' AS name, 'NYC' AS city
 	}
 
 	// Alice should still be current
-	val, err := p.Sess.QueryValue("SELECT city FROM staging.scd2_hist WHERE id = 1 AND is_current = true")
+	val, err := p.Sess.QueryValue("SELECT city FROM staging.scd2_hist WHERE id = 1 AND is_current IS true")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1513,22 +1513,22 @@ SELECT 1 AS id, 'Alice' AS name, 'NYC' AS city
 `)
 	runModel(t, p, "staging/destructive.sql")
 
-	// Second run: drop column city → destructive change → forces backfill
+	// Second run: drop column city → schema evolution via ALTER DROP (preserves snapshot chain)
 	p.AddModel("staging/destructive.sql", `-- @kind: append
 SELECT 2 AS id, 'Bob' AS name
 `)
 	r2 := runModel(t, p, "staging/destructive.sql")
-	if r2.RunType != "backfill" {
-		t.Errorf("run_type = %q, want backfill (destructive schema change)", r2.RunType)
+	if r2.RunType != "incremental" {
+		t.Errorf("run_type = %q, want incremental (schema evolution)", r2.RunType)
 	}
 	hasWarning := false
 	for _, w := range r2.Warnings {
-		if strings.Contains(w, "destructive") {
+		if strings.Contains(w, "schema evolution") {
 			hasWarning = true
 		}
 	}
 	if !hasWarning {
-		t.Errorf("expected destructive schema change warning, got: %v", r2.Warnings)
+		t.Errorf("expected schema evolution warning, got: %v", r2.Warnings)
 	}
 }
 
@@ -3250,10 +3250,10 @@ UNION ALL SELECT NULL, 'Ghost'
 	// Verify the non-NULL key has exactly 1 row
 	nonNull, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.mixed_null WHERE id = 1")
 	if nonNull != "1" {
-		t.Errorf("non-null id rows = %s, want 1 (should merge, not duplicate)", nonNull)
+		t.Errorf("non-null id rows = %s, want 1", nonNull)
 	}
 
-	// Verify NULL keys have 2 rows
+	// Verify NULL keys have 2 rows (duplicate due to NULL = NULL is not TRUE in MERGE)
 	nullRows, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.mixed_null WHERE id IS NULL")
 	if nullRows != "2" {
 		t.Errorf("null id rows = %s, want 2 (NULL = NULL is not TRUE in MERGE)", nullRows)
@@ -3900,7 +3900,7 @@ SELECT 1 AS id, 'Alice' AS name, 'alice@example.com' AS email
 	}
 
 	// Current version should have the new email
-	email, err := p.Sess.QueryValue("SELECT email FROM staging.scd2_null_tgt WHERE id = 1 AND is_current = true")
+	email, err := p.Sess.QueryValue("SELECT email FROM staging.scd2_null_tgt WHERE id = 1 AND is_current IS true")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -3964,7 +3964,7 @@ SELECT id, name, salary FROM raw.scd2_src
 	}
 
 	// All rows should be current
-	currentCount, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_life WHERE is_current = true")
+	currentCount, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_life WHERE is_current IS true")
 	if currentCount != "2" {
 		t.Errorf("current rows = %s, want 2", currentCount)
 	}
@@ -3988,7 +3988,7 @@ UNION ALL SELECT 2, 'Bob', 200
 	}
 
 	// Current Alice should have salary 150
-	salary, _ := p.Sess.QueryValue("SELECT salary FROM staging.scd2_life WHERE id = 1 AND is_current = true")
+	salary, _ := p.Sess.QueryValue("SELECT salary FROM staging.scd2_life WHERE id = 1 AND is_current IS true")
 	if salary != "150" {
 		t.Errorf("Alice salary = %s, want 150", salary)
 	}
@@ -4017,7 +4017,7 @@ UNION ALL SELECT 3, 'Charlie', 300
 		t.Errorf("Bob is_current = %s, want false (deleted)", bobCurrent)
 	}
 
-	charlieExists, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_life WHERE id = 3 AND is_current = true")
+	charlieExists, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_life WHERE id = 3 AND is_current IS true")
 	if charlieExists != "1" {
 		t.Errorf("Charlie current rows = %s, want 1", charlieExists)
 	}
@@ -4149,6 +4149,56 @@ SELECT 1 AS id, 999 AS amount
 	count, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.audit_rb")
 	if count != "3" {
 		t.Errorf("count after rollback = %s, want 3 (original)", count)
+	}
+}
+
+// --- Rollback after destructive schema evolution restores dropped columns ---
+
+func TestRun_AuditFail_Rollback_AfterDestructiveSchemaEvolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	// Verifies that rollback correctly reverses schema evolution (ALTER DROP COLUMN)
+	// so that data from the previous snapshot can be fully restored.
+	// Without reverseSchemaEvolution, the dropped column would be missing after rollback.
+	p := testutil.NewProject(t)
+
+	// Run 1: create table with 3 columns (id, name, score)
+	p.AddModel("staging/destruct_rb.sql", `-- @kind: append
+SELECT 1 AS id, 'Alice' AS name, 100 AS score
+UNION ALL SELECT 2, 'Bob', 200
+`)
+	runModel(t, p, "staging/destruct_rb.sql")
+
+	// Verify initial state has 3 columns
+	cols, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='staging' AND table_name='destruct_rb'")
+	if cols != "3" {
+		t.Fatalf("initial columns = %s, want 3", cols)
+	}
+
+	// Run 2: drop 'score' column (destructive schema change) + failing audit
+	p.AddModel("staging/destruct_rb.sql", `-- @kind: append
+-- @audit: row_count >= 1000
+SELECT 3 AS id, 'Charlie' AS name
+`)
+	_, err := runModelErr(t, p, "staging/destruct_rb.sql")
+	if err == nil {
+		t.Fatal("expected audit failure")
+	}
+
+	// After rollback: schema should be restored (3 columns including 'score')
+	colsAfter, qErr := p.Sess.QueryValue("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='staging' AND table_name='destruct_rb'")
+	if qErr != nil {
+		t.Fatalf("query columns after rollback: %v", qErr)
+	}
+	if colsAfter != "3" {
+		t.Errorf("columns after rollback = %s, want 3 (score should be restored)", colsAfter)
+	}
+
+	// Data should be restored (original 2 rows with score values)
+	scoreSum, _ := p.Sess.QueryValue("SELECT SUM(score) FROM staging.destruct_rb")
+	if scoreSum != "300" {
+		t.Errorf("score sum after rollback = %s, want 300 (original data restored)", scoreSum)
 	}
 }
 
@@ -5218,5 +5268,286 @@ SELECT 1 AS id
 	if comment != "" {
 		t.Errorf("expected no comment, got %q", comment)
 	}
+}
+
+// =============================================================================
+// Full DAG test: all kinds in one pipeline, multi-run with data changes
+// =============================================================================
+
+func TestRun_FullDAG_AllKinds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// --- Setup: raw.orders (table) → staging.orders_v (view) → 5 downstream kinds ---
+
+	p.AddModel("raw/orders.sql", `-- @kind: table
+SELECT 1 AS id, 'Alice' AS customer, 'SE' AS region, 100 AS amount, 'active' AS status
+UNION ALL SELECT 2, 'Bob', 'US', 200, 'active'
+UNION ALL SELECT 3, 'Charlie', 'SE', 150, 'active'
+UNION ALL SELECT 4, 'Diana', 'US', 300, 'pending'
+`)
+
+	p.AddModel("staging/orders_v.sql", `-- @kind: view
+SELECT * FROM raw.orders
+`)
+
+	p.AddModel("mart/orders_append.sql", `-- @kind: append
+SELECT id, customer, region, amount, status FROM staging.orders_v
+`)
+
+	p.AddModel("mart/orders_merge.sql", `-- @kind: merge
+-- @unique_key: id
+SELECT id, customer, region, amount, status FROM staging.orders_v
+`)
+
+	p.AddModel("mart/orders_scd2.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT id, customer, region, amount, status FROM staging.orders_v
+`)
+
+	p.AddModel("mart/orders_partition.sql", `-- @kind: partition
+-- @unique_key: region
+SELECT id, customer, region, amount, status FROM staging.orders_v
+`)
+
+	p.AddModel("mart/orders_tracked.sql", `-- @kind: tracked
+-- @unique_key: id
+SELECT id, customer, region, amount, status FROM staging.orders_v
+`)
+
+	// --- RUN 1: Initial backfill ---
+	t.Log("=== RUN 1: Initial backfill ===")
+
+	models := []string{
+		"raw/orders.sql",
+		"staging/orders_v.sql",
+		"mart/orders_append.sql",
+		"mart/orders_merge.sql",
+		"mart/orders_scd2.sql",
+		"mart/orders_partition.sql",
+		"mart/orders_tracked.sql",
+	}
+	for _, m := range models {
+		r := runModel(t, p, m)
+		t.Logf("  %s: %s (%s, %d rows)", m, r.RunType, r.Kind, r.RowsAffected)
+	}
+
+	// Verify all tables have 4 rows
+	for _, tbl := range []string{
+		"raw.orders",
+		"mart.orders_append",
+		"mart.orders_merge",
+		"mart.orders_partition",
+	} {
+		count := mustQuery(t, p, "SELECT COUNT(*) FROM "+tbl)
+		if count != "4" {
+			t.Errorf("RUN 1: %s count = %s, want 4", tbl, count)
+		}
+	}
+
+	// SCD2 has 4 rows, all current
+	scd2Count := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_scd2")
+	if scd2Count != "4" {
+		t.Errorf("RUN 1: scd2 count = %s, want 4", scd2Count)
+	}
+	scd2Current := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_scd2 WHERE is_current IS true")
+	if scd2Current != "4" {
+		t.Errorf("RUN 1: scd2 current = %s, want 4", scd2Current)
+	}
+
+	// Tracked has 4 rows with _hash column
+	trackedCount := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_tracked")
+	if trackedCount != "4" {
+		t.Errorf("RUN 1: tracked count = %s, want 4", trackedCount)
+	}
+
+	// Verify data correctness
+	totalAmount := mustQuery(t, p, "SELECT SUM(amount) FROM raw.orders")
+	if totalAmount != "750" {
+		t.Errorf("RUN 1: total amount = %s, want 750", totalAmount)
+	}
+
+	// --- RUN 2: No changes → incremental/skip ---
+	t.Log("=== RUN 2: No changes ===")
+
+	for _, m := range models {
+		r := runModel(t, p, m)
+		t.Logf("  %s: %s (%s, %d rows)", m, r.RunType, r.Kind, r.RowsAffected)
+	}
+
+	// Append: CDC detects no changes → 0 rows appended → still 4
+	appendCount := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_append")
+	if appendCount != "4" {
+		t.Errorf("RUN 2: append count = %s, want 4 (CDC: no changes)", appendCount)
+	}
+
+	// Merge should still have 4 rows (no changes, EXCEPT pre-filter)
+	mergeCount := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_merge")
+	if mergeCount != "4" {
+		t.Errorf("RUN 2: merge count = %s, want 4", mergeCount)
+	}
+
+	// Partition should still have 4 rows
+	partCount := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_partition")
+	if partCount != "4" {
+		t.Errorf("RUN 2: partition count = %s, want 4", partCount)
+	}
+
+	// Tracked should still have 4 rows (no changes)
+	trackedCount2 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_tracked")
+	if trackedCount2 != "4" {
+		t.Errorf("RUN 2: tracked count = %s, want 4", trackedCount2)
+	}
+
+	// SCD2 should still have 4 current rows (no changes → no new versions)
+	scd2Current2 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_scd2 WHERE is_current IS true")
+	if scd2Current2 != "4" {
+		t.Errorf("RUN 2: scd2 current = %s, want 4", scd2Current2)
+	}
+
+	// --- RUN 3: Data change (update + insert + delete) ---
+	t.Log("=== RUN 3: Data changes ===")
+
+	p.AddModel("raw/orders.sql", `-- @kind: table
+SELECT 1 AS id, 'Alice' AS customer, 'SE' AS region, 150 AS amount, 'active' AS status
+UNION ALL SELECT 2, 'Bob', 'US', 200, 'active'
+UNION ALL SELECT 5, 'Eve', 'NO', 500, 'active'
+`)
+	// Changes: id=1 amount 100→150, id=3 deleted, id=4 deleted, id=5 inserted
+
+	for _, m := range models {
+		r := runModel(t, p, m)
+		t.Logf("  %s: %s (%s, %d rows)", m, r.RunType, r.Kind, r.RowsAffected)
+	}
+
+	// Raw: 3 rows
+	rawCount := mustQuery(t, p, "SELECT COUNT(*) FROM raw.orders")
+	if rawCount != "3" {
+		t.Errorf("RUN 3: raw count = %s, want 3", rawCount)
+	}
+
+	// Append: 4 + 2 CDC changes (id=1 updated amount, id=5 new) = 6
+	appendCount3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_append")
+	if appendCount3 != "6" {
+		t.Errorf("RUN 3: append count = %s, want 6 (4 original + 2 CDC changes)", appendCount3)
+	}
+
+	// Merge: 3 rows (id=1 updated, id=3,4 removed via EXCEPT, id=5 inserted)
+	// Wait — merge doesn't delete. It only upserts.
+	// After EXCEPT: source has (1,Alice,SE,150,active), (2,Bob,US,200,active), (5,Eve,NO,500,active)
+	// Target has: (1,Alice,SE,100,active), (2,...), (3,...), (4,...)
+	// EXCEPT result: (1,Alice,SE,150,active), (5,Eve,NO,500,active) — only changed/new rows
+	// MERGE: id=1 UPDATE, id=5 INSERT → target now has ids 1,2,3,4,5 = 5 rows
+	// id=3 and id=4 remain from before (merge doesn't delete)
+	mergeCount3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_merge")
+	if mergeCount3 != "5" {
+		t.Errorf("RUN 3: merge count = %s, want 5", mergeCount3)
+	}
+	// id=1 should have updated amount
+	mergeAmount1 := mustQuery(t, p, "SELECT amount FROM mart.orders_merge WHERE id = 1")
+	if mergeAmount1 != "150" {
+		t.Errorf("RUN 3: merge id=1 amount = %s, want 150", mergeAmount1)
+	}
+
+	// Partition: CDC gives 2 changed rows (regions SE, NO).
+	// DELETE old SE rows (ids 1,3), keep US unchanged (ids 2,4), INSERT new SE+NO rows.
+	// Result: US(2,4) + SE(1) + NO(5) = 4 rows
+	partCount3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_partition")
+	if partCount3 != "4" {
+		t.Errorf("RUN 3: partition count = %s, want 4", partCount3)
+	}
+
+	// Tracked: 3 rows (reflects current source state)
+	trackedCount3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_tracked")
+	if trackedCount3 != "3" {
+		t.Errorf("RUN 3: tracked count = %s, want 3", trackedCount3)
+	}
+
+	// SCD2: 4 old + new versions for changes
+	// id=1: old closed, new opened → 2 rows for id=1
+	// id=3: closed (deleted) → 1 row
+	// id=4: closed (deleted) → 1 row
+	// id=5: new → 1 row
+	// id=2: unchanged → 1 row
+	// Total: 6 rows, 3 current
+	scd2Total3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_scd2")
+	if scd2Total3 != "6" {
+		t.Errorf("RUN 3: scd2 total = %s, want 6", scd2Total3)
+	}
+	scd2Current3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_scd2 WHERE is_current IS true")
+	if scd2Current3 != "3" {
+		t.Errorf("RUN 3: scd2 current = %s, want 3", scd2Current3)
+	}
+
+	// --- RUN 4: Schema change (add column) ---
+	t.Log("=== RUN 4: Schema change (add column) — via RunDAG ===")
+
+	p.AddModel("raw/orders.sql", `-- @kind: table
+SELECT 1 AS id, 'Alice' AS customer, 'SE' AS region, 150 AS amount, 'active' AS status, 'web' AS channel
+UNION ALL SELECT 2, 'Bob', 'US', 200, 'active', 'store'
+UNION ALL SELECT 5, 'Eve', 'NO', 500, 'active', 'web'
+`)
+
+	// Use RunDAG like the CLI does (shared session, batch decisions, propagation)
+	var dagModels []*parser.Model
+	for _, m := range models {
+		modelPath := filepath.Join(p.Dir, "models", m)
+		model, err := parser.ParseModel(modelPath, p.Dir)
+		if err != nil {
+			t.Fatalf("parse %s: %v", m, err)
+		}
+		dagModels = append(dagModels, model)
+	}
+	// Build dependents map
+	depMap := make(map[string][]string)
+	// raw.orders → staging.orders_v → mart.*
+	depMap["raw.orders"] = []string{"staging.orders_v"}
+	depMap["staging.orders_v"] = []string{
+		"mart.orders_append", "mart.orders_merge",
+		"mart.orders_scd2", "mart.orders_partition", "mart.orders_tracked",
+	}
+
+	dagResults, dagErrors := execute.RunDAG(context.Background(), p.Sess, dagModels, depMap,
+		dag.GenerateRunID(), "", "", "", "", "", nil)
+
+	for _, m := range dagModels {
+		if err := dagErrors[m.Target]; err != nil {
+			t.Errorf("RUN 4: %s failed: %v", m.Target, err)
+		}
+		if r := dagResults[m.Target]; r != nil {
+			t.Logf("  %s: %s (%s, %d rows)", m.Target, r.RunType, r.Kind, r.RowsAffected)
+		}
+	}
+
+	// Verify new column exists on raw.orders
+	rawCols := mustQuery(t, p, "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='raw' AND table_name='orders'")
+	if rawCols != "6" {
+		t.Errorf("RUN 4: raw columns = %s, want 6", rawCols)
+	}
+
+	// Channel column should have data AFTER all downstream models ran via RunDAG
+	channels := mustQuery(t, p, "SELECT COUNT(DISTINCT channel) FROM raw.orders")
+	if channels != "2" {
+		t.Errorf("RUN 4: distinct channels = %s, want 2 (after downstream models ran)", channels)
+	}
+
+	// Verify channel is not NULL
+	nullChannels := mustQuery(t, p, "SELECT COUNT(*) FROM raw.orders WHERE channel IS NULL")
+	if nullChannels != "0" {
+		t.Errorf("RUN 4: %s rows have NULL channel (expected 0)", nullChannels)
+	}
+
+	t.Log("=== ALL RUNS PASSED ===")
+}
+
+func mustQuery(t *testing.T, p *testutil.Project, sql string) string {
+	t.Helper()
+	v, err := p.Sess.QueryValue(sql)
+	if err != nil {
+		t.Fatalf("query %q: %v", sql, err)
+	}
+	return v
 }
 

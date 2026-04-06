@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.6.0"
+var version = "0.7.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -224,6 +224,9 @@ SQL Commands (from sql/ folder):
   expire [sandbox]        Expire old snapshots (ducklake_expire_snapshots)
   cleanup [sandbox]       Delete old files (ducklake_cleanup_old_files)
   orphaned [sandbox]      Delete orphaned files (ducklake_delete_orphaned_files)
+  rewrite [sandbox]       Rewrite files with deletes (ducklake_rewrite_data_files)
+  flush [sandbox]         Flush inlined data to Parquet (ducklake_flush_inlined_data)
+  checkpoint [sandbox]    Run all maintenance in order
 
 Global Options:
   --json                  Emit JSON lines to stdout (human output to stderr)`, version)

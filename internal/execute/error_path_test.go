@@ -216,7 +216,7 @@ func TestRapid_Rollback_ClosedSession(t *testing.T) {
 		target := genErrTarget().Draw(rt, "target")
 		snapshot := int64(rapid.IntRange(0, 1000).Draw(rt, "snapshot"))
 
-		err := runner.rollback(target, snapshot)
+		err := runner.rollback(target, snapshot, nil)
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}

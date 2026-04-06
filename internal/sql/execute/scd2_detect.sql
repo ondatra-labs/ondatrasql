@@ -5,7 +5,7 @@
 
 CREATE TEMP TABLE scd2_changes AS
 WITH current_rows AS (
-    SELECT * FROM %s WHERE is_current = true
+    SELECT * FROM %s WHERE is_current IS true
 )
 -- New rows (not in current)
 SELECT t.*, 'new' AS _change_type FROM %s t
@@ -17,5 +17,5 @@ JOIN current_rows c ON t.%s = c.%s
 WHERE %s;
 
 CREATE TEMP TABLE scd2_deleted AS
-SELECT %s FROM %s WHERE is_current = true
+SELECT %s FROM %s WHERE is_current IS true
 AND %s NOT IN (SELECT %s FROM %s);

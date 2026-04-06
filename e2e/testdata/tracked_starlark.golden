@@ -2,11 +2,11 @@
 target: raw.script_tracked
 kind: tracked
 run_type: backfill
-rows_affected: 3
+rows_affected: 2
 --- run 2 (skip) ---
 target: raw.script_tracked
 kind: tracked
 run_type: incremental
 rows_affected: 0
-row_count: 3
+row_count: 2
 has_hash: 1

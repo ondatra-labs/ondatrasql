@@ -280,6 +280,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Smart CDC: auto-detect tables, apply CDC to fact tables and aggregated joins
 	// Note: SCD2 is excluded because it needs full source data for proper change detection
+	// tracked excluded: it does its own hash-based change detection and needs full source data
 	isIncremental := model.Kind == "append" || model.Kind == "merge" || model.Kind == "partition"
 	if !needsBackfill && isIncremental && len(cdcTables) > 0 {
 		// NOTE: Smart rebuild detection (skipping when source hasn't changed) is disabled
@@ -345,12 +346,25 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			}
 			r.trace(result, "cdc.get_snapshot", stepStart, "ok")
 
-			// Apply CDC to fact tables and aggregated joins via AST rewriting
-			var cdcErr error
-			execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
-			if cdcErr != nil {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("AST CDC failed, using full query: %v", cdcErr))
-				execSQL = model.SQL // safe fallback
+			// Check if upstream schema changed — CDC EXCEPT requires matching column counts.
+			// Compare current vs snapshot schema for each CDC table. If any differ,
+			// skip CDC and run full query (the downstream will detect schema evolution).
+			stepStart = time.Now()
+			schemaChanged := r.cdcSchemaChanged(cdcTables, snapshotID)
+			r.trace(result, "cdc.schema_check", stepStart, "ok")
+
+			if schemaChanged {
+				result.Warnings = append(result.Warnings, "upstream schema changed, skipping CDC")
+				execSQL = model.SQL
+				needsBackfill = true
+			} else {
+				// Apply CDC to fact tables and aggregated joins via AST rewriting
+				var cdcErr error
+				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
+				if cdcErr != nil {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("AST CDC failed, using full query: %v", cdcErr))
+					execSQL = model.SQL // safe fallback
+				}
 			}
 		} else {
 			// No upstream changes. In sandbox mode, if target doesn't exist in
@@ -429,8 +443,23 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	createSQL := fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, execSQL)
 	stepStart = time.Now()
 	if err := r.sess.Exec(createSQL); err != nil {
-		r.trace(result, "create_temp", stepStart, "error")
-		return nil, fmt.Errorf("create temp table: %w", err)
+		// CDC EXCEPT can fail on edge cases (e.g. DuckDB unicode stats after TRUNCATE+INSERT).
+		// Fall back to full query without CDC.
+		if isIncremental && execSQL != model.SQL {
+			r.trace(result, "create_temp", stepStart, "retry")
+			result.Warnings = append(result.Warnings, "CDC query failed, using full query")
+			execSQL = model.SQL
+			needsBackfill = true
+			createSQL = fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, execSQL)
+			stepStart = time.Now()
+			if retryErr := r.sess.Exec(createSQL); retryErr != nil {
+				r.trace(result, "create_temp", stepStart, "error")
+				return nil, fmt.Errorf("create temp table: %w", retryErr)
+			}
+		} else {
+			r.trace(result, "create_temp", stepStart, "error")
+			return nil, fmt.Errorf("create temp table: %w", err)
+		}
 	}
 	r.trace(result, "create_temp", stepStart, "ok")
 
@@ -451,10 +480,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 	}
 
-	// Schema evolution check for append/merge/scd2/partition models
-	// Compare current schema with previous to detect additive vs destructive changes
-	// Only check if NeedsBackfill says we need backfill (table exists but SQL hash changed)
-	if needsBackfill && (model.Kind == "append" || model.Kind == "merge" || model.Kind == "scd2" || model.Kind == "partition") {
+	// Schema evolution check for models that preserve their table across runs.
+	// At backfill: all non-view kinds (SQL changed, existing table may need schema update).
+	// At incremental: also check, since upstream SELECT * can gain/lose columns between runs.
+	needsSchemaEvolution := model.Kind != "view"
+	if needsSchemaEvolution {
 		// Sub-step: Capture new schema from temp table
 		stepStart = time.Now()
 		newSchema, schemaErr := backfill.CaptureSchema(r.sess, tmpTable)
@@ -465,6 +495,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			stepStart = time.Now()
 			prevSchema, _ := backfill.GetPreviousSchema(r.sess, model.Target)
 			r.trace(result, "schema.get_previous", stepStart, "ok")
+
+			// Filter out kind-specific columns from prevSchema before comparison.
+			// These columns are added by materialization logic, not the user SQL,
+			// so they won't appear in the temp table schema.
+			prevSchema = filterKindColumns(prevSchema, model.Kind)
 
 			if prevSchema != nil && len(prevSchema) > 0 {
 				// Sub-step: Classify schema change (uses SQL for type promotion checks)
@@ -504,10 +539,18 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				}
 
 				if change.Type == backfill.SchemaChangeDestructive {
-					// Keep backfill for destructive changes, add warning
+					// Apply destructive changes via ALTER (preserves DuckLake snapshot chain).
+					// All ALTER operations are metadata-only — no file rewrites.
+					schemaChange = &change
+					needsBackfill = false
+					if model.Kind == "table" {
+						result.RunType = "full"
+					} else {
+						result.RunType = "incremental"
+					}
 					result.Warnings = append(result.Warnings,
-						fmt.Sprintf("schema change is destructive, forcing backfill: dropped=%d, type_changes=%d",
-							len(change.Dropped), len(change.TypeChanged)))
+						fmt.Sprintf("schema evolution: dropped=%d, added=%d, type_changes=%d",
+							len(change.Dropped), len(change.Added), len(change.TypeChanged)))
 				} else if change.Type == backfill.SchemaChangeAdditive || change.Type == backfill.SchemaChangeTypeChange {
 					// Additive or promotable type changes - apply schema evolution instead of backfill
 					schemaChange = &change
@@ -572,6 +615,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	stepStart = time.Now()
 	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, sqlHash, result.RunType, result, start)
 	if err != nil {
+		// Reverse schema evolution if it was applied before the failed materialization
+		if schemaChange != nil {
+			r.reverseSchemaEvolution(model.Target, *schemaChange)
+		}
 		r.cleanup(tmpTable)
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
@@ -608,7 +655,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// If audits failed, rollback
 	if len(result.Errors) > 0 {
 		stepStart = time.Now()
-		if err := r.rollback(model.Target, prevSnapshot); err != nil {
+		if err := r.rollback(model.Target, prevSnapshot, schemaChange); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("rollback failed: %v", err))
 		}
 		r.trace(result, "rollback", stepStart, "error")
@@ -648,18 +695,26 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	return result, nil
 }
 
-// rollback reverts to a previous snapshot using time travel.
+// rollback reverts to a previous snapshot using TRUNCATE + INSERT with time travel.
+// This preserves the DuckLake table_id and snapshot chain (unlike CREATE OR REPLACE
+// which creates a new table_id and breaks row lineage).
+// If schema evolution was applied, it is reversed first so the table schema matches
+// the previous snapshot before restoring data.
 // If the table did not exist at prevSnapshot (first run of a new model),
 // falls back to DROP TABLE.
-func (r *Runner) rollback(target string, prevSnapshot int64) error {
+func (r *Runner) rollback(target string, prevSnapshot int64, sc *backfill.SchemaChange) error {
 	if prevSnapshot == 0 {
 		// No previous snapshot, drop the table
 		if err := r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target)); err != nil {
 			return err
 		}
 	} else {
-		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s AS SELECT * FROM %s AT (VERSION => %d)",
-			target, target, prevSnapshot)
+		// Reverse schema evolution before restoring data
+		if sc != nil {
+			r.reverseSchemaEvolution(target, *sc)
+		}
+		sql := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s AT (VERSION => %d)",
+			target, target, target, prevSnapshot)
 		if err := r.sess.Exec(sql); err != nil {
 			if isTableNotExistError(err) {
 				if err := r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target)); err != nil {
@@ -679,6 +734,31 @@ func (r *Runner) rollback(target string, prevSnapshot int64) error {
 		"DELETE FROM _ondatra_acks WHERE target = '%s'", escapeSQL(target)))
 
 	return nil
+}
+
+// cdcSchemaChanged checks if any CDC table's schema differs between current and snapshot.
+// CDC uses EXCEPT which requires matching column counts on both sides.
+// Returns true if any table has a different number of columns at the snapshot version.
+func (r *Runner) cdcSchemaChanged(cdcTables []string, snapshotID int64) bool {
+	for _, table := range cdcTables {
+		qt := quoteTableName(table)
+		// Compare column count: current vs snapshot version
+		query := fmt.Sprintf(
+			"SELECT (SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM %s)) != "+
+				"(SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM %s AT (VERSION => %d)))",
+			qt, qt, snapshotID)
+		val, err := r.sess.QueryValue(query)
+		if err != nil {
+			// If we can't check (e.g. table didn't exist at snapshot, or sandbox mode
+			// where time travel may not work), assume unchanged — the CDC EXCEPT will
+			// fail gracefully via the retry fallback if the schema truly differs.
+			return false
+		}
+		if val == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // isTableNotExistError returns true only for DuckDB catalog errors indicating
@@ -776,6 +856,28 @@ func sanitizeTableName(target string) string {
 func (r *Runner) getTableColumns(table string) ([]string, error) {
 	query := fmt.Sprintf("SELECT * FROM ondatra_get_column_names('%s')", escapeSQL(table))
 	return r.sess.QueryRows(query)
+}
+
+// filterKindColumns removes kind-specific columns from a schema before comparison.
+// Tracked adds _content_hash, SCD2 adds valid_from_snapshot/valid_to_snapshot/is_current.
+// These are added by materialization logic, not user SQL, so they won't appear in temp tables.
+func filterKindColumns(schema []backfill.Column, kind string) []backfill.Column {
+	var exclude map[string]bool
+	switch kind {
+	case "tracked":
+		exclude = map[string]bool{"_content_hash": true}
+	case "scd2":
+		exclude = map[string]bool{"valid_from_snapshot": true, "valid_to_snapshot": true, "is_current": true}
+	default:
+		return schema
+	}
+	var filtered []backfill.Column
+	for _, col := range schema {
+		if !exclude[col.Name] {
+			filtered = append(filtered, col)
+		}
+	}
+	return filtered
 }
 
 // filterColumnsByName filters columns to only include those with names in the given list.

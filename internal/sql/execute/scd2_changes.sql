@@ -2,7 +2,7 @@
 -- Args: target, tmp_table, unique_key, unique_key, tmp_table, unique_key, unique_key, change_where
 CREATE TEMP TABLE scd2_changes AS
 WITH current_rows AS (
-    SELECT * FROM %s WHERE is_current = true
+    SELECT * FROM %s WHERE is_current IS true
 )
 -- New rows (not in current)
 SELECT t.*, 'new' AS _change_type FROM %s t

@@ -1,0 +1,299 @@
+=== RUN 1: backfill ===
+target: raw.orders
+kind: table
+run_type: backfill
+rows_affected: 4
+run_reason: first run
+target: staging.orders_v
+kind: view
+run_type: create
+rows_affected: 0
+run_reason: first run
+target: mart.orders_append
+kind: append
+run_type: backfill
+rows_affected: 4
+run_reason: first run
+target: mart.orders_merge
+kind: merge
+run_type: backfill
+rows_affected: 4
+run_reason: first run
+target: mart.orders_scd2
+kind: scd2
+run_type: backfill
+rows_affected: 4
+run_reason: first run
+target: mart.orders_partition
+kind: partition
+run_type: backfill
+rows_affected: 4
+run_reason: first run
+target: mart.orders_tracked
+kind: tracked
+run_type: backfill
+rows_affected: 4
+run_reason: first run
+run1_raw: 4
+run1_append: 4
+run1_merge: 4
+run1_partition: 4
+run1_tracked: 4
+run1_scd2_total: 4
+run1_scd2_current: 4
+=== RUN 2: no changes ===
+target: raw.orders
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: no dependencies
+target: staging.orders_v
+kind: view
+run_type: skip
+rows_affected: 0
+run_reason: definition unchanged
+target: mart.orders_append
+kind: append
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_merge
+kind: merge
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_scd2
+kind: scd2
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_partition
+kind: partition
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_tracked
+kind: tracked
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+run2_raw: 4
+run2_append: 4
+run2_merge: 4
+run2_partition: 4
+run2_tracked: 4
+run2_scd2_total: 4
+run2_scd2_current: 4
+=== RUN 3: data change ===
+target: raw.orders
+kind: table
+run_type: backfill
+rows_affected: 3
+run_reason: sql changed
+target: staging.orders_v
+kind: view
+run_type: skip
+rows_affected: 0
+run_reason: definition unchanged
+target: mart.orders_append
+kind: append
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+target: mart.orders_merge
+kind: merge
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+target: mart.orders_scd2
+kind: scd2
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+target: mart.orders_partition
+kind: partition
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+target: mart.orders_tracked
+kind: tracked
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+run3_raw: 3
+run3_append: 6
+run3_merge: 5
+run3_partition: 4
+run3_tracked: 3
+run3_scd2_total: 6
+run3_scd2_current: 3
+run3_raw_data:
+  id,customer,amount
+  1,Alice,150
+  2,Bob,200
+  5,Eve,500
+run3_merge_data:
+  id,customer,amount
+  1,Alice,150
+  2,Bob,200
+  3,Charlie,150
+  4,Diana,300
+  5,Eve,500
+run3_tracked_data:
+  id,customer,amount
+  1,Alice,150
+  2,Bob,200
+  5,Eve,500
+run3_scd2_current:
+  id,customer,amount
+  1,Alice,150
+  2,Bob,200
+  5,Eve,500
+=== RUN 4: add column ===
+target: raw.orders
+kind: table
+run_type: incremental
+rows_affected: 3
+run_reason: sql changed
+warning: schema evolution: added=1 columns, type_changes=0
+target: staging.orders_v
+kind: view
+run_type: skip
+rows_affected: 0
+run_reason: definition unchanged
+target: mart.orders_append
+kind: append
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: upstream schema changed, skipping CDC
+warning: schema evolution: added=1 columns, type_changes=0
+target: mart.orders_merge
+kind: merge
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: upstream schema changed, skipping CDC
+warning: schema evolution: added=1 columns, type_changes=0
+target: mart.orders_scd2
+kind: scd2
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: schema evolution: added=1 columns, type_changes=0
+target: mart.orders_partition
+kind: partition
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: upstream schema changed, skipping CDC
+warning: schema evolution: added=1 columns, type_changes=0
+target: mart.orders_tracked
+kind: tracked
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: schema evolution: added=1 columns, type_changes=0
+run4_raw: 3
+run4_append: 9
+run4_merge: 5
+run4_partition: 3
+run4_tracked: 3
+run4_scd2_total: 9
+run4_scd2_current: 3
+run4_raw_channel: 3
+=== RUN 5: drop column ===
+target: raw.orders
+kind: table
+run_type: full
+rows_affected: 3
+run_reason: sql changed
+warning: schema evolution: dropped=1, added=0, type_changes=0
+target: staging.orders_v
+kind: view
+run_type: skip
+rows_affected: 0
+run_reason: definition unchanged
+target: mart.orders_append
+kind: append
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: upstream schema changed, skipping CDC
+warning: schema evolution: dropped=1, added=0, type_changes=0
+target: mart.orders_merge
+kind: merge
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: upstream schema changed, skipping CDC
+warning: schema evolution: dropped=1, added=0, type_changes=0
+target: mart.orders_scd2
+kind: scd2
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+warning: schema evolution: dropped=1, added=0, type_changes=0
+target: mart.orders_partition
+kind: partition
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: upstream schema changed, skipping CDC
+warning: schema evolution: dropped=1, added=0, type_changes=0
+target: mart.orders_tracked
+kind: tracked
+run_type: incremental
+rows_affected: 3
+run_reason: unchanged
+warning: schema evolution: dropped=1, added=0, type_changes=0
+run5_raw: 3
+run5_append: 12
+run5_merge: 5
+run5_partition: 3
+run5_tracked: 3
+run5_scd2_total: 9
+run5_scd2_current: 3
+=== RUN 6: stability ===
+target: raw.orders
+kind: table
+run_type: skip
+rows_affected: 0
+run_reason: no dependencies
+target: staging.orders_v
+kind: view
+run_type: skip
+rows_affected: 0
+run_reason: definition unchanged
+target: mart.orders_append
+kind: append
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_merge
+kind: merge
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_scd2
+kind: scd2
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_partition
+kind: partition
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+target: mart.orders_tracked
+kind: tracked
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+run6_raw: 3
+run6_append: 12
+run6_merge: 5
+run6_partition: 3
+run6_tracked: 3
+run6_scd2_total: 9
+run6_scd2_current: 3

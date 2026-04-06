@@ -114,7 +114,7 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 		// Transactional INSERT INTO target + ack record (atomic)
 		stepStart = time.Now()
 		ackSQL := script.AckSQL(claimResp.ClaimID, model.Target, int64(len(claimResp.Events)))
-		txnSQL := fmt.Sprintf("BEGIN;\n%s;\nINSERT INTO %s SELECT * FROM %s;\nCOMMIT",
+		txnSQL := fmt.Sprintf("BEGIN;\n%s;\nINSERT INTO %s BY NAME SELECT * FROM %s;\nCOMMIT",
 			ackSQL, model.Target, tmpTable)
 
 		if err := r.sess.Exec(txnSQL); err != nil {

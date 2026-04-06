@@ -22,7 +22,7 @@ func TestLoadReplacesCatalogPlaceholder(t *testing.T) {
 	if strings.Contains(content, "{{catalog}}") {
 		t.Error("{{catalog}} placeholder was not replaced")
 	}
-	if !strings.Contains(content, "'my_warehouse'") {
+	if !strings.Contains(content, "my_warehouse.set_commit_message") {
 		t.Error("catalog alias not found in output")
 	}
 }
@@ -37,7 +37,7 @@ func TestSetCatalogAliasIgnoresEmpty(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if !strings.Contains(content, "'custom'") {
+	if !strings.Contains(content, "custom.set_commit_message") {
 		t.Error("empty string should not override alias")
 	}
 }

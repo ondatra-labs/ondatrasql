@@ -7,8 +7,9 @@ run_reason: first run
 --- run 2 ---
 target: staging.evolving
 kind: table
-run_type: backfill
+run_type: incremental
 rows_affected: 1
 run_reason: sql changed
+warning: schema evolution: added=1 columns, type_changes=0
 columns: 3
 age: 30

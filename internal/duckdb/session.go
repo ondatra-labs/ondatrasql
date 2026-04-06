@@ -483,6 +483,11 @@ func (s *Session) InitWithCatalog(configPath string) error {
 	s.catalogAlias = catalogAlias
 	sqlfiles.SetCatalogAlias(catalogAlias) // Set for SQL file loading
 
+	// Disable data inlining to work around DuckLake bug where ALTER ADD COLUMN
+	// + INSERT produces NULL values for the new column with inlined data.
+	// See: ducklake-inlined-data-alter-bug.md
+	s.Exec(fmt.Sprintf("CALL %s.set_option('data_inlining_row_limit', 0)", catalogAlias))
+
 	// CDC macros (still in memory context, before USE)
 	if cdcMacros, err := sqlfiles.Load("macros/cdc.sql"); err == nil {
 		if err := s.Exec(cdcMacros); err != nil {
@@ -712,6 +717,9 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 	s.catalogAlias = "sandbox"
 	s.prodAlias = prodAlias
 	sqlfiles.SetCatalogAlias("sandbox")
+
+	// Disable data inlining on sandbox catalog (workaround for DuckLake ALTER + inlined data bug)
+	s.Exec("CALL sandbox.set_option('data_inlining_row_limit', 0)")
 
 	// CDC macros (in memory context, DuckLake doesn't support CREATE MACRO)
 	if cdcMacros, err := sqlfiles.Load("macros/cdc.sql"); err == nil {

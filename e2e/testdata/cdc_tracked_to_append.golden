@@ -1,0 +1,35 @@
+--- run 1 (backfill) ---
+target: raw.orders
+kind: tracked
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+target: mart.totals
+kind: append
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+--- run 2 (CDC: Bob changed + Carol new) ---
+target: raw.orders
+kind: tracked
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+target: mart.totals
+kind: append
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+--- run 3 (no changes) ---
+target: mart.totals
+kind: append
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+total_rows: 4
+data:
+  customer,total
+  Alice,100
+  Bob,200
+  Bob,250
+  Carol,300

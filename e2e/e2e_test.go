@@ -473,7 +473,7 @@ SELECT id, name FROM raw.source
 	}
 
 	// Verify SCD2 columns exist
-	val, err := sbox.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_model WHERE is_current = true")
+	val, err := sbox.Sess.QueryValue("SELECT COUNT(*) FROM staging.scd2_model WHERE is_current IS true")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -483,7 +483,7 @@ SELECT id, name FROM raw.source
 
 	snap := newSnapshot()
 	snap.addResult(result)
-	snap.addQuery(sbox.Sess, "current_rows", "SELECT COUNT(*) FROM staging.scd2_model WHERE is_current = true")
+	snap.addQuery(sbox.Sess, "current_rows", "SELECT COUNT(*) FROM staging.scd2_model WHERE is_current IS true")
 	assertGolden(t, "sandbox_scd2_cross_schema", snap)
 }
 
@@ -840,7 +840,7 @@ GROUP BY country
 	if results["staging.history"].RunType == "skip" {
 		t.Errorf("staging.history: should not skip when raw.customers changed")
 	}
-	val, _ = sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current = true")
+	val, _ = sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current IS true")
 	if val != "4" {
 		t.Errorf("staging.history current rows = %s, want 4", val)
 	}
@@ -855,7 +855,7 @@ GROUP BY country
 	snap := newSnapshot()
 	snap.addDAGResults(results)
 	snap.addQuery(sbox.Sess, "latest_count", "SELECT COUNT(*) FROM sandbox.staging.latest")
-	snap.addQuery(sbox.Sess, "history_current", "SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current = true")
+	snap.addQuery(sbox.Sess, "history_current", "SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current IS true")
 	assertGolden(t, "dag_upstream_change", snap)
 }
 
@@ -1265,7 +1265,7 @@ SELECT id, name, country FROM raw.customers
 	runDAGSandbox(t, prod, scd2Paths)
 
 	// Verify prod has 2 current records
-	val, err := prod.Sess.QueryValue("SELECT COUNT(*) FROM staging.history WHERE is_current = true")
+	val, err := prod.Sess.QueryValue("SELECT COUNT(*) FROM staging.history WHERE is_current IS true")
 	if err != nil {
 		// Prod session was closed by NewSandboxProject — this is expected
 		// We'll verify via sandbox's prod alias instead
@@ -1300,19 +1300,19 @@ SELECT id, name, country FROM raw.customers
 	}
 
 	// All records should be current (backfill)
-	val, _ = sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current = true")
+	val, _ = sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current IS true")
 	if val != "2" {
 		t.Errorf("current rows = %s, want 2", val)
 	}
 
 	// Verify Alice's country is DK (the changed value)
-	val, _ = sbox.Sess.QueryValue("SELECT country FROM sandbox.staging.history WHERE id = 1 AND is_current = true")
+	val, _ = sbox.Sess.QueryValue("SELECT country FROM sandbox.staging.history WHERE id = 1 AND is_current IS true")
 	if val != "DK" {
 		t.Errorf("Alice country = %s, want DK", val)
 	}
 
 	// The old SE record should NOT exist (backfill replaces, not incremental)
-	val, _ = sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.history WHERE id = 1 AND is_current = false")
+	val, _ = sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.history WHERE id = 1 AND is_current IS false")
 	if val != "0" {
 		t.Errorf("closed records = %s, want 0 (backfill replaces data)", val)
 	}
@@ -1321,9 +1321,9 @@ SELECT id, name, country FROM raw.customers
 	snap := newSnapshot()
 	snap.addDAGResults(results)
 	snap.addQuery(sbox.Sess, "total_rows", "SELECT COUNT(*) FROM sandbox.staging.history")
-	snap.addQuery(sbox.Sess, "current_rows", "SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current = true")
-	snap.addQuery(sbox.Sess, "alice_country", "SELECT country FROM sandbox.staging.history WHERE id = 1 AND is_current = true")
-	snap.addQuery(sbox.Sess, "closed_records", "SELECT COUNT(*) FROM sandbox.staging.history WHERE id = 1 AND is_current = false")
+	snap.addQuery(sbox.Sess, "current_rows", "SELECT COUNT(*) FROM sandbox.staging.history WHERE is_current IS true")
+	snap.addQuery(sbox.Sess, "alice_country", "SELECT country FROM sandbox.staging.history WHERE id = 1 AND is_current IS true")
+	snap.addQuery(sbox.Sess, "closed_records", "SELECT COUNT(*) FROM sandbox.staging.history WHERE id = 1 AND is_current IS false")
 	assertGolden(t, "dag_scd2_data_change", snap)
 }
 

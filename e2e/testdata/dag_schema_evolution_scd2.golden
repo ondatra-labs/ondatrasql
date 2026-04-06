@@ -1,0 +1,34 @@
+=== RUN 1: backfill ===
+target: mart.history
+kind: scd2
+run_type: backfill
+rows_affected: 2
+run_reason: first run
+=== RUN 2: data change ===
+target: mart.history
+kind: scd2
+run_type: incremental
+rows_affected: 1
+run_reason: unchanged
+=== RUN 3: add column ===
+target: mart.history
+kind: scd2
+run_type: incremental
+rows_affected: 2
+run_reason: unchanged
+warning: schema evolution: added=1 columns, type_changes=0
+=== RUN 4: no changes ===
+target: mart.history
+kind: scd2
+run_type: incremental
+rows_affected: 0
+run_reason: unchanged
+scd2_history:
+  id,name,score,country,is_current
+  1,Alice,150,SE,true
+  1,Alice,100,,false
+  1,Alice,150,,false
+  2,Bob,200,US,true
+  2,Bob,200,,false
+total_rows: 5
+current_rows: 2
