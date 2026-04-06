@@ -7,6 +7,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -77,6 +78,9 @@ func TestGetOrCreateProjectID_PersistsAcrossCalls(t *testing.T) {
 }
 
 func TestGetOrCreateProjectID_ReadOnlyFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0o555 does not produce a read-only directory on Windows")
+	}
 	// On a read-only filesystem, persistence fails. The fallback must be
 	// deterministic so two CLI invocations from the same path get the same id.
 	dir := t.TempDir()
@@ -111,6 +115,9 @@ func TestGetOrCreateProjectID_ReadOnlyFallback(t *testing.T) {
 }
 
 func TestGetOrCreateProjectID_ReadOnly_DifferentPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0o555 does not produce a read-only directory on Windows")
+	}
 	// Two different read-only project paths must produce different (but each
 	// individually deterministic) ids — the path-hash fallback handles this.
 	a := t.TempDir()
