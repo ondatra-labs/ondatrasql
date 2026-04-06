@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.7.1"
+var version = "0.8.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -151,6 +151,9 @@ func run(args []string) error {
 		}
 		return runSQL(cfg, args[1], format)
 
+	case "schedule":
+		return runSchedule(cfg, args[1:])
+
 	case "daemon":
 		return runDaemon(ctx, cfg)
 
@@ -188,6 +191,7 @@ Project:
 Run:
   run [model]             Run all models or specific model
   sandbox [model]         Preview changes without affecting data
+  schedule [cron]         Install/show/remove OS scheduler (no args = show)
   daemon                  Start event collection daemon
   serve                   Start OData server for @expose models
 

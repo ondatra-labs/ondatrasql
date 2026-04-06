@@ -129,6 +129,10 @@ data/
 # Temp files
 *.log
 .sandbox/
+
+# Ondatra runtime state — but commit .ondatra/project-id (stable schedule identity)
+.ondatra/*
+!.ondatra/project-id
 `
 }
 

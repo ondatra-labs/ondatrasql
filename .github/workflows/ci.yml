@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: macos-latest
+            cc: cc
+          - os: windows-latest
+            cc: gcc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        shell: bash
+        env:
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: go build ./...
+
+      - name: Run schedule tests
+        shell: bash
+        run: go test -v ./internal/schedule/ ./cmd/ondatrasql/ -run "Schedule|ProjectName|GetOrCreate|Cron|Trigger|Weekday|EncodeUTF16"
