@@ -75,15 +75,22 @@ func NewSession(dbFile string) (*Session, error) {
 	return s, nil
 }
 
-// installOnce serializes INSTALL ducklake across sessions in the same process.
-// On Windows, concurrent installs race when moving the downloaded extension
-// file into place ("Could not move file: Access is denied").
+// loadExtensionsMu serializes extension install/load across sessions in the
+// same process. On Windows, concurrent installs race on the file move
+// ("Could not move file: Access is denied"), and concurrent LOAD calls can
+// also collide on file opens. Holding a process-wide mutex around the entire
+// install+load sequence makes this race-free without depending on DuckDB's
+// own locking, and lets us retry the install on transient Windows failures
+// (Defender scans, antivirus locks, etc.) without caching a one-time error.
 var (
-	installOnce sync.Once
-	installErr  error
+	loadExtensionsMu sync.Mutex
+	ducklakeInstalled bool
 )
 
 func (s *Session) loadExtensions() error {
+	loadExtensionsMu.Lock()
+	defer loadExtensionsMu.Unlock()
+
 	// Set an explicit extension directory. DuckDB's default uses platform-specific
 	// resolution that can produce malformed paths on Windows when HOME/USERPROFILE
 	// are non-standard (e.g. CI runners). Use a known-good path under the user's
@@ -92,13 +99,22 @@ func (s *Session) loadExtensions() error {
 		_ = s.Exec(fmt.Sprintf("SET extension_directory = '%s'", strings.ReplaceAll(extDir, "'", "''")))
 	}
 
-	// Install DuckLake exactly once per process to avoid Windows file-move races
-	// when multiple sessions install in parallel.
-	installOnce.Do(func() {
-		installErr = s.Exec("INSTALL ducklake")
-	})
-	if installErr != nil {
-		return installErr
+	// Install DuckLake at most once per process. Retry transient failures (e.g.
+	// Windows file-move races with antivirus/Defender) instead of caching the
+	// first error and breaking every subsequent session.
+	if !ducklakeInstalled {
+		var installErr error
+		for attempt := 0; attempt < 5; attempt++ {
+			installErr = s.Exec("INSTALL ducklake")
+			if installErr == nil {
+				ducklakeInstalled = true
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+		}
+		if !ducklakeInstalled {
+			return installErr
+		}
 	}
 	if err := s.Exec("LOAD ducklake"); err != nil {
 		return err
