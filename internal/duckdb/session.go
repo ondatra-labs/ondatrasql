@@ -112,12 +112,28 @@ func (s *Session) loadExtensions() error {
 }
 
 // defaultExtensionDir returns a writable directory for DuckDB extensions.
-// Falls back to the temp dir if home cannot be resolved.
+// Test binaries get a per-process dir to avoid the cross-process install race
+// (duckdb/duckdb#12589): "go test ./..." launches multiple test binaries in
+// parallel, all of which would otherwise INSTALL ducklake into the same shared
+// ~/.duckdb/extensions directory and collide on the file move on Windows.
+// Production binaries keep using the stable shared cache so the extension is
+// only downloaded once per machine.
 func defaultExtensionDir() string {
+	if isTestBinary() {
+		return filepath.Join(os.TempDir(), fmt.Sprintf("duckdb-ext-%d", os.Getpid()))
+	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".duckdb", "extensions")
 	}
 	return filepath.Join(os.TempDir(), "duckdb-extensions")
+}
+
+// isTestBinary reports whether the current process is a Go test binary.
+// Go's test runner names compiled test binaries with a ".test" suffix
+// (".test.exe" on Windows).
+func isTestBinary() bool {
+	exe := os.Args[0]
+	return strings.HasSuffix(exe, ".test") || strings.HasSuffix(exe, ".test.exe")
 }
 
 // GetVersion returns the DuckDB version (cached after first call).
