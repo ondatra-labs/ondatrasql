@@ -76,6 +76,14 @@ func NewSession(dbFile string) (*Session, error) {
 }
 
 func (s *Session) loadExtensions() error {
+	// Set an explicit extension directory. DuckDB's default uses platform-specific
+	// resolution that can produce malformed paths on Windows when HOME/USERPROFILE
+	// are non-standard (e.g. CI runners). Use a known-good path under the user's
+	// home or temp dir.
+	if extDir := defaultExtensionDir(); extDir != "" {
+		_ = s.Exec(fmt.Sprintf("SET extension_directory = '%s'", strings.ReplaceAll(extDir, "'", "''")))
+	}
+
 	// Install and load DuckLake (INSTALL and LOAD are both idempotent)
 	if err := s.Exec("INSTALL ducklake"); err != nil {
 		return err
@@ -89,6 +97,15 @@ func (s *Session) loadExtensions() error {
 		return err
 	}
 	return nil
+}
+
+// defaultExtensionDir returns a writable directory for DuckDB extensions.
+// Falls back to the temp dir if home cannot be resolved.
+func defaultExtensionDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".duckdb", "extensions")
+	}
+	return filepath.Join(os.TempDir(), "duckdb-extensions")
 }
 
 // GetVersion returns the DuckDB version (cached after first call).
