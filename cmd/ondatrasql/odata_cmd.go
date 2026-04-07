@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -17,7 +16,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 )
 
-func runServe(ctx context.Context, cfg *config.Config) error {
+func runOData(ctx context.Context, cfg *config.Config, port string) error {
 	// Load models, filter @expose
 	models, err := loadModelsFromDir(cfg)
 	if err != nil {
@@ -53,12 +52,6 @@ func runServe(ctx context.Context, cfg *config.Config) error {
 	schemas, err := odata.DiscoverSchemas(sess, targets)
 	if err != nil {
 		return fmt.Errorf("discover schemas: %w", err)
-	}
-
-	// Port from .env
-	port := os.Getenv("ODATA_PORT")
-	if port == "" {
-		port = "8090"
 	}
 
 	addr := "127.0.0.1:" + port

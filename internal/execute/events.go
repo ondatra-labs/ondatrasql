@@ -53,7 +53,7 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 	stepStart = time.Now()
 	if !isDaemonRunning(ctx, r.adminPort) {
 		r.trace(result, "check_daemon", stepStart, "error")
-		return nil, fmt.Errorf("event daemon is not running. Start it with: COLLECT_PORT=8080 ondatrasql daemon")
+		return nil, fmt.Errorf("event daemon is not running. Start it with: ondatrasql events 8080")
 	}
 	r.trace(result, "check_daemon", stepStart, "ok")
 

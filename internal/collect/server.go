@@ -18,8 +18,8 @@ import (
 
 // Server handles event collection (public) and flush operations (admin).
 // Two separate HTTP listeners:
-//   - Public (COLLECT_PORT): receives events from browsers/clients
-//   - Admin (COLLECT_ADMIN_PORT): localhost-bound, used by runner for flush
+//   - Public: receives events from browsers/clients (port set via `ondatrasql events <port>`)
+//   - Admin: localhost-bound, used by runner for flush (always public+1)
 type Server struct {
 	store     *Store
 	schemas   map[string]*parser.Model // target → model (for validation)

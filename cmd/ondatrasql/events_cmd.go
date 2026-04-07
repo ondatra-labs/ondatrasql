@@ -17,10 +17,11 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 )
 
-// runDaemon starts the event collection daemon.
-// It opens a Badger store, recovers any inflight events from previous crashes,
-// starts public and admin HTTP servers, and runs Badger GC periodically.
-func runDaemon(ctx context.Context, cfg *config.Config) error {
+// runEvents starts the event collection daemon on the given public port.
+// The admin port is always public+1. Opens a Badger store, recovers inflight
+// events from previous crashes, starts public and admin HTTP servers, and runs
+// Badger GC periodically.
+func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error {
 	// Load models, filter to @kind: events
 	models, err := loadModelsFromDir(cfg)
 	if err != nil {
@@ -57,19 +58,20 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("recover inflight: %w", err)
 	}
 
-	// Resolve ports
-	publicPort := os.Getenv("COLLECT_PORT")
-	if publicPort == "" {
-		publicPort = "8080"
+	// Admin port is always public+1
+	pNum, parseErr := strconv.Atoi(publicPort)
+	if parseErr != nil {
+		return fmt.Errorf("invalid port %q: %w", publicPort, parseErr)
 	}
-	adminPort := os.Getenv("COLLECT_ADMIN_PORT")
-	if adminPort == "" {
-		if p, err := strconv.Atoi(publicPort); err == nil {
-			adminPort = strconv.Itoa(p + 1)
-		} else {
-			adminPort = "8081"
-		}
+	adminPort := strconv.Itoa(pNum + 1)
+
+	// Write admin port to a runtime file so `ondatrasql run` can find it.
+	// Removed on shutdown.
+	portFile := filepath.Join(cfg.ProjectDir, ".ondatra", "events.admin.port")
+	if err := os.WriteFile(portFile, []byte(adminPort), 0o644); err != nil {
+		return fmt.Errorf("write port file: %w", err)
 	}
+	defer os.Remove(portFile)
 
 	// Start HTTP servers
 	srv := collect.NewServer(store, models, publicPort, adminPort)

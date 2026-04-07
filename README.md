@@ -181,8 +181,9 @@ OndatraSQL is designed for simplicity over horizontal scale.
 ```text
 run [model]          Run pipeline or specific model
 sandbox [model]      Preview changes safely
-serve                Serve data via OData v4
-daemon               Start event collection
+schedule [cron]      Install/show/remove OS scheduler
+odata <port>         Serve data via OData v4
+events <port>        Start event collection
 auth [provider]      Authenticate with OAuth2 providers
 sql "SELECT ..."     Query your data
 lineage overview     See all dependencies

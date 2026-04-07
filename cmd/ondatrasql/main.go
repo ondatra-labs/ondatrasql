@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.8.0"
+var version = "0.9.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -154,11 +154,17 @@ func run(args []string) error {
 	case "schedule":
 		return runSchedule(cfg, args[1:])
 
-	case "daemon":
-		return runDaemon(ctx, cfg)
+	case "events":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ondatrasql events <port>")
+		}
+		return runEvents(ctx, cfg, args[1])
 
-	case "serve":
-		return runServe(ctx, cfg)
+	case "odata":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ondatrasql odata <port>")
+		}
+		return runOData(ctx, cfg, args[1])
 
 	case "auth":
 		if len(args) < 2 {
@@ -192,8 +198,8 @@ Run:
   run [model]             Run all models or specific model
   sandbox [model]         Preview changes without affecting data
   schedule [cron]         Install/show/remove OS scheduler (no args = show)
-  daemon                  Start event collection daemon
-  serve                   Start OData server for @expose models
+  events <port>           Start event collection (admin = port+1)
+  odata <port>            Start OData server for @expose models
 
 Introspection:
   stats                   Project overview and all models

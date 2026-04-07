@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
@@ -99,8 +99,8 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	// Get git info once for the entire run
 	gitInfo := git.GetInfo(cfg.ProjectDir)
 
-	// Resolve admin port for event daemon
-	adminPort := resolveAdminPort()
+	// Resolve admin port for event daemon (empty if events not running)
+	adminPort := resolveAdminPort(cfg)
 
 	// Execute DAG using shared logic
 	failedTargets := make(map[string]string)
@@ -157,16 +157,13 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	return nil
 }
 
-// resolveAdminPort returns the event daemon admin port from environment.
-// Defaults: COLLECT_ADMIN_PORT, or COLLECT_PORT+1, or "8081".
-func resolveAdminPort() string {
-	if p := os.Getenv("COLLECT_ADMIN_PORT"); p != "" {
-		return p
+// resolveAdminPort returns the event daemon admin port from the runtime file
+// written by `ondatrasql events`. Returns empty if events daemon is not running.
+func resolveAdminPort(cfg *config.Config) string {
+	portFile := filepath.Join(cfg.ProjectDir, ".ondatra", "events.admin.port")
+	data, err := os.ReadFile(portFile)
+	if err != nil {
+		return ""
 	}
-	if p := os.Getenv("COLLECT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
-			return strconv.Itoa(port + 1)
-		}
-	}
-	return "8081"
+	return strings.TrimSpace(string(data))
 }

@@ -17,7 +17,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
 
-func TestRunServe_NoExposeModels(t *testing.T) {
+func TestRunOData_NoExposeModels(t *testing.T) {
 	p := testutil.NewProject(t)
 	oldWd, _ := os.Getwd()
 	os.Chdir(p.Dir)
@@ -35,7 +35,7 @@ SELECT 1 AS id, 100.0 AS amount`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = runServe(ctx, cfg)
+	err = runOData(ctx, cfg, "0")
 	if err == nil {
 		t.Fatal("expected error for no @expose models")
 	}
@@ -44,7 +44,7 @@ SELECT 1 AS id, 100.0 AS amount`)
 	}
 }
 
-func TestRunServe_UnmaterializedTable(t *testing.T) {
+func TestRunOData_UnmaterializedTable(t *testing.T) {
 	p := testutil.NewProject(t)
 	oldWd, _ := os.Getwd()
 	os.Chdir(p.Dir)
@@ -63,7 +63,7 @@ SELECT 1 AS id, 100.0 AS amount`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = runServe(ctx, cfg)
+	err = runOData(ctx, cfg, "0")
 	if err == nil {
 		t.Fatal("expected error for unmaterialized table")
 	}
@@ -72,7 +72,7 @@ SELECT 1 AS id, 100.0 AS amount`)
 	}
 }
 
-func TestRunServe_InvalidExposeKey(t *testing.T) {
+func TestRunOData_InvalidExposeKey(t *testing.T) {
 	p := testutil.NewProject(t)
 	oldWd, _ := os.Getwd()
 	os.Chdir(p.Dir)
@@ -97,7 +97,7 @@ SELECT 1 AS id, 100.0 AS amount`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = runServe(ctx, cfg)
+	err = runOData(ctx, cfg, "0")
 	if err == nil {
 		t.Fatal("expected error for invalid expose key column")
 	}

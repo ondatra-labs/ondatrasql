@@ -99,7 +99,7 @@ type Model struct {
 	// Set via @sorted_by directive. Applied as ALTER TABLE SET SORTED BY after materialization.
 	SortedBy []string
 
-	// Expose marks the model for OData serving via `ondatrasql serve`.
+	// Expose marks the model for OData serving via `ondatrasql odata <port>`.
 	Expose bool
 
 	// ExposeKey is the optional primary key column for OData EntityType Key.

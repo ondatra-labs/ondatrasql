@@ -13,8 +13,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
+  unit:
+    name: Unit (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +42,27 @@ jobs:
           CC: ${{ matrix.cc }}
         run: go build ./...
 
-      - name: Run schedule tests
+      - name: Test
         shell: bash
-        run: go test -v ./internal/schedule/ ./cmd/ondatrasql/ -run "Schedule|ProjectName|GetOrCreate|Cron|Trigger|Weekday|EncodeUTF16"
+        env:
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: go test ./...
+
+  integration:
+    name: Integration (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test (integration + e2e)
+        shell: bash
+        env:
+          CGO_ENABLED: 1
+          CC: gcc
+        run: go test -p 1 -tags "integration e2e" ./...
