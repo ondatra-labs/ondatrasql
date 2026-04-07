@@ -2940,7 +2940,7 @@ if not resp.ok:
     fail("upload failed")
 if resp.json["id"] != "file-123":
     fail("wrong id: " + resp.json["id"])
-`, srv.URL, testFile)
+`, srv.URL, filepath.ToSlash(testFile))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2984,7 +2984,7 @@ func TestHTTPUploadCustomFieldAndFilename(t *testing.T) {
 	rt := NewRuntime(nil, nil)
 	code := fmt.Sprintf(`
 resp = http.upload("%s", file="%s", field="document", filename="report.pdf")
-`, srv.URL, testFile)
+`, srv.URL, filepath.ToSlash(testFile))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3016,7 +3016,7 @@ func TestHTTPUploadWithBasicAuth(t *testing.T) {
 	rt := NewRuntime(nil, nil)
 	code := fmt.Sprintf(`
 resp = http.upload("%s", file="%s", auth=("user", "pass"))
-`, srv.URL, testFile)
+`, srv.URL, filepath.ToSlash(testFile))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3054,7 +3054,7 @@ func TestHTTPUploadWithDigestAuth(t *testing.T) {
 	rt := NewRuntime(nil, nil)
 	code := fmt.Sprintf(`
 resp = http.upload("%s", file="%s", auth=("user", "pass", "digest"))
-`, srv.URL, testFile)
+`, srv.URL, filepath.ToSlash(testFile))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3076,7 +3076,7 @@ func TestHTTPUploadBadAuthScheme(t *testing.T) {
 	rt := NewRuntime(nil, nil)
 	code := fmt.Sprintf(`
 resp = http.upload("http://example.com", file="%s", auth=("user", "pass", "bearer"))
-`, testFile)
+`, filepath.ToSlash(testFile))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

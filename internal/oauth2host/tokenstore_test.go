@@ -7,6 +7,7 @@ package oauth2host
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -52,7 +53,8 @@ func TestWriteAndReadToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("token file not found: %v", err)
 	}
-	if info.Mode().Perm() != 0600 {
+	// Windows doesn't honor Unix file mode bits
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Errorf("permissions = %o, want 0600", info.Mode().Perm())
 	}
 

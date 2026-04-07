@@ -75,6 +75,14 @@ func NewSession(dbFile string) (*Session, error) {
 	return s, nil
 }
 
+// installOnce serializes INSTALL ducklake across sessions in the same process.
+// On Windows, concurrent installs race when moving the downloaded extension
+// file into place ("Could not move file: Access is denied").
+var (
+	installOnce sync.Once
+	installErr  error
+)
+
 func (s *Session) loadExtensions() error {
 	// Set an explicit extension directory. DuckDB's default uses platform-specific
 	// resolution that can produce malformed paths on Windows when HOME/USERPROFILE
@@ -84,9 +92,13 @@ func (s *Session) loadExtensions() error {
 		_ = s.Exec(fmt.Sprintf("SET extension_directory = '%s'", strings.ReplaceAll(extDir, "'", "''")))
 	}
 
-	// Install and load DuckLake (INSTALL and LOAD are both idempotent)
-	if err := s.Exec("INSTALL ducklake"); err != nil {
-		return err
+	// Install DuckLake exactly once per process to avoid Windows file-move races
+	// when multiple sessions install in parallel.
+	installOnce.Do(func() {
+		installErr = s.Exec("INSTALL ducklake")
+	})
+	if installErr != nil {
+		return installErr
 	}
 	if err := s.Exec("LOAD ducklake"); err != nil {
 		return err
