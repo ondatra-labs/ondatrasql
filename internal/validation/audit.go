@@ -92,13 +92,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 			regexp.MustCompile(`(?i)^freshness\((\w+),\s*(\d+)([hd])\)$`),
 			func(m []string, t string, _ string, _ int64) string {
 				col, n, unit := m[1], m[2], m[3]
-				interval := n
-				unitName := "hours"
+				var interval, unitName string
 				if unit == "d" {
-					interval = n + " DAY"
-					unitName = "days"
+					interval, unitName = n+" DAY", "days"
 				} else {
-					interval = n + " HOUR"
+					interval, unitName = n+" HOUR", "hours"
 				}
 				return fmt.Sprintf(
 					`SELECT printf('freshness failed: %%s max value is %%s (threshold: %%s %%s)', '%s',

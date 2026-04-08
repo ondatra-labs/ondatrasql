@@ -529,6 +529,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	stepStart = time.Now()
 	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, sqlHash, result.RunType, result, start)
 	if err != nil {
+		r.trace(result, "materialize", stepStart, "error")
 		// Reverse schema evolution if it was applied before the failed materialization
 		if schemaChange != nil {
 			r.reverseSchemaEvolution(model.Target, *schemaChange)
@@ -536,6 +537,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		r.cleanup(tmpTable)
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
+	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
 
 	// Run audits (batched - single query for all audits).

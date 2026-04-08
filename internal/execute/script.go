@@ -275,6 +275,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	stepStart = time.Now()
 	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, scriptHash, result.RunType, result, start, extraPreSQL...)
 	if err != nil {
+		r.trace(result, "materialize", stepStart, "error")
 		if schemaChange != nil {
 			r.reverseSchemaEvolution(model.Target, *schemaChange)
 		}
@@ -282,6 +283,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		r.cleanup(tmpTable)
 		return nil, fmt.Errorf("materialize: %w", err)
 	}
+	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
 
 	// Run audits (batched - single query for all audits).
