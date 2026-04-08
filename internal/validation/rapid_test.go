@@ -13,6 +13,13 @@ import (
 	"pgregory.net/rapid"
 )
 
+// batchUnionAllSeparator is the inter-clause separator emitted by
+// ConstraintsToBatchSQL / AuditsToBatchSQL. Tests count occurrences of
+// it to verify batch shape — the leading and trailing newlines are
+// what distinguish a separator from a UNION ALL inside an individual
+// constraint expression.
+const batchUnionAllSeparator = "\nUNION ALL\n"
+
 // --- Generators ---
 
 func genColumnName() *rapid.Generator[string] {
@@ -26,12 +33,22 @@ func genTableName() *rapid.Generator[string] {
 // randomizeCase randomly changes the case of each character in a string.
 // This is the key property: keywords should be case-insensitive, but
 // literals (values, paths, column names) must be preserved as-is.
+//
+// Quoted-string contents (between single quotes) are left alone so
+// that constraints like `col LIKE 'Pattern'` keep their literal
+// matching behavior. The toggle flag handles repeated open/close
+// quotes; an unterminated quote leaves everything after it untouched,
+// which is the safe default.
 func randomizeCase(t *rapid.T, s string) string {
 	runes := []rune(s)
+	inQuote := false
 	for i, r := range runes {
-		// Don't mutate characters inside single-quoted strings
 		if r == '\'' {
-			break
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
 		}
 		if rapid.Bool().Draw(t, fmt.Sprintf("case_%d", i)) {
 			runes[i] = unicode.ToLower(r)
@@ -357,7 +374,7 @@ func TestRapid_ConstraintsBatch_UnionAll(t *testing.T) {
 		}
 
 		// Should have n-1 separator UNION ALL (with newlines, to avoid counting internal ones)
-		unions := strings.Count(sql, "\nUNION ALL\n")
+		unions := strings.Count(sql, batchUnionAllSeparator)
 		if unions != n-1 {
 			t.Fatalf("expected %d UNION ALL, got %d", n-1, unions)
 		}
@@ -431,7 +448,7 @@ func TestRapid_AuditsBatch_UnionAll(t *testing.T) {
 		}
 
 		// Count separator UNION ALL (with newlines) — individual queries may contain UNION ALL internally
-		separators := strings.Count(sql, "\nUNION ALL\n")
+		separators := strings.Count(sql, batchUnionAllSeparator)
 		if separators != n-1 {
 			t.Fatalf("expected %d separator UNION ALL, got %d", n-1, separators)
 		}

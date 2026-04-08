@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.10.4"
+var version = "0.10.5"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -70,7 +70,10 @@ func run(args []string) error {
 	}
 
 	// Find project root
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get current working directory: %w", err)
+	}
 	projectDir, err := config.FindProjectRoot(cwd)
 	if err != nil {
 		return fmt.Errorf("not in an ondatrasql project: %w", err)
@@ -229,7 +232,7 @@ Auth:
   auth                    List available OAuth2 providers
   auth <provider>         Authenticate with an OAuth2 provider
 
-SQL Commands (from sql/ folder, prod-only — sandbox not supported):
+SQL Commands (from sql/ folder, supports prod and sandbox modes):
   merge                   Merge small files (ducklake_merge_adjacent_files)
   expire                  Expire old snapshots (ducklake_expire_snapshots)
   cleanup                 Delete old files (ducklake_cleanup_old_files)

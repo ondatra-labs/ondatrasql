@@ -46,9 +46,11 @@ func (r *Runner) loadExtension(ext string) error {
 
 	// Install (ignore "already installed" errors)
 	if err := r.sess.Exec(installSQL); err != nil {
-		// Check if it's an "already installed" error - that's OK
+		// Check if it's an "already installed" error - that's OK.
+		// Match the full phrase so unrelated errors mentioning either word
+		// (e.g. "extension foo not installed for ...") still propagate.
 		errStr := strings.ToLower(err.Error())
-		if !strings.Contains(errStr, "already") && !strings.Contains(errStr, "installed") {
+		if !strings.Contains(errStr, "already installed") {
 			return fmt.Errorf("install: %w", err)
 		}
 	}
@@ -56,9 +58,10 @@ func (r *Runner) loadExtension(ext string) error {
 	// Load extension
 	loadSQL := fmt.Sprintf("LOAD %s", name)
 	if err := r.sess.Exec(loadSQL); err != nil {
-		// Check if already loaded
+		// Check if already loaded — match the full phrase, not the
+		// individual words, so unrelated errors don't get swallowed.
 		errStr := strings.ToLower(err.Error())
-		if !strings.Contains(errStr, "already") && !strings.Contains(errStr, "loaded") {
+		if !strings.Contains(errStr, "already loaded") {
 			return fmt.Errorf("load: %w", err)
 		}
 	}
@@ -131,8 +134,12 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	rt := script.NewRuntime(r.sess, incrState, r.projectDir)
 
 	// Enable durable Badger-backed buffering when projectDir is set.
-	// Exception: @kind: table uses in-memory collector because it does CREATE OR REPLACE
-	// (all-or-nothing) — partial Badger recovery would create duplicates.
+	// If projectDir is empty, all kinds fall back to the default in-memory
+	// collector (no on-disk staging).
+	// Exception: @kind: table uses the in-memory collector even when
+	// projectDir is set, because table materialization uses CREATE OR
+	// REPLACE (all-or-nothing) — partial Badger recovery between runs
+	// would create duplicates against an already-populated target.
 	if r.projectDir != "" && model.Kind != "table" {
 		rt.SetIngestDir(filepath.Join(r.projectDir, ".ondatra", "ingest"))
 	}
