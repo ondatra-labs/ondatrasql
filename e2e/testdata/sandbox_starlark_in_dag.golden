@@ -2,7 +2,7 @@ target: mart.summary
 kind: table
 run_type: full
 rows_affected: 1
-run_reason: upstream changed in sandbox
+run_reason: dep changed: staging.scores
 ---
 target: staging.scores
 kind: table

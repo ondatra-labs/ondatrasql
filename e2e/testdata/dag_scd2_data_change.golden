@@ -6,11 +6,11 @@ run_reason: sql changed
 ---
 target: staging.history
 kind: scd2
-run_type: full
-rows_affected: 2
-run_reason: upstream changed in sandbox
+run_type: incremental
+rows_affected: 1
+run_reason: incremental run
 ---
-total_rows: 2
+total_rows: 3
 current_rows: 2
 alice_country: DK
-closed_records: 0
+closed_records: 1

@@ -8,6 +8,7 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/duckdb/duckdb-go/v2 v2.10500.0
 	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.10.9
 	github.com/magnetde/starlark-re v0.1.2
 	github.com/rogpeppe/go-internal v1.14.1
 	github.com/testcontainers/testcontainers-go v0.41.0

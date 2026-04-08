@@ -314,34 +314,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 		r.trace(result, "cdc.has_changes", stepStart, "ok")
 
-		// Sandbox: CDC checks prod catalog snapshots, but source tables may
-		// have been re-created in sandbox during this DAG run. If any source
-		// table exists in sandbox, the upstream changed and we must backfill
-		// (not CDC — the sandbox table has the full new data, not versions).
-		// This check runs regardless of hasChanges because CDC may report
-		// false positives (other models committed to prod) while the actual
-		// source tables only changed in sandbox.
-		sandboxUpstreamChanged := false
-		if r.sess.ProdAlias() != "" {
-			for _, t := range allTableNames {
-				exists, err := r.tableExistsInCatalog(t, r.sess.CatalogAlias())
-				if err != nil {
-					return nil, err
-				}
-				if exists {
-					sandboxUpstreamChanged = true
-					break
-				}
-			}
-		}
-
-		if sandboxUpstreamChanged {
-			// Source tables changed in sandbox — run full query (no CDC).
-			// Table refs that are in sandbox will resolve correctly via
-			// search_path; table refs in prod get qualified in the block below.
-			needsBackfill = true
-			execSQL = model.SQL
-		} else if hasChanges {
+		// v0.12.0: with the catalog-fork sandbox, sandbox source tables have
+		// inherited prod snapshot history, so CDC time-travel works against
+		// them. The old sandboxUpstreamChanged → forceBackfill guard is
+		// obsolete and would still wipe append-incremental history.
+		if hasChanges {
 			// Sub-step: Get the snapshot ID for time travel
 			stepStart = time.Now()
 			snapshotID, err := r.sess.GetDagStartSnapshot()
@@ -371,21 +348,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				}
 			}
 		} else {
-			// No upstream changes. In sandbox mode, if target doesn't exist in
-			// sandbox, skip entirely — the prod table is visible via search_path.
-			// Creating an empty table would shadow it and produce a false diff.
-			if r.sess.ProdAlias() != "" {
-				exists, existsErr := r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias())
-				if existsErr != nil {
-					return nil, existsErr
-				}
-				if !exists {
-					result.RunType = "skip"
-					result.RunReason = "no upstream changes"
-					result.Duration = time.Since(start)
-					return result, nil
-				}
-			}
+			// No upstream changes. v0.12.0+: with the catalog-fork sandbox the
+			// target always exists (inherited from prod), so we never need the
+			// old empty-sandbox skip path. Apply empty CDC and continue.
 			var emptyErr error
 			execSQL, emptyErr = r.applyEmptySmartCDC(astJSON, cdcTables)
 			if emptyErr != nil {
@@ -477,27 +442,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	}
 	r.trace(result, "create_temp", stepStart, "ok")
 
-	// Sandbox skip: if incremental model produced 0 rows and target doesn't
-	// exist in sandbox, skip — the prod table is visible via search_path.
-	// This handles the case where CDC runs (hasChanges=true due to other
-	// catalog commits) but the source tables didn't actually change.
-	if isIncremental && !needsBackfill && r.sess.ProdAlias() != "" {
-		exists, existsErr := r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias())
-		if existsErr != nil {
-			r.cleanup(tmpTable)
-			return nil, existsErr
-		}
-		if !exists {
-			countVal, countErr := r.sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable))
-			if countErr == nil && countVal == "0" {
-				r.cleanup(tmpTable)
-				result.RunType = "skip"
-				result.RunReason = "no upstream changes"
-				result.Duration = time.Since(start)
-				return result, nil
-			}
-		}
-	}
+	// v0.12.0+: with the catalog-fork sandbox, the target always exists in
+	// the sandbox catalog (inherited from prod). The old empty-sandbox skip
+	// path is no longer reachable, so we drop it. Models that genuinely have
+	// nothing to write (0 incremental rows) will still execute the materialize
+	// step but it becomes a no-op INSERT.
 
 	// Schema evolution check — shared with script.go's runScript so the
 	// two execution paths can't drift on this critical correctness logic.

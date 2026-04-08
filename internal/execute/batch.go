@@ -70,11 +70,11 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model) (RunT
 		valueRows = append(valueRows, fmt.Sprintf("('%s','%s','%s')", target, hash, kind))
 	}
 
-	// Use prod catalog for snapshots in sandbox mode (sandbox catalog has no history)
+	// v0.12.0+: always read snapshots from the active catalog. In sandbox
+	// mode the catalog is a fork of prod with both inherited prod commits
+	// and new sandbox commits, so the recompute path correctly sees
+	// upstream models that ran in this sandbox session.
 	snapshotCatalog := sess.CatalogAlias()
-	if sess.ProdAlias() != "" {
-		snapshotCatalog = sess.ProdAlias()
-	}
 
 	// Load query template from SQL file
 	query := sql.MustFormat("execute/batch_run_type.sql", strings.Join(valueRows, ","), snapshotCatalog)
@@ -122,11 +122,11 @@ func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model) (*RunTypeDe
 	kind := strings.ReplaceAll(model.Kind, "'", "''")
 	valueRow := fmt.Sprintf("('%s','%s','%s')", target, hash, kind)
 
-	// Use prod catalog for snapshots in sandbox mode
+	// v0.12.0+: always read snapshots from the active catalog. In sandbox
+	// mode the catalog is a fork of prod with both inherited prod commits
+	// and new sandbox commits, so the recompute path correctly sees
+	// upstream models that ran in this sandbox session.
 	snapshotCatalog := sess.CatalogAlias()
-	if sess.ProdAlias() != "" {
-		snapshotCatalog = sess.ProdAlias()
-	}
 
 	query := sql.MustFormat("execute/batch_run_type.sql", valueRow, snapshotCatalog)
 

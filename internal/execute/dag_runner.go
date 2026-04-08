@@ -47,8 +47,6 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	results := make(map[string]*Result, len(sorted))
 	errors := make(map[string]error, len(sorted))
 
-	sandboxMode := sess.ProdAlias() != ""
-
 	for _, model := range sorted {
 		// Check context cancellation
 		select {
@@ -83,19 +81,14 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		}
 
 		// DAG propagation: if this model ran successfully (not skipped, not failed),
-		// invalidate downstream so they recompute their run_type.
+		// invalidate downstream so they recompute their run_type. v0.12.0+: in
+		// sandbox mode, the sandbox catalog has both inherited prod commits and
+		// new sandbox commits, so the standard recompute path sees the upstream
+		// change and there is no need to force "full" — recompute on its own
+		// will pick the right run type from the active catalog.
 		if err == nil && result != nil && result.RunType != "skip" {
 			for _, dep := range dependents[model.Target] {
-				if sandboxMode {
-					// In sandbox, force downstream to "full" since prod-based
-					// recompute won't see sandbox changes.
-					decisions[dep] = &RunTypeDecision{
-						RunType: "full",
-						Reason:  "upstream changed in sandbox",
-					}
-				} else {
-					delete(decisions, dep)
-				}
+				delete(decisions, dep)
 			}
 		}
 	}

@@ -6,8 +6,8 @@ run_reason: sql changed
 ---
 target: staging.inc_events
 kind: append
-run_type: full
-rows_affected: 4
-run_reason: upstream changed in sandbox
+run_type: incremental
+rows_affected: 1
+run_reason: incremental run
 ---
 sandbox_count: 4

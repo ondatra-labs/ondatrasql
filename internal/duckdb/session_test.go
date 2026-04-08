@@ -945,7 +945,8 @@ func TestSession_InitWithCatalog_NoCatalogAttached(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when no ducklake catalog found")
 	}
-	if !strings.Contains(err.Error(), "no ducklake catalog found") {
+	// v0.12.0 reworded the message into the actionable backend-validation form
+	if !strings.Contains(err.Error(), "did not attach a DuckLake catalog") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1058,7 +1059,10 @@ func TestSession_InitSandbox_MissingProdCatalog(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when prod catalog path doesn't exist")
 	}
-	if !strings.Contains(err.Error(), "attach prod") {
+	// v0.12.0: with the catalog-fork strategy, missing prod catalog now
+	// fails at the file-read step inside forkSqliteCatalog rather than at
+	// the duckdb ATTACH step. The wrapping is "fork prod catalog: read".
+	if !strings.Contains(err.Error(), "fork prod catalog") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

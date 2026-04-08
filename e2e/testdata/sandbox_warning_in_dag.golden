@@ -2,7 +2,7 @@ target: mart.summary
 kind: table
 run_type: full
 rows_affected: 1
-run_reason: upstream changed in sandbox
+run_reason: dep changed: staging.with_warning
 ---
 target: raw.source
 kind: table
@@ -14,7 +14,7 @@ target: staging.with_warning
 kind: table
 run_type: full
 rows_affected: 3
-run_reason: upstream changed in sandbox
+run_reason: dep changed: raw.source
 warning: amount > 0 failed: found 2 violations (example: -50)
 ---
 staging_count: 3

@@ -44,10 +44,15 @@ func (r *Runner) applySmartCDC(astJSON, kind string, cdcTables []string, snapsho
 		cdcSet[strings.ToLower(t)] = true
 	}
 
-	// Determine prod catalog for sandbox mode
+	// v0.12.0+: in sandbox mode, the source delta lives in the sandbox catalog
+	// (which is a fork of prod with all inherited history). CDC time-travel
+	// against the sandbox catalog uses sandbox snapshots, including the
+	// inherited prod commits, so EXCEPT correctly produces the actual delta.
+	// Pre-v0.12.0 used prod alias here, which made CDC compare prod-current
+	// vs prod-historical and miss any sandbox-only source changes.
 	catalog := ""
-	if r.sess != nil && r.sess.ProdAlias() != "" {
-		catalog = r.sess.ProdAlias()
+	if r.sess != nil {
+		catalog = r.sess.CatalogAlias()
 	}
 
 	ast.ReplaceBaseTables(
@@ -87,9 +92,10 @@ func (r *Runner) applyEmptySmartCDC(astJSON string, cdcTables []string) (string,
 		cdcSet[strings.ToLower(t)] = true
 	}
 
+	// v0.12.0+: see comment in applySmartCDC for why we use the active catalog.
 	catalog := ""
-	if r.sess != nil && r.sess.ProdAlias() != "" {
-		catalog = r.sess.ProdAlias()
+	if r.sess != nil {
+		catalog = r.sess.CatalogAlias()
 	}
 
 	ast.ReplaceBaseTables(

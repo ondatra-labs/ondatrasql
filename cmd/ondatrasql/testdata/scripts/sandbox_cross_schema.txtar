@@ -17,12 +17,13 @@ exec ondatrasql run raw.source
 exec ondatrasql run staging.appended
 exec ondatrasql run staging.merged
 
-# Sandbox with no changes - incremental models should skip
+# Sandbox v2 (v0.12.0+): incremental kinds always run; with no upstream
+# changes they produce 0 rows, so we look for "0 rows" instead of "skip".
 exec ondatrasql sandbox staging.appended
-stdout 'skip'
+stdout '0 rows'
 
 exec ondatrasql sandbox staging.merged
-stdout 'skip'
+stdout '0 rows'
 
 # Modify source and run in prod
 cp source_v2.sql models/raw/source.sql

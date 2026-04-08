@@ -16,11 +16,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	duckdbdriver "github.com/duckdb/duckdb-go/v2" // DuckDB driver (aliased; internal package is also named duckdb)
+	_ "github.com/lib/pq"                          // postgres driver for sandbox-fork side connection
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
@@ -40,6 +42,13 @@ type Session struct {
 	version      string
 	catalogAlias string // DuckLake catalog alias (e.g., "lake" or "sandbox" in sandbox mode)
 	prodAlias    string // Production catalog alias in sandbox mode (e.g., "lake")
+
+	// Sandbox v2 cleanup state. When InitSandbox forks a postgres prod catalog
+	// via CREATE DATABASE TEMPLATE, the resulting sandbox postgres database has
+	// to be dropped at session close. Empty for sqlite-fork sandboxes (the
+	// caller's `os.RemoveAll(.sandbox/)` handles those).
+	sandboxPostgresDropDB     string // sandbox database name to DROP
+	sandboxPostgresAdminConnStr string // connection string to the admin database
 }
 
 // NewSession creates a new embedded DuckDB session.
@@ -590,7 +599,10 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 	}
 }
 
-// Close terminates the session.
+// Close terminates the session. If a postgres sandbox fork is active, the
+// sandbox database is detached and dropped (via a direct lib/pq admin
+// connection) before the duckdb session itself is released. Drop failures
+// are returned but the duckdb close still runs.
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -600,11 +612,51 @@ func (s *Session) Close() error {
 	}
 	s.closed = true
 
+	// Detach the sandbox catalog from the duckdb session BEFORE closing s.conn,
+	// using s.conn directly because s.db.Exec would block waiting for the conn
+	// pool slot that s.conn currently holds.
+	if s.sandboxPostgresDropDB != "" && s.conn != nil {
+		_, _ = s.conn.ExecContext(context.Background(), "DETACH sandbox;")
+	}
+
 	if s.conn != nil {
 		s.conn.Close()
 	}
+
+	// Now that s.conn is released we can drop the sandbox postgres database
+	// via a fresh lib/pq admin connection.
+	var dropErr error
+	if s.sandboxPostgresDropDB != "" && s.sandboxPostgresAdminConnStr != "" {
+		dropErr = s.dropPostgresSandboxDatabaseAfterCloseLocked()
+		s.sandboxPostgresDropDB = ""
+		s.sandboxPostgresAdminConnStr = ""
+	}
+
 	if s.db != nil {
-		return s.db.Close()
+		if err := s.db.Close(); err != nil {
+			if dropErr != nil {
+				return fmt.Errorf("close duckdb: %w (also: drop sandbox postgres db: %v)", err, dropErr)
+			}
+			return err
+		}
+	}
+	return dropErr
+}
+
+// dropPostgresSandboxDatabaseAfterCloseLocked drops the sandbox postgres
+// database via a direct lib/pq admin connection. Called from Close after
+// s.conn has been released. Uses DROP DATABASE WITH (FORCE) (postgres 13+)
+// to terminate any lingering connections that DuckDB hasn't yet cleaned up.
+func (s *Session) dropPostgresSandboxDatabaseAfterCloseLocked() error {
+	adminDB, err := sql.Open("postgres", s.sandboxPostgresAdminConnStr)
+	if err != nil {
+		return fmt.Errorf("open postgres admin for sandbox cleanup: %w", err)
+	}
+	defer adminDB.Close()
+
+	dropSQL := fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", quoteIdent(s.sandboxPostgresDropDB))
+	if _, err := adminDB.Exec(dropSQL); err != nil {
+		return fmt.Errorf("drop sandbox postgres database %s: %w", s.sandboxPostgresDropDB, err)
 	}
 	return nil
 }
@@ -672,6 +724,18 @@ func (s *Session) InitWithCatalog(configPath string) error {
 	}
 	if err := s.Exec(os.ExpandEnv(string(catalogContent))); err != nil {
 		return fmt.Errorf("load catalog.sql: %w", err)
+	}
+
+	// Validate the catalog backend. OndatraSQL supports DuckLake catalogs over
+	// sqlite or postgres only. Reject:
+	//   - Raw sqlite/duckdb/mysql attaches that bypass DuckLake (no time travel,
+	//     no snapshots, no schema evolution — the runner needs all of that).
+	//   - DuckLake-over-mysql or DuckLake-over-duckdb backends, because the
+	//     sandbox-fork strategy in v0.12.0+ requires per-backend native fork
+	//     primitives that we only ship for sqlite (cp) and postgres
+	//     (CREATE DATABASE TEMPLATE).
+	if err := s.validateCatalogBackend(); err != nil {
+		return err
 	}
 
 	// Get the DuckLake catalog alias from system tables
@@ -775,6 +839,246 @@ func (s *Session) loadUserMacros(configPath, catalogAlias string) error {
 	return nil
 }
 
+// validateCatalogBackend is called after catalog.sql has been executed.
+// It enforces OndatraSQL's supported-backend policy:
+//
+//   - The user must attach a DuckLake catalog (not a raw sqlite or duckdb file
+//     attached via the sqlite/duckdb extensions). Raw attaches lack snapshots,
+//     time travel, and the commit_extra_info metadata that the runner relies on.
+//
+//   - The DuckLake catalog must be backed by sqlite or postgres. Other DuckLake
+//     backends (mysql, duckdb-as-catalog) are rejected because the sandbox-fork
+//     architecture in v0.12.0+ uses backend-native fork primitives that we only
+//     ship for those two: `cp` for sqlite and `CREATE DATABASE TEMPLATE` for
+//     postgres.
+//
+// The error messages are written to be actionable for users coming from
+// catalog.sql templates that include commented-out non-supported examples.
+func (s *Session) validateCatalogBackend() error {
+	// Find every database the user attached, excluding the auto-created
+	// __ducklake_metadata_* shadow databases (those reflect the user's
+	// chosen DuckLake backend, which we check via the ducklake row's path).
+	type dbRow struct {
+		name string
+		typ  string
+		path string
+	}
+	rows, err := s.QueryRowsMap(`
+		SELECT database_name, type, path
+		FROM duckdb_databases()
+		WHERE NOT internal
+		  AND database_name NOT IN ('memory', 'system', 'temp')
+		  AND database_name NOT LIKE '__ducklake_metadata_%'
+		ORDER BY database_oid`)
+	if err != nil {
+		return fmt.Errorf("inspect attached catalogs: %w", err)
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("catalog.sql did not attach a DuckLake catalog. Add an ATTACH like:\n  ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.files/');")
+	}
+
+	var attached []dbRow
+	for _, r := range rows {
+		attached = append(attached, dbRow{name: r["database_name"], typ: r["type"], path: r["path"]})
+	}
+
+	// Reject if any attached non-DuckLake catalog is present.
+	for _, db := range attached {
+		if db.typ != "ducklake" {
+			return fmt.Errorf(
+				"catalog.sql attached %q as type %q (path %q), but OndatraSQL requires a DuckLake catalog. "+
+					"Replace your ATTACH with one of:\n"+
+					"  ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.files/');\n"+
+					"  ATTACH 'ducklake:postgres:host=localhost dbname=lake' AS lake (DATA_PATH '/path/to/data/');\n"+
+					"Raw sqlite, duckdb, or other database attaches are not supported because the runner needs DuckLake's snapshots, time travel, and commit metadata.",
+				db.name, db.typ, db.path)
+		}
+	}
+
+	// At least one DuckLake catalog is attached. Validate the backend(s).
+	// DuckLake stores the underlying connection as `path` in the form
+	// `<backend>:<connection-string>`, e.g. `sqlite:/var/data/lake.sqlite`
+	// or `postgres:host=db.example.com dbname=lake`.
+	for _, db := range attached {
+		backend := backendFromDuckLakePath(db.path)
+		switch backend {
+		case "sqlite", "postgres":
+			// supported
+		case "mysql":
+			return fmt.Errorf(
+				"catalog %q is a DuckLake-on-mysql catalog (path %q), but OndatraSQL only supports sqlite and postgres backends. "+
+					"The sandbox feature uses backend-native fork primitives (cp for sqlite, CREATE DATABASE TEMPLATE for postgres) and there is no equivalent for mysql. "+
+					"Migrate your catalog to postgres or sqlite, or open an issue if mysql support is critical for your use case.",
+				db.name, db.path)
+		case "duckdb":
+			return fmt.Errorf(
+				"catalog %q is a DuckLake-on-duckdb catalog (path %q), but OndatraSQL only supports sqlite and postgres backends. "+
+					"DuckDB-as-catalog stores metadata in a duckdb file, which collides with our sqlite-fork sandbox strategy. "+
+					"Use sqlite instead: ATTACH 'ducklake:sqlite:lake.sqlite' AS lake (DATA_PATH '...');",
+				db.name, db.path)
+		default:
+			return fmt.Errorf(
+				"catalog %q has an unrecognised DuckLake backend (path %q). OndatraSQL supports sqlite and postgres only.",
+				db.name, db.path)
+		}
+	}
+
+	return nil
+}
+
+// backendFromDuckLakePath extracts the backend identifier from a DuckLake path
+// returned by duckdb_databases().path. Examples:
+//
+//	"sqlite:/var/data/lake.sqlite"          -> "sqlite"
+//	"postgres:host=localhost dbname=lake"   -> "postgres"
+//	"mysql:db=lake host=db.example.com"     -> "mysql"
+//	"duckdb:catalog.duckdb"                 -> "duckdb"
+func backendFromDuckLakePath(path string) string {
+	idx := strings.Index(path, ":")
+	if idx <= 0 {
+		return ""
+	}
+	return path[:idx]
+}
+
+// forkSqliteCatalog implements sandbox v2 fork for sqlite-backed DuckLake.
+// It copies the prod sqlite catalog file to sandboxCatalog and returns the
+// DuckLake connection string for the new sandbox catalog. Cleanup is the
+// caller's responsibility (usually os.RemoveAll on .sandbox/).
+func (s *Session) forkSqliteCatalog(prodConnStr, sandboxCatalog string) (string, error) {
+	prodCatalogPath := strings.TrimPrefix(prodConnStr, "ducklake:sqlite:")
+	if err := os.MkdirAll(filepath.Dir(sandboxCatalog), 0o755); err != nil {
+		return "", fmt.Errorf("fork prod catalog: ensure dir: %w", err)
+	}
+	src, err := os.ReadFile(prodCatalogPath)
+	if err != nil {
+		return "", fmt.Errorf("fork prod catalog: read %s: %w", prodCatalogPath, err)
+	}
+	if err := os.WriteFile(sandboxCatalog, src, 0o644); err != nil {
+		return "", fmt.Errorf("fork prod catalog: write %s: %w", sandboxCatalog, err)
+	}
+	return "ducklake:sqlite:" + sandboxCatalog, nil
+}
+
+// forkPostgresCatalog implements sandbox v2 fork for postgres-backed DuckLake
+// using `CREATE DATABASE <sandbox> TEMPLATE <prod>` — postgres' own zero-cost
+// metadata-fork primitive. The sandbox database name uses a process+random
+// suffix so concurrent sandbox runs don't collide.
+//
+// We use a direct lib/pq connection (not duckdb's postgres extension) because
+// the duckdb extension wraps every statement in a transaction and CREATE
+// DATABASE / DROP DATABASE cannot run inside transactions. The admin
+// connection is opened, used for one statement, and closed immediately.
+//
+// Cleanup state is stored on the Session so Close() can DROP DATABASE.
+func (s *Session) forkPostgresCatalog(prodConnStr string) (string, error) {
+	rawConn := strings.TrimPrefix(prodConnStr, "ducklake:postgres:")
+	params, err := parsePostgresConnString(rawConn)
+	if err != nil {
+		return "", fmt.Errorf("fork prod catalog: parse postgres conn: %w", err)
+	}
+	prodDB := params["dbname"]
+	if prodDB == "" {
+		return "", fmt.Errorf("fork prod catalog: postgres conn string is missing dbname (got %q)", rawConn)
+	}
+
+	// Generate a unique sandbox database name. Process id + random keeps
+	// concurrent sandbox sessions from colliding on the same postgres server.
+	sandboxDB := strings.ToLower(fmt.Sprintf("ondatrasql_sandbox_%d_%d", os.Getpid(), rand.Int63()))
+
+	// Build admin connection string by swapping dbname for the postgres
+	// admin database. "postgres" exists on every standard install.
+	// lib/pq defaults to requiring SSL; we inherit whatever sslmode the user
+	// configured for prod, defaulting to "disable" so local docker postgres
+	// (which has no SSL by default) just works.
+	adminParams := make(map[string]string, len(params))
+	for k, v := range params {
+		adminParams[k] = v
+	}
+	adminParams["dbname"] = "postgres"
+	if _, ok := adminParams["sslmode"]; !ok {
+		adminParams["sslmode"] = "disable"
+	}
+	adminConnStr := buildPostgresConnString(adminParams)
+
+	// Open a short-lived admin connection via lib/pq, run CREATE DATABASE
+	// TEMPLATE, close. Direct database/sql avoids the duckdb postgres
+	// extension's transaction wrapping.
+	adminDB, err := sql.Open("postgres", adminConnStr)
+	if err != nil {
+		return "", fmt.Errorf("fork prod catalog: open postgres admin: %w", err)
+	}
+	defer adminDB.Close()
+
+	// Terminate any other connections to the source database. CREATE DATABASE
+	// TEMPLATE refuses to run if anyone else has the source open, and the
+	// duckdb postgres extension caches connections that may linger past the
+	// previous session's Close. We're in a sandbox flow — by design the
+	// caller is preparing to fork prod for local validation, so disconnecting
+	// stragglers is acceptable.
+	terminateSQL := `
+		SELECT pg_terminate_backend(pid)
+		FROM pg_stat_activity
+		WHERE datname = $1 AND pid <> pg_backend_pid()`
+	if _, err := adminDB.Exec(terminateSQL, prodDB); err != nil {
+		return "", fmt.Errorf("fork prod catalog: terminate stale prod connections: %w", err)
+	}
+
+	createSQL := fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s",
+		quoteIdent(sandboxDB), quoteIdent(prodDB))
+	if _, err := adminDB.Exec(createSQL); err != nil {
+		return "", fmt.Errorf("fork prod catalog: CREATE DATABASE TEMPLATE: %w", err)
+	}
+
+	// Stash cleanup state so Close() can drop the sandbox database.
+	s.sandboxPostgresDropDB = sandboxDB
+	s.sandboxPostgresAdminConnStr = adminConnStr
+
+	// Build the sandbox DuckLake connection string by swapping dbname.
+	sandboxParams := make(map[string]string, len(params))
+	for k, v := range params {
+		sandboxParams[k] = v
+	}
+	sandboxParams["dbname"] = sandboxDB
+	return "ducklake:postgres:" + buildPostgresConnString(sandboxParams), nil
+}
+
+// parsePostgresConnString parses a libpq-style key=value space-separated
+// connection string into a map. Whitespace inside quoted values is preserved.
+func parsePostgresConnString(s string) (map[string]string, error) {
+	result := make(map[string]string)
+	for _, field := range strings.Fields(s) {
+		eq := strings.IndexByte(field, '=')
+		if eq <= 0 {
+			return nil, fmt.Errorf("invalid postgres conn token %q", field)
+		}
+		result[field[:eq]] = field[eq+1:]
+	}
+	return result, nil
+}
+
+// buildPostgresConnString reverses parsePostgresConnString.
+func buildPostgresConnString(params map[string]string) string {
+	// Sort keys for stable output (helps tests and logging).
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+params[k])
+	}
+	return strings.Join(parts, " ")
+}
+
+// quoteIdent wraps a postgres identifier in double quotes, escaping any
+// embedded quotes. We use it for the database names in CREATE/DROP DATABASE
+// since they can contain underscores and digits.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
 // CatalogAlias returns the DuckLake catalog alias (e.g., "lake").
 // In sandbox mode, this returns "sandbox" (the writable catalog).
 func (s *Session) CatalogAlias() string {
@@ -790,24 +1094,21 @@ func (s *Session) ProdAlias() string {
 	return s.prodAlias
 }
 
-// RefreshSnapshot updates curr_snapshot.
-// In sandbox mode, uses prod catalog since source data lives there.
+// RefreshSnapshot updates curr_snapshot. v0.12.0+: in sandbox mode the
+// sandbox catalog is a fork of prod, so it has the full snapshot history
+// (inherited at fork plus new sandbox commits). Always read from the active
+// catalog regardless of mode — no more prod-alias special-case.
 func (s *Session) RefreshSnapshot() error {
 	catalog := s.CatalogAlias()
-	if s.prodAlias != "" {
-		catalog = s.prodAlias
-	}
 	sqlStr := fmt.Sprintf("SET VARIABLE curr_snapshot = COALESCE((SELECT id FROM %s.current_snapshot()), 0);", catalog)
 	return s.Exec(sqlStr)
 }
 
-// SetHighWaterMark sets dag_start_snapshot for CDC.
-// In sandbox mode, uses prod catalog since model commits live there.
+// SetHighWaterMark sets dag_start_snapshot for CDC. Same v0.12.0 reasoning
+// as RefreshSnapshot — sandbox has the inherited commit history, so we read
+// from the active catalog instead of forcing prod.
 func (s *Session) SetHighWaterMark(target string) error {
 	catalog := s.CatalogAlias()
-	if s.prodAlias != "" {
-		catalog = s.prodAlias
-	}
 	sqlStr := fmt.Sprintf(`SET VARIABLE dag_start_snapshot = COALESCE(
 		(SELECT snapshot_id FROM %s.snapshots()
 		 WHERE LOWER(commit_extra_info->>'model') = LOWER('%s')
@@ -840,12 +1141,20 @@ func (s *Session) GetDagStartSnapshot() (int64, error) {
 	return id, nil
 }
 
-// InitSandbox initializes a sandbox session with dual DuckLake attach.
-// Sandbox mode attaches prod (read-only) and sandbox (writable) catalogs.
-// prodConnStr is the full DuckLake connection string (e.g. "ducklake:sqlite:/path/to/catalog.sqlite").
-// prodDataPath is the DATA_PATH for the prod catalog.
-// prodAlias is the user's catalog alias from catalog.sql (e.g., "lake").
-// Note: catalog.sql is NOT used in sandbox mode - catalogs are attached programmatically.
+// InitSandbox initializes a sandbox session as a fork of prod.
+//
+// Sandbox v2 architecture (v0.12.0+): the sandbox catalog is created as a copy
+// of the prod catalog at session start, so all stateful kinds (SCD2, append+
+// incremental, tracked) see prod's prior state and produce correct deltas.
+// Both catalogs share the same data path; sandbox writes new parquet files
+// that prod's catalog cannot see (file references live per-catalog).
+//
+//   - prodConnStr: full DuckLake connection string (e.g. "ducklake:sqlite:/path/to/catalog.sqlite").
+//     Only sqlite and postgres backends are supported; mysql/duckdb are rejected.
+//   - prodDataPath: DATA_PATH for the prod catalog. Sandbox shares this path.
+//   - sandboxCatalog: filesystem path where the forked sqlite catalog will live.
+//     For postgres prod (TODO), this is used as a marker file inside .sandbox/.
+//   - prodAlias: the user's catalog alias from catalog.sql (e.g., "lake").
 func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCatalog, prodAlias string) error {
 	// Helper to load and execute SQL file (ignores missing/empty files)
 	loadSQL := func(name string) error {
@@ -895,9 +1204,29 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		}
 	}
 
-	// PHASE 3: Attach PROD as READ_ONLY (with user's alias), SANDBOX as writable
-	// Prod uses the user's configured alias (e.g., "lake") so existing model SQL works
-	// Sandbox uses "sandbox" alias for the writable copy
+	// PHASE 3: Fork the prod catalog FIRST (via a side connection that doesn't
+	// touch the duckdb session), THEN attach prod and sandbox to the duckdb
+	// session as fresh connections. This order matters for postgres because
+	// pg_terminate_backend would otherwise kill duckdb's cached connection
+	// to the previously-attached prod, leaving stale state in the cache.
+	var sandboxConnStr string
+	switch {
+	case strings.HasPrefix(prodConnStr, "ducklake:sqlite:"):
+		var err error
+		sandboxConnStr, err = s.forkSqliteCatalog(prodConnStr, sandboxCatalog)
+		if err != nil {
+			return err
+		}
+	case strings.HasPrefix(prodConnStr, "ducklake:postgres:"):
+		var err error
+		sandboxConnStr, err = s.forkPostgresCatalog(prodConnStr)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("sandbox v2 supports sqlite and postgres catalog backends (got %q)", prodConnStr)
+	}
+
 	prodAttach := fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY", prodConnStr, prodAlias)
 	if prodDataPath != "" {
 		prodAttach += fmt.Sprintf(", DATA_PATH '%s', OVERRIDE_DATA_PATH true", prodDataPath)
@@ -907,8 +1236,12 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		return fmt.Errorf("attach prod: %w", err)
 	}
 
-	sandboxDataPath := sandboxCatalog + ".files"
-	if err := s.Exec(fmt.Sprintf("ATTACH 'ducklake:sqlite:%s' AS sandbox (DATA_PATH '%s', OVERRIDE_DATA_PATH true);", sandboxCatalog, sandboxDataPath)); err != nil {
+	// Sandbox shares the prod data path so it can read inherited parquet files.
+	// New writes from sandbox become new parquet files in the same directory;
+	// they are isolated from prod by virtue of being in sandbox's catalog only.
+	// OVERRIDE_DATA_PATH is required because the catalog stores its data path
+	// as a relative string and we want the absolute prod data path to win.
+	if err := s.Exec(fmt.Sprintf("ATTACH '%s' AS sandbox (DATA_PATH '%s', OVERRIDE_DATA_PATH true);", sandboxConnStr, prodDataPath)); err != nil {
 		return fmt.Errorf("attach sandbox: %w", err)
 	}
 

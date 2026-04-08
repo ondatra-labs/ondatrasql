@@ -14,7 +14,7 @@ target: staging.checked
 kind: table
 run_type: full
 rows_affected: 0
-run_reason: upstream changed in sandbox
+run_reason: dep changed: raw.source
 error: NOT NULL failed: id has 1 NULL values
 exec_error: constraint validation failed
 ---

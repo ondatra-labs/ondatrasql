@@ -2,7 +2,7 @@ target: mart.combined
 kind: table
 run_type: full
 rows_affected: 3
-run_reason: upstream changed in sandbox
+run_reason: dep changed: staging.left
 ---
 target: raw.data
 kind: table
@@ -14,13 +14,13 @@ target: staging.left
 kind: table
 run_type: full
 rows_affected: 3
-run_reason: upstream changed in sandbox
+run_reason: dep changed: raw.data
 ---
 target: staging.right
 kind: table
 run_type: full
 rows_affected: 3
-run_reason: upstream changed in sandbox
+run_reason: dep changed: raw.data
 ---
 combined_data:
   id,doubled,tripled

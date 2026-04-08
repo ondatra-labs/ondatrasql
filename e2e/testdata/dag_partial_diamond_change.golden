@@ -2,7 +2,7 @@ target: mart.combined
 kind: table
 run_type: full
 rows_affected: 2
-run_reason: upstream changed in sandbox
+run_reason: dep changed: staging.left
 ---
 target: raw.data
 kind: table

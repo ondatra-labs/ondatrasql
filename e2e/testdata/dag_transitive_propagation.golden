@@ -2,7 +2,7 @@ target: mart.revenue
 kind: table
 run_type: full
 rows_affected: 3
-run_reason: upstream changed in sandbox
+run_reason: dep changed: staging.enriched
 ---
 target: raw.customers
 kind: table
@@ -18,27 +18,27 @@ run_reason: sql changed
 ---
 target: staging.by_country
 kind: partition
-run_type: full
-rows_affected: 4
-run_reason: upstream changed in sandbox
+run_type: incremental
+rows_affected: 1
+run_reason: incremental run
 ---
 target: staging.enriched
 kind: append
-run_type: full
-rows_affected: 4
-run_reason: upstream changed in sandbox
+run_type: incremental
+rows_affected: 1
+run_reason: incremental run
 ---
 target: staging.history
 kind: scd2
-run_type: full
-rows_affected: 4
-run_reason: upstream changed in sandbox
+run_type: incremental
+rows_affected: 1
+run_reason: incremental run
 ---
 target: staging.latest
 kind: merge
-run_type: full
-rows_affected: 4
-run_reason: upstream changed in sandbox
+run_type: incremental
+rows_affected: 1
+run_reason: incremental run
 ---
 enriched_count: 4
 revenue_count: 3
