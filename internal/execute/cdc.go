@@ -9,14 +9,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 )
 
 // applySmartCDC applies CDC to specified tables using AST node manipulation.
 // Tables in cdcTables get time-travel CDC via EXCEPT subquery.
 //
 // Implementation uses DuckDB's json_serialize_sql/json_deserialize_sql for
-// correct-by-construction SQL rewriting. Table references inside string
-// literals are never touched because the AST separates identifiers from values.
+// correct-by-construction SQL rewriting via the internal/duckast package.
+// Table references inside string literals are never touched because the AST
+// separates identifiers from values.
 func (r *Runner) applySmartCDC(astJSON, kind string, cdcTables []string, snapshotID int64) (string, error) {
 	if len(cdcTables) == 0 {
 		return r.deserializeAST(astJSON)
@@ -30,8 +33,7 @@ func (r *Runner) applySmartCDC(astJSON, kind string, cdcTables []string, snapsho
 		return r.deserializeAST(astJSON)
 	}
 
-	// Parse AST JSON (UseNumber to preserve uint64 query_location values)
-	root, err := parseASTJSON(astJSON)
+	ast, err := duckast.Parse(astJSON)
 	if err != nil {
 		return "", fmt.Errorf("parse AST JSON: %w", err)
 	}
@@ -48,33 +50,24 @@ func (r *Runner) applySmartCDC(astJSON, kind string, cdcTables []string, snapsho
 		catalog = r.sess.ProdAlias()
 	}
 
-	// Walk AST and replace matching BASE_TABLE nodes with CDC subqueries
-	walkAST(root, func(node map[string]any) map[string]any {
-		nodeType, _ := node["type"].(string)
-		if nodeType != "BASE_TABLE" {
-			return nil
-		}
-		schema, _ := node["schema_name"].(string)
-		table, _ := node["table_name"].(string)
-		fullName := strings.ToLower(schema + "." + table)
-		if !cdcSet[fullName] {
-			return nil
-		}
-		alias, _ := node["alias"].(string)
-		cat := catalog
-		if existingCat, _ := node["catalog_name"].(string); existingCat != "" {
-			cat = existingCat
-		}
-		return buildCDCSubquery(schema, table, cat, alias, snapshotID)
-	})
+	ast.ReplaceBaseTables(
+		func(n *duckast.Node) bool {
+			return cdcSet[strings.ToLower(n.FullTableName())]
+		},
+		func(n *duckast.Node) map[string]any {
+			cat := catalog
+			if existingCat := n.CatalogName(); existingCat != "" {
+				cat = existingCat
+			}
+			return buildCDCSubquery(n.SchemaName(), n.TableName(), cat, n.Alias(), snapshotID)
+		},
+	)
 
-	// Serialize back to JSON
-	modified, err := json.Marshal(root)
+	modified, err := ast.Serialize()
 	if err != nil {
 		return "", fmt.Errorf("marshal modified AST: %w", err)
 	}
-
-	return r.deserializeAST(string(modified))
+	return r.deserializeAST(modified)
 }
 
 // applyEmptySmartCDC applies empty result to specified tables using AST node manipulation.
@@ -84,7 +77,7 @@ func (r *Runner) applyEmptySmartCDC(astJSON string, cdcTables []string) (string,
 		return r.deserializeAST(astJSON)
 	}
 
-	root, err := parseASTJSON(astJSON)
+	ast, err := duckast.Parse(astJSON)
 	if err != nil {
 		return "", fmt.Errorf("parse AST JSON: %w", err)
 	}
@@ -99,31 +92,24 @@ func (r *Runner) applyEmptySmartCDC(astJSON string, cdcTables []string) (string,
 		catalog = r.sess.ProdAlias()
 	}
 
-	walkAST(root, func(node map[string]any) map[string]any {
-		nodeType, _ := node["type"].(string)
-		if nodeType != "BASE_TABLE" {
-			return nil
-		}
-		schema, _ := node["schema_name"].(string)
-		table, _ := node["table_name"].(string)
-		fullName := strings.ToLower(schema + "." + table)
-		if !cdcSet[fullName] {
-			return nil
-		}
-		alias, _ := node["alias"].(string)
-		cat := catalog
-		if existingCat, _ := node["catalog_name"].(string); existingCat != "" {
-			cat = existingCat
-		}
-		return buildEmptyCDCSubquery(schema, table, cat, alias)
-	})
+	ast.ReplaceBaseTables(
+		func(n *duckast.Node) bool {
+			return cdcSet[strings.ToLower(n.FullTableName())]
+		},
+		func(n *duckast.Node) map[string]any {
+			cat := catalog
+			if existingCat := n.CatalogName(); existingCat != "" {
+				cat = existingCat
+			}
+			return buildEmptyCDCSubquery(n.SchemaName(), n.TableName(), cat, n.Alias())
+		},
+	)
 
-	modified, err := json.Marshal(root)
+	modified, err := ast.Serialize()
 	if err != nil {
 		return "", fmt.Errorf("marshal modified AST: %w", err)
 	}
-
-	return r.deserializeAST(string(modified))
+	return r.deserializeAST(modified)
 }
 
 // qualifyTablesInAST sets catalog_name on BASE_TABLE nodes matching the given tables.

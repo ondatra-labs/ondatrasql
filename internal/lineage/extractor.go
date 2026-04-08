@@ -3,13 +3,23 @@
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
 // Package lineage extracts column-level lineage from SQL using DuckDB's AST.
+//
+// All AST traversal goes through internal/duckast, which stores the AST as
+// a raw map[string]any with typed accessors layered on top. This means new
+// AST shapes from DuckDB upgrades are seen by the walker automatically —
+// the historical "missing field on a typed struct silently dropped data"
+// bug class (UNION nodes, COMPARISON left/right, JOIN ON conditions,
+// LIMIT/OFFSET/ORDER BY modifier subqueries) cannot recur.
 package lineage
 
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 
+	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 )
 
@@ -27,10 +37,10 @@ const (
 
 // SourceColumn represents a source column with its transformation type.
 type SourceColumn struct {
-	Table          string             `json:"table"`                    // Source table (e.g., "staging.orders")
-	Column         string             `json:"column"`                   // Source column name (e.g., "amount")
-	Transformation TransformationType `json:"transformation"`           // How it was transformed
-	FunctionName   string             `json:"function,omitempty"`       // Function name if applicable
+	Table          string             `json:"table"`              // Source table (e.g., "staging.orders")
+	Column         string             `json:"column"`             // Source column name (e.g., "amount")
+	Transformation TransformationType `json:"transformation"`     // How it was transformed
+	FunctionName   string             `json:"function,omitempty"` // Function name if applicable
 }
 
 // ColumnLineage represents the lineage of a single output column.
@@ -39,95 +49,30 @@ type ColumnLineage struct {
 	Sources []SourceColumn `json:"sources"` // Source columns with table/column/transformation
 }
 
-// AST structures for parsing DuckDB's json_serialize_sql output
-type ast struct {
-	Statements []statement `json:"statements"`
-}
-
-type statement struct {
-	Node node `json:"node"`
-}
-
-type node struct {
-	CTEMap      cteMap       `json:"cte_map"`
-	SelectList  []expression `json:"select_list"`
-	FromTable   fromTable    `json:"from_table"`
-	WhereClause *expression  `json:"where_clause"`
-	Having      *expression  `json:"having"`
-	Qualify     *expression  `json:"qualify"`
-	// Set operations: UNION / UNION ALL / INTERSECT / EXCEPT.
-	// DuckDB represents these as SET_OPERATION_NODE with `left` and `right`
-	// sub-nodes (each a SELECT_NODE) and `setop_type` describing the kind.
-	// Without these fields the AST silently unmarshals to an empty node and
-	// both column lineage and DAG dependency extraction lose all sources.
-	Left      *node  `json:"left"`
-	Right     *node  `json:"right"`
-	SetOpType string `json:"setop_type"`
-}
-
-type cteMap struct {
-	Map []cteEntry `json:"map"`
-}
-
-type cteEntry struct {
-	Key   string   `json:"key"`
-	Value cteValue `json:"value"`
-}
-
-type cteValue struct {
-	Query statement `json:"query"`
-}
-
-type fromTable struct {
-	TableName  string     `json:"table_name"`
-	SchemaName string     `json:"schema_name"`
-	Alias      string     `json:"alias"`
-	Left       *fromTable `json:"left"`
-	Right      *fromTable `json:"right"`
-	Subquery   *statement `json:"subquery"` // For sub-selects in FROM: FROM (SELECT ...) AS sub
-}
-
-type expression struct {
-	Class        string       `json:"class"`
-	Type         string       `json:"type"`
-	Alias        string       `json:"alias"`
-	ColumnNames  []string     `json:"column_names"`
-	Children     []expression `json:"children"`
-	FunctionName string       `json:"function_name"`
-	IsOperator   bool         `json:"is_operator"`
-	CaseChecks   []caseCheck  `json:"case_checks"`
-	Subquery     *statement   `json:"subquery"`  // For SUBQUERY expressions
-	Child        *expression  `json:"child"`     // For comparison child
-}
-
-type caseCheck struct {
-	WhenExpr expression `json:"when_expr"`
-	ThenExpr expression `json:"then_expr"`
-}
-
 // Extractor holds state for recursive CTE resolution.
 type Extractor struct {
-	cteNodes map[string]node                      // CTE name -> Node
+	cteNodes map[string]*duckast.Node             // CTE name -> body node
 	resolved map[string]map[string][]SourceColumn // CTE name -> col -> final sources
 }
 
-// NewExtractor creates an extractor from a parsed AST.
-func newExtractor(a ast) *Extractor {
+// newExtractor creates an extractor seeded with the AST's CTE definitions.
+func newExtractor(a *duckast.AST) *Extractor {
 	e := &Extractor{
-		cteNodes: make(map[string]node),
+		cteNodes: make(map[string]*duckast.Node),
 		resolved: make(map[string]map[string][]SourceColumn),
 	}
-	if len(a.Statements) > 0 {
-		for _, cte := range a.Statements[0].Node.CTEMap.Map {
-			e.cteNodes[cte.Key] = cte.Value.Query.Node
-		}
+	stmts := a.Statements()
+	if len(stmts) == 0 {
+		return e
+	}
+	for _, cte := range stmts[0].CTEs() {
+		e.cteNodes[cte.Name] = cte.Node
 	}
 	return e
 }
 
 // resolveCTE recursively resolves a CTE's columns to their ultimate source tables.
 func (e *Extractor) resolveCTE(cteName string) map[string][]SourceColumn {
-	// Return cached if already resolved
 	if cols, ok := e.resolved[cteName]; ok {
 		return cols
 	}
@@ -137,16 +82,14 @@ func (e *Extractor) resolveCTE(cteName string) map[string][]SourceColumn {
 		return nil
 	}
 
-	// Mark as being resolved (prevent infinite recursion)
+	// Mark as being resolved (prevent infinite recursion via self-references)
 	e.resolved[cteName] = make(map[string][]SourceColumn)
 
-	// Set operation CTE (UNION / UNION ALL / INTERSECT / EXCEPT — common
-	// pattern, also how RECURSIVE CTEs are represented). The SET_OPERATION
-	// node has empty SelectList; column names come from LEFT, sources are
-	// the positional merge of LEFT + RIGHT. Without this branch, set-op
-	// CTEs would lose all column lineage and consumers downstream would
-	// see references back to the CTE name itself instead of the real source.
-	if n.Left != nil || n.Right != nil {
+	// Set operation CTE (UNION / UNION ALL / INTERSECT / EXCEPT — also how
+	// RECURSIVE CTEs are represented). The SET_OPERATION node has empty
+	// SelectList; column names come from LEFT, sources are the positional
+	// merge of LEFT + RIGHT.
+	if n.IsSetOpNode() {
 		merged := e.resolveSetOpCols(n)
 		for k, v := range merged {
 			e.resolved[cteName][k] = v
@@ -154,40 +97,35 @@ func (e *Extractor) resolveCTE(cteName string) map[string][]SourceColumn {
 		return e.resolved[cteName]
 	}
 
-	aliasInfo := collectAliases(n.FromTable)
-
-	for _, expr := range n.SelectList {
+	aliases := collectAliases(n.FromTable())
+	for _, expr := range n.SelectList() {
 		outName := getOutputName(expr)
-		sources := e.traceExprWithType(expr, aliasInfo)
-		e.resolved[cteName][outName] = sources
+		e.resolved[cteName][outName] = e.traceExprWithType(expr, aliases)
 	}
-
 	return e.resolved[cteName]
 }
 
-// resolveSetOpCols resolves the column lineage for a SET_OPERATION_NODE.
+// resolveSetOpCols resolves the column lineage for a SET_OPERATION node.
 // The result map mirrors the LEFT side's output names, with sources merged
 // positionally from both sides.
-func (e *Extractor) resolveSetOpCols(n node) map[string][]SourceColumn {
-	leftCols := e.resolveSelectNodeCols(n.Left)
-	rightCols := e.resolveSelectNodeCols(n.Right)
+func (e *Extractor) resolveSetOpCols(n *duckast.Node) map[string][]SourceColumn {
+	leftCols := e.resolveSelectNodeCols(n.SetOpLeft())
+	rightCols := e.resolveSelectNodeCols(n.SetOpRight())
 
-	// Output column names come from LEFT (DuckDB convention).
 	type orderedCol struct {
 		name    string
 		sources []SourceColumn
 	}
 	var ordered []orderedCol
-	if n.Left != nil {
-		for _, expr := range nestedSelectList(*n.Left) {
+	if left := n.SetOpLeft(); !left.IsNil() {
+		for _, expr := range nestedSelectList(left) {
 			outName := getOutputName(expr)
 			ordered = append(ordered, orderedCol{name: outName, sources: leftCols[outName]})
 		}
 	}
-	// Append right side's sources positionally.
-	if n.Right != nil {
-		rightNames := nestedSelectList(*n.Right)
-		for i, expr := range rightNames {
+	if right := n.SetOpRight(); !right.IsNil() {
+		rightExprs := nestedSelectList(right)
+		for i, expr := range rightExprs {
 			if i >= len(ordered) {
 				break
 			}
@@ -205,16 +143,16 @@ func (e *Extractor) resolveSetOpCols(n node) map[string][]SourceColumn {
 
 // resolveSelectNodeCols traces every output column of a SELECT-shaped node
 // (or recurses for nested set-op nodes) and returns name → sources.
-func (e *Extractor) resolveSelectNodeCols(n *node) map[string][]SourceColumn {
-	if n == nil {
+func (e *Extractor) resolveSelectNodeCols(n *duckast.Node) map[string][]SourceColumn {
+	if n.IsNil() {
 		return nil
 	}
-	if n.Left != nil || n.Right != nil {
-		return e.resolveSetOpCols(*n)
+	if n.IsSetOpNode() {
+		return e.resolveSetOpCols(n)
 	}
 	result := make(map[string][]SourceColumn)
-	aliases := collectAliases(n.FromTable)
-	for _, expr := range n.SelectList {
+	aliases := collectAliases(n.FromTable())
+	for _, expr := range n.SelectList() {
 		outName := getOutputName(expr)
 		result[outName] = e.traceExprWithType(expr, aliases)
 	}
@@ -224,159 +162,136 @@ func (e *Extractor) resolveSelectNodeCols(n *node) map[string][]SourceColumn {
 // nestedSelectList returns the LEFT-most SELECT_NODE's select list for a
 // possibly-nested set-op node. Used to derive positional column order from
 // arbitrarily nested UNIONs.
-func nestedSelectList(n node) []expression {
-	if n.Left != nil {
-		return nestedSelectList(*n.Left)
+func nestedSelectList(n *duckast.Node) []*duckast.Node {
+	for n.IsSetOpNode() {
+		left := n.SetOpLeft()
+		if left.IsNil() {
+			break
+		}
+		n = left
 	}
-	return n.SelectList
+	return n.SelectList()
 }
 
 // traceExprWithType traces an expression and returns detailed source info with transformation types.
-func (e *Extractor) traceExprWithType(expr expression, info aliasInfo) []SourceColumn {
+func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []SourceColumn {
+	if expr.IsNil() {
+		return nil
+	}
 	var sources []SourceColumn
 
-	switch expr.Class {
+	switch expr.Class() {
 	case "COLUMN_REF":
-		if len(expr.ColumnNames) >= 1 {
-			var table, col string
-			var tableAlias string
-			if len(expr.ColumnNames) == 2 {
-				tableAlias = expr.ColumnNames[0]
-				col = expr.ColumnNames[1]
-				table = info.aliases[tableAlias]
-			} else {
-				col = expr.ColumnNames[0]
-				// For unqualified columns, use the primary table (first in FROM clause)
-				// This provides deterministic behavior instead of random map iteration
-				table = info.primaryTable
-			}
+		colNames := expr.ColumnNames()
+		if len(colNames) == 0 {
+			break
+		}
+		var table, col, tableAlias string
+		if len(colNames) == 2 {
+			tableAlias = colNames[0]
+			col = colNames[1]
+			table = info.aliases[tableAlias]
+		} else {
+			col = colNames[0]
+			table = info.primaryTable
+		}
 
-			// Subquery alias: resolve via the subquery's own select list.
-			// Has to be checked BEFORE the table-name path because subqueries
-			// don't have a table name. (Review finding 2)
-			if tableAlias != "" {
-				if sub, isSubquery := info.subqueries[tableAlias]; isSubquery {
-					sources = append(sources, e.resolveSubqueryColumn(sub, col)...)
-					return sources
-				}
-			}
-			// Unqualified column with no primary table but a primary
-			// subquery in FROM: resolve via the subquery's select list.
-			// (Review finding 2 — `SELECT col FROM (SELECT a AS col FROM t) sub`.)
-			if tableAlias == "" && table == "" && info.primarySubquery != nil {
-				sources = append(sources, e.resolveSubqueryColumn(info.primarySubquery, col)...)
+		// Subquery alias: resolve via the subquery's own select list.
+		// Has to be checked BEFORE the table-name path because subqueries
+		// don't have a table name.
+		if tableAlias != "" {
+			if sub, isSubquery := info.subqueries[tableAlias]; isSubquery {
+				sources = append(sources, e.resolveSubqueryColumn(sub, col)...)
 				return sources
 			}
+		}
+		// Unqualified column with no primary table but a primary
+		// subquery in FROM: resolve via the subquery's select list.
+		if tableAlias == "" && table == "" && info.primarySubquery != nil {
+			sources = append(sources, e.resolveSubqueryColumn(info.primarySubquery, col)...)
+			return sources
+		}
 
-			if table != "" {
-				// Check if table is a CTE - resolve recursively
-				if _, isCTE := e.cteNodes[table]; isCTE {
-					cteCols := e.resolveCTE(table)
-					if deeper, ok := cteCols[col]; ok {
-						// CTE sources already have Table/Column populated
-						sources = append(sources, deeper...)
-					} else {
-						sources = append(sources, SourceColumn{
-							Table:          table,
-							Column:         col,
-							Transformation: TransformIdentity,
-						})
-					}
+		if table != "" {
+			// Check if table is a CTE - resolve recursively
+			if _, isCTE := e.cteNodes[table]; isCTE {
+				cteCols := e.resolveCTE(table)
+				if deeper, ok := cteCols[col]; ok {
+					sources = append(sources, deeper...)
 				} else {
 					sources = append(sources, SourceColumn{
-						Table:          table,
-						Column:         col,
-						Transformation: TransformIdentity,
+						Table: table, Column: col, Transformation: TransformIdentity,
 					})
 				}
+			} else {
+				sources = append(sources, SourceColumn{
+					Table: table, Column: col, Transformation: TransformIdentity,
+				})
 			}
 		}
 
 	case "FUNCTION":
-		// Determine transformation type based on function
-		transType := classifyFunction(expr.FunctionName, expr.IsOperator)
-
-		// Trace through function arguments
-		for _, child := range expr.Children {
-			childSources := e.traceExprWithType(child, info)
-			for _, cs := range childSources {
+		transType := classifyFunction(expr.FunctionName(), expr.IsOperator())
+		for _, child := range expr.Children() {
+			for _, cs := range e.traceExprWithType(child, info) {
 				sources = append(sources, SourceColumn{
-					Table:          cs.Table,
-					Column:         cs.Column,
-					Transformation: transType,
-					FunctionName:   expr.FunctionName,
+					Table: cs.Table, Column: cs.Column,
+					Transformation: transType, FunctionName: expr.FunctionName(),
 				})
 			}
 		}
 
 	case "WINDOW":
-		// Window function: SUM(amount) OVER (...). The aggregate function name
-		// is on the WINDOW node itself; the aggregated expression is in children.
-		// (Bug 23) Treat the same as a regular FUNCTION node so the column is
-		// linked back to its source with a transformation tag (e.g. [SUM]).
-		transType := classifyFunction(expr.FunctionName, expr.IsOperator)
-		for _, child := range expr.Children {
-			childSources := e.traceExprWithType(child, info)
-			for _, cs := range childSources {
+		// Window function: SUM(amount) OVER (...). The aggregate function
+		// name is on the WINDOW node itself; the aggregated expression is
+		// in children. (Bug 23)
+		transType := classifyFunction(expr.FunctionName(), expr.IsOperator())
+		for _, child := range expr.Children() {
+			for _, cs := range e.traceExprWithType(child, info) {
 				sources = append(sources, SourceColumn{
-					Table:          cs.Table,
-					Column:         cs.Column,
-					Transformation: transType,
-					FunctionName:   expr.FunctionName,
+					Table: cs.Table, Column: cs.Column,
+					Transformation: transType, FunctionName: expr.FunctionName(),
 				})
 			}
 		}
 
 	case "CASE":
-		// Trace through CASE checks (when/then expressions)
-		for _, check := range expr.CaseChecks {
-			// Trace the THEN expression (this is the actual value)
-			thenSources := e.traceExprWithType(check.ThenExpr, info)
-			for _, ts := range thenSources {
+		for _, check := range expr.CaseChecks() {
+			for _, ts := range e.traceExprWithType(check.Then, info) {
 				sources = append(sources, SourceColumn{
-					Table:          ts.Table,
-					Column:         ts.Column,
-					Transformation: TransformConditional,
+					Table: ts.Table, Column: ts.Column, Transformation: TransformConditional,
 				})
 			}
-			// Also trace WHEN conditions as they affect the logic
-			whenSources := e.traceExprWithType(check.WhenExpr, info)
-			for _, ws := range whenSources {
+			for _, ws := range e.traceExprWithType(check.When, info) {
 				sources = append(sources, SourceColumn{
-					Table:          ws.Table,
-					Column:         ws.Column,
-					Transformation: TransformConditional,
+					Table: ws.Table, Column: ws.Column, Transformation: TransformConditional,
 				})
 			}
 		}
-		// Trace through children for else clause
-		for _, child := range expr.Children {
-			childSources := e.traceExprWithType(child, info)
-			for _, cs := range childSources {
+		// ELSE clause
+		for _, child := range expr.Children() {
+			for _, cs := range e.traceExprWithType(child, info) {
 				sources = append(sources, SourceColumn{
-					Table:          cs.Table,
-					Column:         cs.Column,
-					Transformation: TransformConditional,
+					Table: cs.Table, Column: cs.Column, Transformation: TransformConditional,
 				})
 			}
 		}
 
 	case "OPERATOR_CAST":
-		// Type cast
-		for _, child := range expr.Children {
-			childSources := e.traceExprWithType(child, info)
-			for _, cs := range childSources {
+		for _, child := range expr.Children() {
+			for _, cs := range e.traceExprWithType(child, info) {
 				sources = append(sources, SourceColumn{
-					Table:          cs.Table,
-					Column:         cs.Column,
-					Transformation: TransformCast,
+					Table: cs.Table, Column: cs.Column, Transformation: TransformCast,
 				})
 			}
 		}
 
 	case "COMPARISON":
-		// Comparison operators (used in CASE WHEN conditions)
-		for _, child := range expr.Children {
+		// Binary comparison operators (used in CASE WHEN, JOIN ON, etc.).
+		// DuckDB stores operands in `left`/`right`, NOT `children`.
+		sources = append(sources, e.traceExprWithType(expr.ExprLeft(), info)...)
+		sources = append(sources, e.traceExprWithType(expr.ExprRight(), info)...)
+		for _, child := range expr.Children() {
 			sources = append(sources, e.traceExprWithType(child, info)...)
 		}
 	}
@@ -387,40 +302,32 @@ func (e *Extractor) traceExprWithType(expr expression, info aliasInfo) []SourceC
 // classifyFunction determines the transformation type based on function name.
 func classifyFunction(funcName string, isOperator bool) TransformationType {
 	funcName = strings.ToUpper(funcName)
-
-	// Arithmetic operators
 	if isOperator {
 		switch funcName {
 		case "+", "-", "*", "/", "%", "^":
 			return TransformArithmetic
 		}
 	}
-
-	// Aggregate functions
 	switch funcName {
 	case "SUM", "COUNT", "AVG", "MIN", "MAX", "FIRST", "LAST",
 		"STDDEV", "STDDEV_POP", "STDDEV_SAMP", "VARIANCE", "VAR_POP", "VAR_SAMP",
 		"STRING_AGG", "ARRAY_AGG", "LIST", "LISTAGG", "GROUP_CONCAT":
 		return TransformAggregation
 	}
-
-	// Default to generic function transform
 	return TransformFunction
 }
 
 // extractMainQuery extracts lineage from the main query (after CTE resolution).
-func (e *Extractor) extractMainQuery(n node) []ColumnLineage {
-	// Set operation node (UNION / UNION ALL / INTERSECT / EXCEPT): the
-	// output schema is determined by the LEFT side, but each output column
-	// has sources from BOTH sides (positionally aligned). Recurse into
-	// both sub-nodes and merge the matching column lineages.
-	if n.Left != nil || n.Right != nil {
+func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
+	// Set operation node: output schema from LEFT, each output column has
+	// sources from BOTH sides (positionally aligned).
+	if n.IsSetOpNode() {
 		var leftCols, rightCols []ColumnLineage
-		if n.Left != nil {
-			leftCols = e.extractMainQuery(*n.Left)
+		if left := n.SetOpLeft(); !left.IsNil() {
+			leftCols = e.extractMainQuery(left)
 		}
-		if n.Right != nil {
-			rightCols = e.extractMainQuery(*n.Right)
+		if right := n.SetOpRight(); !right.IsNil() {
+			rightCols = e.extractMainQuery(right)
 		}
 		var merged []ColumnLineage
 		for i, lc := range leftCols {
@@ -437,77 +344,70 @@ func (e *Extractor) extractMainQuery(n node) []ColumnLineage {
 	}
 
 	var result []ColumnLineage
-	aliases := collectAliases(n.FromTable)
-
-	for _, expr := range n.SelectList {
-		outName := getOutputName(expr)
-		sources := e.traceExprWithType(expr, aliases)
-
+	aliases := collectAliases(n.FromTable())
+	for _, expr := range n.SelectList() {
 		result = append(result, ColumnLineage{
-			Column:  outName,
-			Sources: sources,
+			Column:  getOutputName(expr),
+			Sources: e.traceExprWithType(expr, aliases),
 		})
 	}
 	return result
 }
 
-// aliasInfo contains table alias mapping and the primary table
+// aliasInfo contains table alias mapping and the primary table.
 type aliasInfo struct {
-	aliases         map[string]string     // alias -> table name
-	subqueries      map[string]*statement // alias -> subquery statement (FROM (SELECT ...) sub)
-	primaryTable    string                // first table in FROM clause (for unqualified columns)
-	primarySubquery *statement            // first source in FROM if it's a subquery (for unqualified columns)
+	aliases         map[string]string         // alias -> table name
+	subqueries      map[string]*duckast.Node  // alias -> subquery body node
+	primaryTable    string                    // first table in FROM (for unqualified columns)
+	primarySubquery *duckast.Node             // first FROM source if it's a subquery
 }
 
-// collectAliases builds a map of table aliases to fully qualified table names from a FROM clause.
-// Also returns the primary table (first in FROM clause) for resolving unqualified columns.
-// Subquery aliases (FROM (SELECT ...) AS sub) are recorded separately so column lineage
-// can resolve them via the subquery's own select list. (Review finding 2)
-func collectAliases(ft fromTable) aliasInfo {
+// collectAliases builds a map of table aliases to fully qualified table
+// names from a FROM clause. Subquery aliases (FROM (SELECT ...) AS sub)
+// are recorded separately so column lineage can resolve them via the
+// subquery's own select list.
+func collectAliases(ft *duckast.Node) aliasInfo {
 	info := aliasInfo{
 		aliases:    make(map[string]string),
-		subqueries: make(map[string]*statement),
+		subqueries: make(map[string]*duckast.Node),
+	}
+	if ft.IsNil() {
+		return info
 	}
 	first := true
-	var collect func(fromTable)
-	collect = func(f fromTable) {
-		if f.TableName != "" {
-			// Build fully qualified table name (schema.table if schema exists)
-			qualifiedName := f.TableName
-			if f.SchemaName != "" {
-				qualifiedName = f.SchemaName + "." + f.TableName
+	var collect func(*duckast.Node)
+	collect = func(f *duckast.Node) {
+		if f.IsNil() {
+			return
+		}
+		if name := f.TableName(); name != "" {
+			qualifiedName := name
+			if schema := f.SchemaName(); schema != "" {
+				qualifiedName = schema + "." + name
 			}
-
-			alias := f.Alias
+			alias := f.Alias()
 			if alias == "" {
-				alias = f.TableName
+				alias = name
 			}
 			info.aliases[alias] = qualifiedName
-			// Track the first (leftmost) table as primary
 			if first {
 				info.primaryTable = qualifiedName
 				first = false
 			}
 		}
-		// Subquery in FROM: register the alias so COLUMN_REFs like
-		// `sub.x` can be resolved via the subquery's own select list.
-		if f.Subquery != nil && f.Alias != "" {
-			info.subqueries[f.Alias] = f.Subquery
+		// Subquery in FROM
+		if sub := f.SubqueryNode(); !sub.IsNil() && f.Alias() != "" {
+			info.subqueries[f.Alias()] = sub
 			if first {
-				// First source is a subquery — record it as the primary
-				// subquery so unqualified COLUMN_REFs (e.g. just `col`
-				// in `SELECT col FROM (SELECT a AS col FROM t) sub`)
-				// can still be resolved via the subquery's select list.
-				info.primarySubquery = f.Subquery
+				info.primarySubquery = sub
 				first = false
 			}
 		}
-		// Process left side first (it's the primary table in JOINs)
-		if f.Left != nil {
-			collect(*f.Left)
+		if l := f.JoinLeft(); !l.IsNil() {
+			collect(l)
 		}
-		if f.Right != nil {
-			collect(*f.Right)
+		if r := f.JoinRight(); !r.IsNil() {
+			collect(r)
 		}
 	}
 	collect(ft)
@@ -515,24 +415,18 @@ func collectAliases(ft fromTable) aliasInfo {
 }
 
 // resolveSubqueryColumn finds the lineage of a column inside a FROM-subquery.
-// Walks the subquery's select list, picks the matching output, and traces it
-// against the subquery's own FROM/aliases. Recursive — handles nested
-// subqueries AND set-operation subqueries (UNION/INTERSECT/EXCEPT inside the
-// subquery), where the top node has no SelectList and column lineage lives
-// in Left/Right sub-nodes.
-func (e *Extractor) resolveSubqueryColumn(sub *statement, col string) []SourceColumn {
-	if sub == nil {
+// Handles set-op subqueries (UNION inside the subquery) by delegating to
+// resolveSelectNodeCols which knows how to merge LEFT/RIGHT positionally.
+func (e *Extractor) resolveSubqueryColumn(sub *duckast.Node, col string) []SourceColumn {
+	if sub.IsNil() {
 		return nil
 	}
-	// Set-op subquery: delegate to resolveSelectNodeCols which knows how
-	// to merge Left/Right positionally. The top node's empty SelectList
-	// would otherwise hide every column. (Review finding)
-	if sub.Node.Left != nil || sub.Node.Right != nil {
-		cols := e.resolveSelectNodeCols(&sub.Node)
+	if sub.IsSetOpNode() {
+		cols := e.resolveSelectNodeCols(sub)
 		return cols[col]
 	}
-	subAliases := collectAliases(sub.Node.FromTable)
-	for _, expr := range sub.Node.SelectList {
+	subAliases := collectAliases(sub.FromTable())
+	for _, expr := range sub.SelectList() {
 		if getOutputName(expr) == col {
 			return e.traceExprWithType(expr, subAliases)
 		}
@@ -541,60 +435,79 @@ func (e *Extractor) resolveSubqueryColumn(sub *statement, col string) []SourceCo
 }
 
 // getOutputName extracts the output column name from an expression.
-func getOutputName(expr expression) string {
-	if expr.Alias != "" {
-		return expr.Alias
+func getOutputName(expr *duckast.Node) string {
+	if expr.IsNil() {
+		return "?"
 	}
-	if len(expr.ColumnNames) > 0 {
-		return expr.ColumnNames[len(expr.ColumnNames)-1]
+	if alias := expr.Alias(); alias != "" {
+		return alias
+	}
+	if names := expr.ColumnNames(); len(names) > 0 {
+		return names[len(names)-1]
 	}
 	return "?"
 }
 
+// ----------------------------------------------------------------------
+// Public API — extracts column lineage and table dependencies from SQL.
+// ----------------------------------------------------------------------
+
 // ExtractFromAST extracts column-level lineage from a pre-parsed AST JSON.
-// Use GetAST to fetch the AST first, then share it with ExtractTablesFromAST.
 func ExtractFromAST(astJSON string) ([]ColumnLineage, error) {
-	var a ast
-	if err := json.Unmarshal([]byte(astJSON), &a); err != nil {
+	a, err := duckast.Parse(astJSON)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse AST: %w", err)
 	}
-
-	if len(a.Statements) == 0 {
+	stmts := a.Statements()
+	if len(stmts) == 0 {
 		return nil, fmt.Errorf("no statements in AST")
 	}
-
 	extractor := newExtractor(a)
-	lineages := extractor.extractMainQuery(a.Statements[0].Node)
-
-	return lineages, nil
+	return extractor.extractMainQuery(stmts[0]), nil
 }
 
 // GetAST fetches the parsed AST JSON from DuckDB for a SQL query.
 // The result can be passed to ExtractFromAST and ExtractTablesFromAST
 // to avoid duplicate queries when both column lineage and tables are needed.
+//
+// DuckDB's json_serialize_sql only supports SELECT statements. For
+// non-SELECT statements (CREATE, INSERT, UPDATE, DELETE, COPY, PIVOT,
+// MERGE, etc.) it returns an error JSON of the form
+// {"error":true,"error_type":"...","error_message":"..."} which we
+// detect and surface as a real error rather than letting downstream
+// parsers fail with a confusing "no statements in AST".
 func GetAST(sess *duckdb.Session, sql string) (string, error) {
 	// Escape single quotes for the SQL string
 	escaped := strings.ReplaceAll(sql, "'", "''")
 
-	// Use DuckDB's json_serialize_sql to get the AST
-	// Wrap with REPLACE to remove newlines (CSV output breaks on multi-line values)
-	// Use alias 'ast' to prevent the embedded SQL from appearing in the column header
+	// Use DuckDB's json_serialize_sql to get the AST.
+	// Strip newlines so the CSV output isn't broken by multi-line values.
 	query := fmt.Sprintf("SELECT REPLACE(REPLACE(CAST(json_serialize_sql('%s') AS VARCHAR), chr(10), ''), chr(13), '') AS ast", escaped)
 
 	astJSON, err := sess.QueryValue(query)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize SQL: %w", err)
 	}
-
 	if astJSON == "" {
 		return "", fmt.Errorf("empty AST returned")
 	}
-
+	// Detect json_serialize_sql's error envelope without parsing the
+	// whole document — the error fields appear at the very start.
+	if strings.HasPrefix(astJSON, `{"error":true`) {
+		var probe struct {
+			Error        bool   `json:"error"`
+			ErrorType    string `json:"error_type"`
+			ErrorMessage string `json:"error_message"`
+		}
+		if jsonErr := json.Unmarshal([]byte(astJSON), &probe); jsonErr == nil && probe.Error {
+			return "", fmt.Errorf("DuckDB cannot serialize this statement (%s): %s",
+				probe.ErrorType, probe.ErrorMessage)
+		}
+	}
 	return astJSON, nil
 }
 
 // Extract extracts column-level lineage from a SQL query using DuckDB's AST parser.
-// Returns nil if lineage cannot be extracted (parsing errors, etc.).
 // Note: If you also need table references, use GetAST + ExtractFromAST + ExtractTablesFromAST
 // to avoid duplicate queries.
 func Extract(sess *duckdb.Session, sql string) ([]ColumnLineage, error) {
@@ -614,10 +527,6 @@ type TableRef struct {
 }
 
 // ExtractTables extracts all table references from a SQL query using DuckDB's AST parser.
-// Returns tables in order: first FROM table, then JOIN tables.
-// CTEs are NOT included in the result - only physical tables.
-// Note: If you also need column lineage, use GetAST + ExtractFromAST + ExtractTablesFromAST
-// to avoid duplicate queries.
 func ExtractTables(sess *duckdb.Session, sql string) ([]TableRef, error) {
 	astJSON, err := GetAST(sess, sql)
 	if err != nil {
@@ -627,131 +536,200 @@ func ExtractTables(sess *duckdb.Session, sql string) ([]TableRef, error) {
 }
 
 // ExtractTablesFromAST extracts table references from a pre-parsed AST JSON.
+//
+// Implementation: walks the entire tree via duckast.AST.Walk so it discovers
+// every BASE_TABLE node regardless of which AST shape contains it. CTEs are
+// excluded since they aren't physical tables.
+//
+// The "primary" table (the leftmost physical FROM in the outermost SELECT,
+// used by CDC to choose the fact table) is located by a separate structural
+// traversal — NOT by walk order — because the walker visits map fields in
+// sorted-key order, which is deterministic but bears no relation to the
+// SQL FROM-clause semantics. The structural traversal descends
+// SET_OPERATION_NODE.left chains, then JOIN.left chains, then through
+// derived-table SUBQUERYs, returning the first non-CTE BASE_TABLE found.
+//
+// Self-joins and multiple references to the same table are preserved as
+// distinct TableRef entries (with their respective aliases). Callers that
+// want a unique-name list should use GetAllTablesFromRefs.
 func ExtractTablesFromAST(astJSON string) ([]TableRef, error) {
-	var a ast
-	if err := json.Unmarshal([]byte(astJSON), &a); err != nil {
+	a, err := duckast.Parse(astJSON)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse AST: %w", err)
 	}
-
-	if len(a.Statements) == 0 {
+	stmts := a.Statements()
+	if len(stmts) == 0 {
 		return nil, fmt.Errorf("no statements in AST")
 	}
 
-	// Build set of CTE names to exclude
-	cteNames := make(map[string]bool)
-	for _, cte := range a.Statements[0].Node.CTEMap.Map {
-		cteNames[cte.Key] = true
+	// Locate the primary FROM table structurally, walking the tree
+	// top-down with a per-scope CTE set so a CTE in one subquery cannot
+	// shadow a physical table in an outer scope. We compare the located
+	// node against walker hits by underlying-map pointer identity, so
+	// even self-joins disambiguate cleanly.
+	primary := findPrimaryBaseTable(stmts[0], nil)
+	var primaryPtr uintptr
+	if primary != nil {
+		primaryPtr = reflect.ValueOf(primary.Raw()).Pointer()
 	}
 
-	// Extract tables from entire node (FROM, WHERE, subqueries, CTEs)
 	var tables []TableRef
-	extractTablesFromNode(a.Statements[0].Node, cteNames, &tables, true)
-
+	collectTablesScoped(stmts[0], nil, primaryPtr, &tables)
 	return tables, nil
 }
 
-// extractTablesFromNode extracts tables from an entire SELECT node including subqueries.
-func extractTablesFromNode(n node, cteNames map[string]bool, tables *[]TableRef, isFirst bool) {
-	// Extract from CTEs first
-	for _, cte := range n.CTEMap.Map {
-		extractTablesFromNode(cte.Value.Query.Node, cteNames, tables, false)
+// collectTablesScoped recursively walks the AST and collects every
+// physical BASE_TABLE node into out, respecting SQL CTE scoping.
+//
+// Each SELECT_NODE that defines CTEs adds those names to the scope
+// visible to its descendants (and to its sibling CTE bodies, matching
+// DuckDB's WITH semantics). A BASE_TABLE is treated as a CTE reference
+// only when it is unqualified (no schema, no catalog) and its name is
+// in the active scope. Schema- or catalog-qualified BASE_TABLE nodes
+// are always physical, even if a same-named CTE is in scope.
+//
+// Generic descent into child fields preserves the walker's "find every
+// BASE_TABLE regardless of AST shape" guarantee — only the SELECT_NODE
+// case is special-cased, for the scope push.
+func collectTablesScoped(n *duckast.Node, parentScope map[string]bool, primaryPtr uintptr, out *[]TableRef) {
+	if n.IsNil() {
+		return
 	}
 
-	// Set operation node (UNION / UNION ALL / INTERSECT / EXCEPT): walk
-	// both sides. The first table on the left side keeps `isFirst=true`;
-	// the right side becomes "joins" so the first-from logic stays sane.
-	if n.Left != nil {
-		extractTablesFromNode(*n.Left, cteNames, tables, isFirst)
-	}
-	if n.Right != nil {
-		extractTablesFromNode(*n.Right, cteNames, tables, false)
-	}
-
-	// Extract from FROM clause
-	extractTablesFromFrom(n.FromTable, cteNames, tables, isFirst)
-
-	// Extract from WHERE clause (may contain subqueries)
-	if n.WhereClause != nil {
-		extractTablesFromExpr(*n.WhereClause, cteNames, tables)
-	}
-
-	// Extract from HAVING clause
-	if n.Having != nil {
-		extractTablesFromExpr(*n.Having, cteNames, tables)
-	}
-
-	// Extract from QUALIFY clause
-	if n.Qualify != nil {
-		extractTablesFromExpr(*n.Qualify, cteNames, tables)
-	}
-
-	// Extract from SELECT list (scalar subqueries)
-	for _, expr := range n.SelectList {
-		extractTablesFromExpr(expr, cteNames, tables)
-	}
-}
-
-// extractTablesFromExpr extracts tables from expressions (handles subqueries).
-func extractTablesFromExpr(expr expression, cteNames map[string]bool, tables *[]TableRef) {
-	// Handle subquery expressions
-	if expr.Subquery != nil {
-		extractTablesFromNode(expr.Subquery.Node, cteNames, tables, false)
-	}
-
-	// Handle child expression (e.g., left side of IN comparison)
-	if expr.Child != nil {
-		extractTablesFromExpr(*expr.Child, cteNames, tables)
-	}
-
-	// Recurse into children
-	for _, child := range expr.Children {
-		extractTablesFromExpr(child, cteNames, tables)
-	}
-
-	// Handle CASE expressions
-	for _, cc := range expr.CaseChecks {
-		extractTablesFromExpr(cc.WhenExpr, cteNames, tables)
-		extractTablesFromExpr(cc.ThenExpr, cteNames, tables)
-	}
-}
-
-// extractTablesFromFrom recursively extracts table references from a FROM clause.
-func extractTablesFromFrom(ft fromTable, cteNames map[string]bool, tables *[]TableRef, isFirst bool) {
-	if ft.TableName != "" {
-		// Skip CTEs - we only want physical tables
-		if !cteNames[ft.TableName] {
-			// Build full table name including schema if present
-			fullName := ft.TableName
-			if ft.SchemaName != "" {
-				fullName = ft.SchemaName + "." + ft.TableName
-			}
-			ref := TableRef{
-				Table:       fullName,
-				Alias:       ft.Alias,
-				IsFirstFrom: isFirst && len(*tables) == 0,
-				IsJoin:      !isFirst || len(*tables) > 0,
-			}
-			*tables = append(*tables, ref)
+	// Push this node's local CTE names onto the scope visible to its
+	// children (and to itself, for RECURSIVE CTEs that reference their
+	// own name from inside their body). Only allocate when there are
+	// actually local CTEs to add.
+	scope := parentScope
+	if ctes := n.CTEs(); len(ctes) > 0 {
+		scope = make(map[string]bool, len(parentScope)+len(ctes))
+		for k := range parentScope {
+			scope[k] = true
+		}
+		for _, cte := range ctes {
+			scope[cte.Name] = true
 		}
 	}
 
-	// Process LEFT side of JOIN first (maintains FROM order)
-	if ft.Left != nil {
-		extractTablesFromFrom(*ft.Left, cteNames, tables, true)
+	if n.IsBaseTable() {
+		name := n.TableName()
+		if name == "" {
+			return
+		}
+		// CTEs only shadow unqualified table names. A schema- or
+		// catalog-qualified ref is always physical.
+		schema := n.SchemaName()
+		catalog := n.CatalogName()
+		if schema == "" && catalog == "" && scope[name] {
+			return
+		}
+		fullName := name
+		if schema != "" {
+			fullName = schema + "." + name
+		}
+		isPrimary := primaryPtr != 0 && reflect.ValueOf(n.Raw()).Pointer() == primaryPtr
+		*out = append(*out, TableRef{
+			Table:       fullName,
+			Alias:       n.Alias(),
+			IsFirstFrom: isPrimary,
+			IsJoin:      !isPrimary,
+		})
+		return
 	}
 
-	// Then RIGHT side (these are the JOIN tables)
-	if ft.Right != nil {
-		extractTablesFromFrom(*ft.Right, cteNames, tables, false)
+	// Recurse into every child field with the current scope. Iterate
+	// keys in sorted order so the resulting TableRef order is stable.
+	raw := n.Raw()
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		recurseScopedValue(raw[k], scope, primaryPtr, out)
+	}
+}
 
-	// Recurse into sub-select FROM clauses: FROM (SELECT ... FROM upstream) AS sub
-	// (Bug 31) The DuckDB AST represents these with type=SUBQUERY and a nested query.
-	// Without this recursion, dependencies inside derived tables are silently dropped
-	// from the DAG, causing the runner to skip dependent models when upstream changes.
-	if ft.Subquery != nil {
-		extractTablesFromNode(ft.Subquery.Node, cteNames, tables, isFirst)
+func recurseScopedValue(v any, scope map[string]bool, primaryPtr uintptr, out *[]TableRef) {
+	switch x := v.(type) {
+	case map[string]any:
+		collectTablesScoped(duckast.NewNode(x), scope, primaryPtr, out)
+	case []any:
+		for _, item := range x {
+			recurseScopedValue(item, scope, primaryPtr, out)
+		}
 	}
+}
+
+// findPrimaryBaseTable returns the leftmost physical BASE_TABLE node
+// reachable from the outermost SELECT's FROM clause, skipping CTE refs
+// according to SQL scope rules.
+//
+// Used by ExtractTablesFromAST to deterministically tag the "primary"
+// (fact) table for CDC. The result is matched back against the walker
+// pass by raw-map pointer identity, so callers don't need to worry
+// about name collisions across self-joins.
+//
+// Returns nil if the statement has no physical primary (e.g. only
+// references CTEs, only references table functions, or is a SELECT
+// with no FROM at all).
+//
+// parentScope holds CTE names from enclosing scopes; this function
+// adds the current SELECT's local CTE names before descending.
+func findPrimaryBaseTable(stmt *duckast.Node, parentScope map[string]bool) *duckast.Node {
+	if stmt.IsNil() {
+		return nil
+	}
+	// Descend SET_OPERATION_NODE.left chain to the leftmost SELECT-shaped
+	// branch — the "primary" of `A UNION B` is whatever A's primary is.
+	n := stmt
+	for n.IsSetOpNode() {
+		n = n.SetOpLeft()
+		if n.IsNil() {
+			return nil
+		}
+	}
+	if !n.IsSelectNode() {
+		return nil
+	}
+	scope := parentScope
+	if ctes := n.CTEs(); len(ctes) > 0 {
+		scope = make(map[string]bool, len(parentScope)+len(ctes))
+		for k := range parentScope {
+			scope[k] = true
+		}
+		for _, cte := range ctes {
+			scope[cte.Name] = true
+		}
+	}
+	return descendFromTable(n.FromTable(), scope)
+}
+
+// descendFromTable left-first walks a from_table subtree and returns
+// the first physical BASE_TABLE encountered, descending through joins
+// (left first) and through derived-table SUBQUERYs. CTE shadowing only
+// applies to unqualified names.
+func descendFromTable(node *duckast.Node, scope map[string]bool) *duckast.Node {
+	if node.IsNil() {
+		return nil
+	}
+	switch node.NodeType() {
+	case "BASE_TABLE":
+		if node.SchemaName() == "" && node.CatalogName() == "" && scope[node.TableName()] {
+			return nil
+		}
+		return node
+	case "JOIN":
+		if found := descendFromTable(node.JoinLeft(), scope); found != nil {
+			return found
+		}
+		return descendFromTable(node.JoinRight(), scope)
+	case "SUBQUERY":
+		// Derived table — descend into the inner SELECT, which may add
+		// its own CTE names on top of the inherited scope.
+		return findPrimaryBaseTable(node.SubqueryNode(), scope)
+	}
+	return nil
 }
 
 // GetAllTables returns all table names from a SQL query (for DAG dependency detection).
@@ -764,7 +742,6 @@ func GetAllTables(sess *duckdb.Session, sql string) ([]string, error) {
 }
 
 // GetAllTablesFromAST returns all table names from a pre-fetched AST JSON.
-// Use with GetAST to share the AST with ExtractFromAST.
 func GetAllTablesFromAST(astJSON string) ([]string, error) {
 	tables, err := ExtractTablesFromAST(astJSON)
 	if err != nil {
@@ -793,17 +770,14 @@ func ExtractAll(sess *duckdb.Session, sql string) ([]ColumnLineage, []string, er
 	if err != nil {
 		return nil, nil, err
 	}
-
 	colLineage, err := ExtractFromAST(astJSON)
 	if err != nil {
 		return nil, nil, err
 	}
-
 	tableDeps, err := GetAllTablesFromAST(astJSON)
 	if err != nil {
 		return colLineage, nil, err
 	}
-
 	return colLineage, tableDeps, nil
 }
 
@@ -812,15 +786,12 @@ func ExtractAll(sess *duckdb.Session, sql string) ([]ColumnLineage, []string, er
 // Tables with only IDENTITY/FUNCTION are dimension lookups (full scan needed).
 func GetCDCTables(lineage []ColumnLineage) map[string]bool {
 	cdcTables := make(map[string]bool)
-
 	for _, col := range lineage {
 		for _, src := range col.Sources {
 			if src.Transformation == TransformAggregation {
-				// This table contributes to an aggregation - needs CDC
 				cdcTables[src.Table] = true
 			}
 		}
 	}
-
 	return cdcTables
 }

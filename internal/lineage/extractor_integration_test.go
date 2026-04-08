@@ -467,6 +467,221 @@ func TestGetAllTables_InvalidSQL(t *testing.T) {
 	}
 }
 
+// CTE-name shadowing must respect SQL scope rules. A CTE defined in an
+// inner subquery must NOT remove a same-named physical table reference
+// from an outer scope. Previously the extractor collected all CTE names
+// into a single global set, so `WITH orders AS (...)` inside a WHERE-IN
+// would silently drop the outer staging.orders dependency.
+func TestExtractTables_CTEScopeIsolation_InnerCannotShadowOuter(t *testing.T) {
+	sql := `SELECT * FROM staging.orders
+	        WHERE id IN (
+	            WITH orders AS (SELECT id FROM cfg.seed)
+	            SELECT id FROM orders
+	        )`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.orders") {
+		t.Errorf("expected staging.orders (outer FROM, scope-isolated from inner CTE), got %v", tables)
+	}
+	if !containsTable(tables, "cfg.seed") {
+		t.Errorf("expected cfg.seed (inside inner CTE body), got %v", tables)
+	}
+	// The inner CTE name "orders" must NOT appear as a physical dep.
+	for _, n := range tables {
+		if n == "orders" {
+			t.Errorf("CTE name 'orders' leaked into deps: %v", tables)
+		}
+	}
+
+	// Primary detection must also respect scope: staging.orders is the
+	// outer FROM; the inner subquery's `orders` is a CTE ref, not a
+	// physical table, so primary stays staging.orders.
+	refs, err := ExtractTables(shared, sql)
+	if err != nil {
+		t.Fatalf("ExtractTables: %v", err)
+	}
+	var primary string
+	for _, r := range refs {
+		if r.IsFirstFrom {
+			primary = r.Table
+		}
+	}
+	if primary != "staging.orders" {
+		t.Errorf("expected primary staging.orders, got %q (refs=%+v)", primary, refs)
+	}
+}
+
+// CTEs only shadow unqualified names. A schema-qualified BASE_TABLE
+// is always physical, even when a same-named CTE is in the same scope.
+func TestExtractTables_CTEDoesNotShadowSchemaQualified(t *testing.T) {
+	sql := `WITH orders AS (SELECT id FROM raw.cte_source)
+	        SELECT o.id, c.id
+	        FROM orders o JOIN staging.orders c ON o.id = c.id`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.orders") {
+		t.Errorf("schema-qualified staging.orders must NOT be shadowed by unqualified CTE 'orders', got %v", tables)
+	}
+	if !containsTable(tables, "raw.cte_source") {
+		t.Errorf("expected raw.cte_source (inside CTE body), got %v", tables)
+	}
+	for _, n := range tables {
+		if n == "orders" {
+			t.Errorf("CTE name 'orders' leaked into deps: %v", tables)
+		}
+	}
+}
+
+// Self-join: the same physical table referenced under two aliases must
+// produce two TableRef entries with distinct aliases. A previous bug
+// deduped by full name and lost the second reference's alias entirely.
+func TestExtractTables_SelfJoinPreservesAliases(t *testing.T) {
+	sql := `SELECT a.id, b.id FROM staging.orders a JOIN staging.orders b ON a.parent_id = b.id`
+	tables, err := ExtractTables(shared, sql)
+	if err != nil {
+		t.Fatalf("ExtractTables: %v", err)
+	}
+	if len(tables) != 2 {
+		t.Fatalf("expected 2 TableRefs for self-join, got %d: %+v", len(tables), tables)
+	}
+	aliases := map[string]bool{tables[0].Alias: true, tables[1].Alias: true}
+	if !aliases["a"] || !aliases["b"] {
+		t.Errorf("expected aliases a and b, got %+v", tables)
+	}
+	// Exactly one should be IsFirstFrom (the leftmost), the other a join.
+	primaries := 0
+	for _, ref := range tables {
+		if ref.Table != "staging.orders" {
+			t.Errorf("expected staging.orders, got %q", ref.Table)
+		}
+		if ref.IsFirstFrom {
+			primaries++
+		}
+	}
+	if primaries != 1 {
+		t.Errorf("expected exactly 1 IsFirstFrom in self-join, got %d", primaries)
+	}
+	// GetAllTablesFromRefs still dedups to a single name string.
+	names := GetAllTablesFromRefs(tables)
+	if len(names) != 1 || names[0] != "staging.orders" {
+		t.Errorf("GetAllTablesFromRefs should dedup self-join to one name, got %v", names)
+	}
+}
+
+// IsFirstFrom must be assigned to the leftmost-outermost physical FROM
+// table — NOT to whatever BASE_TABLE the walker happens to encounter
+// first. Previously the walker iterated map[string]any in random Go
+// map order, so a query with a CTE could non-deterministically tag the
+// CTE-internal table as IsFirstFrom instead of the outer FROM table.
+//
+// This test runs the same query repeatedly; with the old random
+// iteration it would flake within a few iterations.
+func TestExtractTables_IsFirstFromDeterministic_WithCTE(t *testing.T) {
+	sql := `WITH lookup AS (SELECT id, name FROM raw.dimension)
+	        SELECT m.id, m.amount, lookup.name
+	        FROM staging.fact m JOIN lookup ON m.dim_id = lookup.id`
+	for i := 0; i < 50; i++ {
+		tables, err := ExtractTables(shared, sql)
+		if err != nil {
+			t.Fatalf("iter %d: %v", i, err)
+		}
+		var primary string
+		for _, ref := range tables {
+			if ref.IsFirstFrom {
+				if primary != "" {
+					t.Fatalf("iter %d: multiple IsFirstFrom: %+v", i, tables)
+				}
+				primary = ref.Table
+			}
+		}
+		// staging.fact is the outer FROM. raw.dimension is buried inside
+		// the CTE body and must NOT be tagged as primary.
+		if primary != "staging.fact" {
+			t.Errorf("iter %d: expected staging.fact as primary, got %q (tables=%+v)",
+				i, primary, tables)
+		}
+	}
+}
+
+// IsFirstFrom for UNION/SET-OP queries should be the leftmost branch's
+// primary FROM, not whatever the walker hits first.
+func TestExtractTables_IsFirstFromDeterministic_Union(t *testing.T) {
+	sql := `SELECT id FROM staging.left_tbl
+	        UNION ALL
+	        SELECT id FROM staging.right_tbl`
+	for i := 0; i < 20; i++ {
+		tables, err := ExtractTables(shared, sql)
+		if err != nil {
+			t.Fatalf("iter %d: %v", i, err)
+		}
+		var primary string
+		for _, ref := range tables {
+			if ref.IsFirstFrom {
+				primary = ref.Table
+			}
+		}
+		if primary != "staging.left_tbl" {
+			t.Errorf("iter %d: expected staging.left_tbl (leftmost UNION branch), got %q",
+				i, primary)
+		}
+	}
+}
+
+// IsFirstFrom must look past WHERE-IN subqueries — those reference
+// other physical tables but they're not "the primary FROM".
+func TestExtractTables_IsFirstFrom_NotConfusedByWhereSubquery(t *testing.T) {
+	sql := `SELECT id FROM staging.fact
+	        WHERE dim_id IN (SELECT id FROM staging.dimension)`
+	for i := 0; i < 20; i++ {
+		tables, err := ExtractTables(shared, sql)
+		if err != nil {
+			t.Fatalf("iter %d: %v", i, err)
+		}
+		var primary string
+		for _, ref := range tables {
+			if ref.IsFirstFrom {
+				primary = ref.Table
+			}
+		}
+		if primary != "staging.fact" {
+			t.Errorf("iter %d: expected staging.fact (outer FROM), got %q", i, primary)
+		}
+	}
+}
+
+// json_serialize_sql only handles SELECT statements; everything else
+// returns an {"error":true,...} envelope. GetAST must surface that as a
+// real error rather than silently letting downstream parsers report
+// "no statements in AST".
+func TestGetAST_NonSelectStatementErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{"CTAS", "CREATE TABLE x AS SELECT * FROM y"},
+		{"CREATE VIEW", "CREATE OR REPLACE VIEW v AS SELECT * FROM t"},
+		{"INSERT SELECT", "INSERT INTO t SELECT * FROM s"},
+		{"UPDATE FROM", "UPDATE t SET v=1 FROM s WHERE t.id=s.id"},
+		{"DELETE", "DELETE FROM t WHERE id=1"},
+		{"PIVOT statement", "PIVOT t ON c USING SUM(v)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := GetAST(shared, tc.sql)
+			if err == nil {
+				t.Fatalf("expected error from GetAST(%q), got nil", tc.sql)
+			}
+			if !strings.Contains(err.Error(), "DuckDB cannot serialize") {
+				t.Errorf("expected diagnostic mentioning serialization, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestExtractAll_WithTables(t *testing.T) {
 	sql := `SELECT s.id, s.name FROM staging.users s JOIN raw.roles r ON s.role_id = r.id`
 	lineage, tables, err := ExtractAll(shared, sql)
@@ -830,5 +1045,311 @@ func TestExtract_SubqueryFromDependencyExtraction(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected raw.upstream in dependencies, got %v", tables)
+	}
+}
+
+// --- Regression: hidden dependencies in non-FROM SQL constructs ---
+//
+// Several AST shapes carry references to upstream tables that the
+// extractor used to silently drop, causing the runner to miss
+// downstream rebuild triggers and ship stale data without warning.
+// All five fixes are validated below — they share a common pattern of
+// "missing field on the AST struct so json.Unmarshal silently skipped
+// it during deserialization".
+
+// containsTable is a small helper for the regression tests below.
+func containsTable(tables []string, want string) bool {
+	for _, t := range tables {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}
+
+// COMPARISON expressions store operands in `left`/`right` fields, NOT
+// `children`. WHERE x = (SELECT ... FROM other) used to lose `other`
+// because the comparison's right-hand subquery wasn't traversed.
+func TestExtract_HiddenDeps_WhereEqualsSubquery(t *testing.T) {
+	sql := `SELECT id FROM staging.left_tbl WHERE id = (SELECT MIN(n) FROM staging.right_tbl)`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("expected staging.left_tbl in deps, got %v", tables)
+	}
+	if !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("expected staging.right_tbl in deps (hidden in WHERE = subquery), got %v", tables)
+	}
+}
+
+// JOIN ON-clauses live on the from_table.condition field for JOIN-typed
+// from nodes. Without the Condition field on fromTable, ON-clause
+// subqueries were dropped from the dependency graph.
+func TestExtract_HiddenDeps_JoinOnSubquery(t *testing.T) {
+	sql := `SELECT a.id FROM staging.left_tbl a
+	        JOIN staging.left_tbl b ON a.id = (SELECT MIN(n) FROM staging.right_tbl)`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("expected staging.left_tbl in deps, got %v", tables)
+	}
+	if !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("expected staging.right_tbl in deps (hidden in JOIN ON subquery), got %v", tables)
+	}
+}
+
+// LIMIT (SELECT n FROM cfg) — limit expressions live in node.modifiers
+// which used to be missing from the node struct entirely. Same applies
+// to OFFSET and ORDER BY subqueries.
+func TestExtract_HiddenDeps_LimitSubquery(t *testing.T) {
+	sql := `SELECT id FROM staging.left_tbl LIMIT (SELECT MIN(n) FROM staging.right_tbl)`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("expected staging.right_tbl in deps (hidden in LIMIT subquery), got %v", tables)
+	}
+}
+
+func TestExtract_HiddenDeps_OffsetSubquery(t *testing.T) {
+	sql := `SELECT id FROM staging.left_tbl LIMIT 10 OFFSET (SELECT MIN(n) FROM staging.right_tbl)`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("expected staging.right_tbl in deps (hidden in OFFSET subquery), got %v", tables)
+	}
+}
+
+func TestExtract_HiddenDeps_OrderBySubquery(t *testing.T) {
+	sql := `SELECT id FROM staging.left_tbl
+	        ORDER BY (SELECT MAX(n) FROM staging.right_tbl) LIMIT 5`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("expected staging.right_tbl in deps (hidden in ORDER BY subquery), got %v", tables)
+	}
+}
+
+// Sanity-check the previously-working forms so the new fields don't
+// regress them.
+func TestExtract_HiddenDeps_StillWorking(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{
+			"WHERE IN subquery",
+			`SELECT id FROM staging.left_tbl WHERE id IN (SELECT n FROM staging.right_tbl)`,
+		},
+		{
+			"scalar subquery in SELECT",
+			`SELECT id, (SELECT MAX(n) FROM staging.right_tbl) AS m FROM staging.left_tbl`,
+		},
+		{
+			"CASE WHEN subquery",
+			`SELECT CASE WHEN id > 0 THEN (SELECT MIN(n) FROM staging.right_tbl) ELSE 0 END
+			 FROM staging.left_tbl`,
+		},
+		{
+			"HAVING subquery",
+			`SELECT id, COUNT(*) FROM staging.left_tbl GROUP BY id
+			 HAVING COUNT(*) > (SELECT MIN(n) FROM staging.right_tbl)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tables, err := GetAllTables(shared, tc.sql)
+			if err != nil {
+				t.Fatalf("GetAllTables: %v", err)
+			}
+			if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
+				t.Errorf("expected both tables in deps, got %v", tables)
+			}
+		})
+	}
+}
+
+// Column lineage version of the COMPARISON fix — the previous
+// `traceExprWithType` `case "COMPARISON"` walked `expr.Children` which
+// was always empty for binary comparisons. CASE WHEN clauses with
+// equality conditions now correctly track the source columns of both
+// the LHS and RHS of the comparison.
+func TestExtract_ComparisonColumnLineage_InCase(t *testing.T) {
+	sql := `SELECT CASE WHEN amount = threshold THEN 'high' ELSE 'low' END AS bucket
+	        FROM staging.orders`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 || lineages[0].Column != "bucket" {
+		t.Fatalf("expected column bucket, got %+v", lineages)
+	}
+	// Both `amount` and `threshold` (sources of the comparison's left
+	// and right sides) should appear in the trace.
+	cols := make(map[string]bool)
+	for _, s := range lineages[0].Sources {
+		cols[s.Column] = true
+	}
+	if !cols["amount"] {
+		t.Errorf("expected source column amount (LHS of comparison), got %+v", lineages[0].Sources)
+	}
+	if !cols["threshold"] {
+		t.Errorf("expected source column threshold (RHS of comparison), got %+v", lineages[0].Sources)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Walker robustness probes — these exercise SQL constructions we have
+// never explicitly tested. The duckast walker iterates the raw map so
+// it should find every BASE_TABLE regardless of how DuckDB shapes the
+// AST. Each subtest is a hypothesis: "the walker finds this".
+// ----------------------------------------------------------------------
+
+func TestExtract_WalkerProbe_LateralJoin(t *testing.T) {
+	sql := `SELECT a.id, b.total
+	        FROM staging.left_tbl a,
+	             LATERAL (SELECT SUM(n) AS total FROM staging.right_tbl WHERE k = a.id) b`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("LATERAL: expected both tables, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_JoinUsing(t *testing.T) {
+	sql := `SELECT * FROM staging.left_tbl JOIN staging.right_tbl USING (id)`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("JOIN USING: expected both tables, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_Unpivot(t *testing.T) {
+	sql := `UNPIVOT staging.left_tbl ON col1, col2 INTO NAME k VALUE v`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Logf("UNPIVOT parse failed: %v", err)
+		return
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("UNPIVOT: expected staging.left_tbl, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_RecursiveCTE(t *testing.T) {
+	// Recursive CTE with a real BASE_TABLE buried inside the recursive
+	// branch's WHERE-IN subquery. The CTE name `r` must be excluded; the
+	// physical `staging.right_tbl` reference must be picked up.
+	sql := `WITH RECURSIVE r(n) AS (
+	            SELECT 1
+	            UNION ALL
+	            SELECT n+1 FROM r WHERE n < 10 AND n IN (SELECT id FROM staging.right_tbl)
+	        )
+	        SELECT * FROM r JOIN staging.left_tbl l ON l.id = r.n`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("RECURSIVE CTE: expected staging.left_tbl, got %v", tables)
+	}
+	if !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("RECURSIVE CTE: expected staging.right_tbl (hidden in recursive WHERE IN), got %v", tables)
+	}
+	// CTE name itself must NOT show up as a physical table.
+	if containsTable(tables, "r") {
+		t.Errorf("RECURSIVE CTE: CTE name 'r' leaked into deps: %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_AsofJoin(t *testing.T) {
+	sql := `SELECT * FROM staging.left_tbl a ASOF JOIN staging.right_tbl b ON a.ts >= b.ts`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Logf("ASOF JOIN parse failed: %v", err)
+		return
+	}
+	if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("ASOF JOIN: expected both tables, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_ValuesJoin(t *testing.T) {
+	sql := `SELECT v.x, t.id FROM (VALUES (1),(2),(3)) v(x) JOIN staging.left_tbl t ON t.id = v.x`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("VALUES JOIN GetAST failed: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("VALUES JOIN: expected staging.left_tbl, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_SemiAntiJoin(t *testing.T) {
+	for _, joinType := range []string{"SEMI", "ANTI"} {
+		t.Run(joinType, func(t *testing.T) {
+			sql := `SELECT * FROM staging.left_tbl ` + joinType + ` JOIN staging.right_tbl USING (id)`
+			tables, err := GetAllTables(shared, sql)
+			if err != nil {
+				t.Logf("%s JOIN GetAST failed: %v", joinType, err)
+				return
+			}
+			if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
+				t.Errorf("%s JOIN: expected both tables, got %v", joinType, tables)
+			}
+		})
+	}
+}
+
+func TestExtract_WalkerProbe_TableSample(t *testing.T) {
+	sql := `SELECT * FROM staging.left_tbl USING SAMPLE 10%`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Logf("USING SAMPLE GetAST failed: %v", err)
+		return
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("USING SAMPLE: expected staging.left_tbl, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_FromFirst(t *testing.T) {
+	sql := `FROM staging.left_tbl SELECT id WHERE id > 0`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Logf("FROM-first GetAST failed: %v", err)
+		return
+	}
+	if !containsTable(tables, "staging.left_tbl") {
+		t.Errorf("FROM-first: expected staging.left_tbl, got %v", tables)
+	}
+}
+
+func TestExtract_WalkerProbe_TableFunctionWithSubquery(t *testing.T) {
+	// Table function whose argument is itself a query referencing a
+	// physical table. The reference is hidden inside the function args.
+	sql := `SELECT * FROM staging.left_tbl
+	        WHERE id IN (SELECT id FROM (VALUES (1),(2)) v(id))
+	          AND id > (SELECT MAX(n) FROM staging.right_tbl)`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
+		t.Errorf("table-fn-with-subquery: expected both tables, got %v", tables)
 	}
 }
