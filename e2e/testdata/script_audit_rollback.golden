@@ -7,8 +7,8 @@ rows_affected: 5
 target: staging.script_audited
 kind: table
 run_type: backfill
-rows_affected: 1
-error: row_count >= 3 failed: actual count is 1
+rows_affected: 0
+error: Invalid Input Error: audit failed: row_count >= 3 failed: actual count is 1
 audit_error: true
 --- run 3 (fixed) ---
 target: staging.script_audited
