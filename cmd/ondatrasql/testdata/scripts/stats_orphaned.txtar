@@ -1,0 +1,39 @@
+# Bug 14: tables in the catalog whose model file no longer exists must be
+# annotated as [orphaned] so users notice and can clean up.
+#
+# Review finding R1F3: in --json mode the Name field must stay clean
+# (canonical schema.table) and the orphan flag must be a separate `Orphaned`
+# bool — earlier the code baked " [orphaned]" into Name, breaking automation.
+
+exec ondatrasql init
+mkdir models/raw
+cp m1.sql models/raw/keeps.sql
+cp m2.sql models/raw/willdie.sql
+
+exec ondatrasql run raw.keeps
+exec ondatrasql run raw.willdie
+
+# Delete the model file but leave the catalog table behind
+rm models/raw/willdie.sql
+
+# --- Box rendering: orphaned model gets visual [orphaned] tag ---
+exec ondatrasql stats
+stdout 'willdie \[orphaned\]'
+# The kept model must NOT have the tag
+! stdout 'keeps \[orphaned\]'
+
+# --- JSON rendering: Name stays clean, Orphaned: true is set separately ---
+exec ondatrasql --json stats
+stdout '"Name":"raw.willdie","Kind"'
+stdout '"Orphaned":true'
+# The kept model must not have " [orphaned]" baked into Name
+! stdout '"Name":"raw.willdie \[orphaned\]"'
+# Canonical Name stays present for the non-orphan too
+stdout '"Name":"raw.keeps"'
+
+-- m1.sql --
+-- @kind: table
+SELECT 1 AS x
+-- m2.sql --
+-- @kind: table
+SELECT 2 AS y

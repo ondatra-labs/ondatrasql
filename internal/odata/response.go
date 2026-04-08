@@ -7,6 +7,7 @@ package odata
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -80,6 +81,11 @@ func toODataValue(v any, colType string) any {
 
 	// Decimal → JSON number (exact via json.Number)
 	case duckdb.Decimal:
+		return json.Number(val.String())
+
+	// HUGEINT (DuckDB int128) → JSON number via *big.Int
+	// (Bug 4 — was falling through to default → fmt.Sprintf → string)
+	case *big.Int:
 		return json.Number(val.String())
 
 	// Boolean → JSON boolean

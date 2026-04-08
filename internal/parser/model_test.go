@@ -1566,3 +1566,53 @@ func TestParseModel_TrackedKind_CompositeKeyRejected(t *testing.T) {
 		t.Fatal("expected error for composite unique_key on tracked")
 	}
 }
+
+// Bug 11: model files with no SQL body must fail at parse time with a
+// clear error instead of letting DuckDB throw a cryptic "syntax error at
+// end of input" later. Empty body for SQL kinds is rejected; scripts and
+// events kind have their own body semantics and are exempt.
+func TestParseModel_EmptySQLBody_Rejected(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"completely empty file", ""},
+		{"only whitespace", "   \n\t\n  "},
+		{"only directives, no SQL", "-- @kind: table\n-- @description: just metadata\n"},
+		{"only directives + comments", "-- @kind: table\n-- a comment\n-- another comment\n"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			modelsDir := filepath.Join(tmpDir, "models", "raw")
+			os.MkdirAll(modelsDir, 0755)
+			modelFile := filepath.Join(modelsDir, "empty.sql")
+			os.WriteFile(modelFile, []byte(tt.content), 0644)
+
+			_, err := ParseModel(modelFile, tmpDir)
+			if err == nil {
+				t.Fatal("expected error for empty SQL body")
+			}
+			if !strings.Contains(err.Error(), "no SQL body") {
+				t.Errorf("error should mention 'no SQL body', got: %v", err)
+			}
+		})
+	}
+}
+
+// Events kind has its own body semantics (column definitions, not SQL),
+// so an "empty SQL body" check must NOT fire for events models.
+func TestParseModel_EmptySQLBody_EventsExempt(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	modelsDir := filepath.Join(tmpDir, "models", "raw")
+	os.MkdirAll(modelsDir, 0755)
+	modelFile := filepath.Join(modelsDir, "ev.sql")
+	// Events bodies are column definitions parsed separately
+	os.WriteFile(modelFile, []byte("-- @kind: events\nname VARCHAR NOT NULL"), 0644)
+	if _, err := ParseModel(modelFile, tmpDir); err != nil {
+		t.Errorf("events model should not be rejected by empty-SQL check: %v", err)
+	}
+}

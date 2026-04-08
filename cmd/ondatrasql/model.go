@@ -410,14 +410,26 @@ func showValidationStatus(model *parser.Model, result *execute.Result) {
 
 	printEmptyLine()
 
+	// If the run was skipped, validations were not evaluated. Saying
+	// "N passed" would be misleading since they never ran. (Bug 27)
+	skipped := result != nil && result.RunType == "skip"
+
 	// Constraints
 	if len(model.Constraints) > 0 {
-		printPaddedLine(fmt.Sprintf("Constraints: %d passed", len(model.Constraints)))
+		if skipped {
+			printPaddedLine(fmt.Sprintf("Constraints: %d not evaluated (model skipped)", len(model.Constraints)))
+		} else {
+			printPaddedLine(fmt.Sprintf("Constraints: %d passed", len(model.Constraints)))
+		}
 	}
 
 	// Audits
 	if len(model.Audits) > 0 {
-		printPaddedLine(fmt.Sprintf("Audits: %d passed", len(model.Audits)))
+		if skipped {
+			printPaddedLine(fmt.Sprintf("Audits: %d not evaluated (model skipped)", len(model.Audits)))
+		} else {
+			printPaddedLine(fmt.Sprintf("Audits: %d passed", len(model.Audits)))
+		}
 	}
 
 	// Warnings

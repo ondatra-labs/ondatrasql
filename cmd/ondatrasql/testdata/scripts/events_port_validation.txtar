@@ -1,0 +1,32 @@
+# Bug 26 (partial — port validation paths only):
+# - Public port out of valid range must be rejected upfront with a clear
+#   message that mentions the +1 admin convention.
+# - Invalid (non-integer) port must produce a clean parse error.
+# - Port 65535 fails because admin = 65536 doesn't exist (16-bit range).
+# - Port 0 fails because no listener can bind ":0" as a public service.
+#
+# Note: actually busy ports and Badger lock contention require external state
+# and are tested manually — not in scripttest.
+
+exec ondatrasql init
+mkdir models/raw
+cp ev.sql models/raw/clicks.sql
+
+# Out-of-range public port (overflow when +1)
+! exec ondatrasql events 65535
+stderr 'invalid public port 65535'
+stderr 'public\+1'
+stderr '65535 is reserved'
+
+# Out-of-range public port (zero / negative)
+! exec ondatrasql events 0
+stderr 'invalid public port 0'
+stderr '1-65534'
+
+# Non-integer port name
+! exec ondatrasql events abcd
+stderr 'invalid port'
+
+-- ev.sql --
+-- @kind: events
+event_name VARCHAR NOT NULL

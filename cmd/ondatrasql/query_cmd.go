@@ -30,6 +30,9 @@ func runHistory(cfg *config.Config, args []string) error {
 				if err != nil {
 					return fmt.Errorf("invalid limit: %s", args[i+1])
 				}
+				if n <= 0 {
+					return fmt.Errorf("--limit must be a positive integer (got %d)", n)
+				}
 				limit = n
 				i++
 			}
@@ -59,7 +62,7 @@ func runHistory(cfg *config.Config, args []string) error {
 	if model != "" {
 		sqlQuery = strings.Replace(sqlQuery,
 			"ORDER BY snapshot_id DESC",
-			fmt.Sprintf("AND (commit_extra_info->>'model') = '%s'\nORDER BY snapshot_id DESC", duckdb.EscapeSQL(model)),
+			fmt.Sprintf("AND LOWER(commit_extra_info->>'model') = LOWER('%s')\nORDER BY snapshot_id DESC", duckdb.EscapeSQL(model)),
 			1)
 	}
 
@@ -72,13 +75,24 @@ func runHistory(cfg *config.Config, args []string) error {
 		return fmt.Errorf("query history: %w", err)
 	}
 
+	// In --json mode, emit the row list to stdout. The box rendering still
+	// runs but its output is routed to stderr by the output package.
+	if output.JSONEnabled {
+		output.EmitJSON(map[string]any{
+			"model": model,
+			"limit": limit,
+			"runs":  rows,
+		})
+		return nil
+	}
+
 	// Print box format
 	printHistoryBox(rows, model, limit)
 	return nil
 }
 
 // History box width (wider than standard 64)
-const historyBoxWidth = 120
+const historyBoxWidth = 122
 
 // printHistoryBox prints history in box format.
 func printHistoryBox(rows []map[string]string, model string, limit int) {
@@ -110,7 +124,7 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 	}
 
 	// Header
-	header := fmt.Sprintf("  %4s  %-19s  %-36s  %-6s  %-8s  %5s  %5s  %-20s", "ID", "Time", "Model", "Kind", "Type", "Rows", "ms", "Run ID")
+	header := fmt.Sprintf("  %4s  %-19s  %-36s  %-6s  %-8s  %5s  %5s  %-22s", "ID", "Time", "Model", "Kind", "Type", "Rows", "ms", "Run ID")
 	output.Println(vertical + header + strings.Repeat(" ", historyBoxWidth-len(header)) + vertical)
 
 	// Empty line after header
@@ -144,11 +158,11 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 		}
 
 		runID := row["Run ID"]
-		if len(runID) > 20 {
-			runID = runID[:20]
+		if len(runID) > 22 {
+			runID = runID[:22]
 		}
 
-		line := fmt.Sprintf("  %4s  %-19s  %-36s  %-6s  %-8s  %5s  %5s  %-20s", row["ID"], row["Time"], modelName, kind, runType, rowsVal, msVal, runID)
+		line := fmt.Sprintf("  %4s  %-19s  %-36s  %-6s  %-8s  %5s  %5s  %-22s", row["ID"], row["Time"], modelName, kind, runType, rowsVal, msVal, runID)
 		// Ensure line fits in box
 		if len(line) > historyBoxWidth {
 			line = line[:historyBoxWidth-3] + "..."
@@ -194,6 +208,9 @@ func runQueryTable(cfg *config.Config, args []string) error {
 				if err != nil {
 					return fmt.Errorf("invalid limit: %s", args[i+1])
 				}
+				if n <= 0 {
+					return fmt.Errorf("--limit must be a positive integer (got %d)", n)
+				}
 				limit = n
 				i++
 			}
@@ -227,8 +244,19 @@ func runQueryTable(cfg *config.Config, args []string) error {
 	return sess.QueryPrint(query, format)
 }
 
-// runSQL executes arbitrary SQL and prints results.
+// runSQL executes a read-only SQL query and prints the results.
 // Usage: ondatrasql sql "SELECT ..."
+//
+// Only read-only statements are accepted: SELECT (including WITH ... SELECT,
+// FROM-first, VALUES), EXPLAIN, DESCRIBE, SHOW, SUMMARIZE, and table function
+// calls invoked via FROM (e.g. read_csv, glob, lake.snapshots). DDL/DML
+// statements (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE), CALL procedures
+// (e.g. ducklake_merge_adjacent_files), and PRAGMA are rejected — PRAGMA
+// because DuckDB uses the same statement type for read pragmas (PRAGMA
+// show_tables) and mutating ones (PRAGMA threads=1, PRAGMA enable_profiling),
+// and we can't allow one without allowing the other. Use SHOW/DESCRIBE/
+// SUMMARIZE for read-only introspection and models in models/ for data
+// mutations. See allowedSQLStmtTypes in internal/duckdb/session.go.
 func runSQL(cfg *config.Config, query string, format string) error {
 	sess, err := duckdb.NewSession("")
 	if err != nil {
@@ -238,6 +266,10 @@ func runSQL(cfg *config.Config, query string, format string) error {
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
+	}
+
+	if err := sess.EnsureReadOnly(query); err != nil {
+		return err
 	}
 
 	return sess.QueryPrint(query, format)

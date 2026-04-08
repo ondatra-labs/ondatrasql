@@ -42,7 +42,7 @@ func execConstraint(t *testing.T, directive, table string) []string {
 
 func execAudit(t *testing.T, directive, table string, prev int64) []string {
 	t.Helper()
-	sql, err := AuditToSQL(directive, table, prev)
+	sql, err := AuditToSQL(directive, table, "", prev)
 	if err != nil {
 		t.Fatalf("AuditToSQL(%q): %v", directive, err)
 	}

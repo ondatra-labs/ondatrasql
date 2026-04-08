@@ -143,18 +143,19 @@ func TestQueryPrint_JSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryPrint json: %v", err)
 	}
-	var rows []map[string]string
+	// Bug 4/6 fix: id is a JSON number, val is a JSON string.
+	var rows []map[string]any
 	if jsonErr := json.Unmarshal(buf[:n], &rows); jsonErr != nil {
 		t.Fatalf("invalid JSON: %v\noutput:\n%s", jsonErr, output)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
-	if rows[0]["id"] != "1" {
-		t.Errorf("id = %q, want %q", rows[0]["id"], "1")
+	if got, ok := rows[0]["id"].(float64); !ok || got != 1 {
+		t.Errorf("id = %v (%T), want JSON number 1", rows[0]["id"], rows[0]["id"])
 	}
 	if rows[0]["val"] != "test" {
-		t.Errorf("val = %q, want %q", rows[0]["val"], "test")
+		t.Errorf("val = %v, want \"test\"", rows[0]["val"])
 	}
 }
 

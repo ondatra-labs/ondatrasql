@@ -1,0 +1,31 @@
+# Bug 2: SQL commands from the sql/ folder execute real catalog/maintenance
+# operations against DuckLake metadata. Sandbox attaches the prod metadata
+# catalog as READ_ONLY, so these would fail mid-operation with a cryptic
+# transaction error. The fix rejects sandbox mode for any sql/ script
+# upfront with a clean error message naming the command.
+
+exec ondatrasql init
+
+# All sql/ scripts must reject sandbox mode upfront.
+! exec ondatrasql checkpoint sandbox
+stderr '"checkpoint" cannot run in sandbox mode'
+stderr 'sql/ scripts execute real catalog operations'
+
+! exec ondatrasql merge sandbox
+stderr '"merge" cannot run in sandbox mode'
+
+! exec ondatrasql expire sandbox
+stderr '"expire" cannot run in sandbox mode'
+
+! exec ondatrasql cleanup sandbox
+stderr '"cleanup" cannot run in sandbox mode'
+
+! exec ondatrasql orphaned sandbox
+stderr '"orphaned" cannot run in sandbox mode'
+
+! exec ondatrasql rewrite sandbox
+stderr '"rewrite" cannot run in sandbox mode'
+
+# Prod variants must still work (they're real maintenance operations).
+exec ondatrasql merge
+stdout 'merge'

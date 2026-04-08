@@ -279,7 +279,7 @@ func TestRapid_AuditToSQL_ValidInput(t *testing.T) {
 	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		directive := genAnyValidAudit().Draw(t, "directive")
-		sql, err := AuditToSQL(directive, "test_table", 0)
+		sql, err := AuditToSQL(directive, "test_table", "", 0)
 		if err != nil {
 			t.Fatalf("AuditToSQL(%q) failed: %v", directive, err)
 		}
@@ -302,7 +302,7 @@ func TestRapid_AuditToSQL_PreservesGoldenPath(t *testing.T) {
 		golden := randomizeCase(t, "golden")
 		directive := fmt.Sprintf("%s('%s')", golden, path)
 
-		sql, err := AuditToSQL(directive, "test_table", 0)
+		sql, err := AuditToSQL(directive, "test_table", "", 0)
 		if err != nil {
 			t.Fatalf("AuditToSQL(%q) failed: %v", directive, err)
 		}
@@ -325,7 +325,7 @@ func TestRapid_AuditToSQL_PreservesColumnNames(t *testing.T) {
 		val := rapid.IntRange(0, 1000).Draw(t, "val")
 		directive := fmt.Sprintf("%s(%s) %s %d", fn, col, op, val)
 
-		sql, err := AuditToSQL(directive, "test_table", 0)
+		sql, err := AuditToSQL(directive, "test_table", "", 0)
 		if err != nil {
 			t.Fatalf("AuditToSQL(%q) failed: %v", directive, err)
 		}
@@ -422,7 +422,7 @@ func TestRapid_AuditsBatch_UnionAll(t *testing.T) {
 			directives = append(directives, genAnyValidAudit().Draw(t, "audit"))
 		}
 
-		sql, errs := AuditsToBatchSQL(directives, "test_table", 0)
+		sql, errs := AuditsToBatchSQL(directives, "test_table", "", 0)
 		if len(errs) > 0 {
 			t.Fatalf("unexpected parse errors: %v", errs)
 		}
@@ -445,7 +445,7 @@ func TestRapid_AuditsBatch_HistoryAwareNoSnapshot(t *testing.T) {
 		pct := rapid.IntRange(1, 99).Draw(t, "pct")
 		directive := fmt.Sprintf("row_count_change < %d%%", pct)
 
-		sql, err := AuditToSQL(directive, "test_table", 0)
+		sql, err := AuditToSQL(directive, "test_table", "", 0)
 		if err != nil {
 			t.Fatalf("AuditToSQL: %v", err)
 		}
@@ -464,7 +464,7 @@ func TestRapid_AuditsBatch_HistoryAwareWithSnapshot(t *testing.T) {
 		snap := int64(rapid.IntRange(1, 10000).Draw(t, "snapshot"))
 		directive := fmt.Sprintf("row_count_change < %d%%", pct)
 
-		sql, err := AuditToSQL(directive, "test_table", snap)
+		sql, err := AuditToSQL(directive, "test_table", "", snap)
 		if err != nil {
 			t.Fatalf("AuditToSQL: %v", err)
 		}
@@ -482,7 +482,7 @@ func TestRapid_AuditsBatch_MixedValidInvalid(t *testing.T) {
 		valid := genAnyValidAudit().Draw(t, "valid")
 		invalid := "TOTALLY INVALID GARBAGE " + rapid.StringMatching(`^[A-Z]{3,8}$`).Draw(t, "garbage")
 
-		sql, errs := AuditsToBatchSQL([]string{invalid, valid}, "test_table", 0)
+		sql, errs := AuditsToBatchSQL([]string{invalid, valid}, "test_table", "", 0)
 		if len(errs) != 1 {
 			t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
 		}

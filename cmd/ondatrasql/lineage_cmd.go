@@ -53,10 +53,20 @@ func runLineage(cfg *config.Config, args []string) error {
 	if len(parts) >= 3 {
 		// Column focus: schema.table.column
 		modelName := parts[0] + "." + parts[1]
-		return runLineageColumnFocus(sess, modelName, target)
+		columnName := strings.Join(parts[2:], ".")
+
+		// Validate the model exists in models/ before showing lineage. (Bug 3)
+		if _, err := findModel(cfg, modelName); err != nil {
+			return err
+		}
+		return runLineageColumnFocus(sess, modelName, columnName, target)
 	}
 
 	// Model focus: schema.table
+	// Validate the model exists in models/ before showing lineage. (Bug 3)
+	if _, err := findModel(cfg, target); err != nil {
+		return err
+	}
 	return runLineageModelFocus(sess, target)
 }
 
@@ -107,13 +117,27 @@ func runLineageModelFocus(sess *duckdb.Session, target string) error {
 }
 
 // runLineageColumnFocus shows column trace through all models
-func runLineageColumnFocus(sess *duckdb.Session, modelName, fullTarget string) error {
+func runLineageColumnFocus(sess *duckdb.Session, modelName, columnName, fullTarget string) error {
 	info, err := backfill.GetModelCommitInfo(sess, modelName)
 	if err != nil {
 		return fmt.Errorf("get model info: %w", err)
 	}
 	if info == nil {
-		return fmt.Errorf("no commit info found for %s", modelName)
+		return fmt.Errorf("model %s has not been run yet — run it first to see column lineage", modelName)
+	}
+
+	// Validate the column exists in the model's output schema. (Bug 25)
+	found := false
+	available := make([]string, 0, len(info.Columns))
+	for _, c := range info.Columns {
+		available = append(available, c.Name)
+		if c.Name == columnName {
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("column %q not found in %s (available: %s)",
+			columnName, modelName, strings.Join(available, ", "))
 	}
 
 	// Build full lineage chain

@@ -50,6 +50,11 @@ type ModelStats struct {
 	Rows     int64
 	Duration int64
 	LastRun  string
+	// Orphaned is true when the table exists in the catalog but its
+	// model file no longer exists on disk. Kept as a separate flag so
+	// JSON consumers can rely on Name as a stable identifier instead
+	// of parsing presentation labels. (Review finding 3)
+	Orphaned bool `json:",omitempty"`
 }
 
 // runStats executes the stats command with nice formatting.
@@ -67,6 +72,18 @@ func runStats(cfg *config.Config) error {
 	stats, err := gatherProjectStats(sess)
 	if err != nil {
 		return fmt.Errorf("gather stats: %w", err)
+	}
+
+	// Annotate orphans: tables in the catalog that no longer have a model
+	// file on disk. Visible to the user with an [orphaned] tag so they
+	// notice and can clean up. (Bug 14)
+	annotateOrphans(stats, cfg)
+
+	// In --json mode, emit the structured stats to stdout. The box rendering
+	// still runs but its output is routed to stderr by the output package.
+	if output.JSONEnabled {
+		output.EmitJSON(stats)
+		return nil
 	}
 
 	printStatsBox(stats)
@@ -143,6 +160,32 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 	return stats, nil
 }
 
+// annotateOrphans flags rows in stats.AllModels whose target no longer
+// has a model file on disk. The catalog table persists after the file
+// is deleted; without annotation users see no warning. (Bug 14)
+//
+// Sets the Orphaned bool only — Name stays as the canonical schema.table
+// identifier so JSON consumers (--json mode) can rely on it. The box
+// renderer appends a visual " [orphaned]" suffix at print time. (Review
+// finding 3)
+func annotateOrphans(stats *ProjectStats, cfg *config.Config) {
+	models, err := loadModelsFromDir(cfg)
+	if err != nil {
+		// If we can't load models, leave stats untouched — better to show
+		// possibly-stale info than to silently hide everything.
+		return
+	}
+	known := make(map[string]bool, len(models))
+	for _, m := range models {
+		known[m.Target] = true
+	}
+	for i, m := range stats.AllModels {
+		if !known[m.Name] {
+			stats.AllModels[i].Orphaned = true
+		}
+	}
+}
+
 // printStatsBox prints project stats in a nice box format.
 func printStatsBox(stats *ProjectStats) {
 	// Title
@@ -211,6 +254,11 @@ func printStatsBox(stats *ProjectStats) {
 				name := parts[0]
 				if len(parts) > 1 {
 					name = parts[1]
+				}
+				// Visual-only orphan tag — Name in the struct stays clean
+				// so --json consumers can use it as a stable identifier.
+				if m.Orphaned {
+					name += " [orphaned]"
 				}
 				if len(name) > 22 {
 					name = name[:19] + "..."

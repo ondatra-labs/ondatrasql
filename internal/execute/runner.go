@@ -624,10 +624,18 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	}
 	result.RowsAffected = rowsAffected
 
-	// Run audits (batched - single query for all audits)
+	// Run audits (batched - single query for all audits).
+	// Historical audits (row_count_change, distribution STABLE) need to
+	// time-travel against the previous snapshot. In sandbox mode that
+	// snapshot lives in the prod catalog (sandbox has no model history),
+	// so we redirect AT VERSION clauses to a prod-prefixed reference.
 	stepStart = time.Now()
 	if len(model.Audits) > 0 {
-		batchSQL, parseErrors := validation.AuditsToBatchSQL(model.Audits, model.Target, prevSnapshot)
+		historicalTable := model.Target
+		if r.sess.ProdAlias() != "" {
+			historicalTable = r.sess.ProdAlias() + "." + model.Target
+		}
+		batchSQL, parseErrors := validation.AuditsToBatchSQL(model.Audits, model.Target, historicalTable, prevSnapshot)
 
 		// Add any parse errors
 		for _, err := range parseErrors {
@@ -702,7 +710,16 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 // the previous snapshot before restoring data.
 // If the table did not exist at prevSnapshot (first run of a new model),
 // falls back to DROP TABLE.
+//
+// In sandbox mode, prevSnapshot is a prod snapshot ID that doesn't exist in
+// the sandbox catalog, so time-travel rollback is impossible. Sandbox is also
+// throwaway by design — drop the sandbox table and let the next sandbox run
+// rebuild it from scratch.
 func (r *Runner) rollback(target string, prevSnapshot int64, sc *backfill.SchemaChange) error {
+	if r.sess.ProdAlias() != "" {
+		// Sandbox mode — no meaningful snapshot to roll back to.
+		return r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target))
+	}
 	if prevSnapshot == 0 {
 		// No previous snapshot, drop the table
 		if err := r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target)); err != nil {
@@ -797,11 +814,15 @@ func (r *Runner) cleanup(tmpTable string) {
 // Warnings support both audit patterns (post-INSERT, history-aware) and
 // constraint patterns (row-level checks). Both are tried for each directive.
 func (r *Runner) runWarnings(model *parser.Model, table string, prevSnapshot int64, result *Result) {
+	historicalTable := table
+	if r.sess.ProdAlias() != "" {
+		historicalTable = r.sess.ProdAlias() + "." + table
+	}
 	for _, warning := range model.Warnings {
 		var queries []string
 
 		// Try audit pattern (post-INSERT, history-aware)
-		if sql, err := validation.AuditToSQL(warning, table, prevSnapshot); err == nil {
+		if sql, err := validation.AuditToSQL(warning, table, historicalTable, prevSnapshot); err == nil {
 			queries = append(queries, sql)
 		}
 
@@ -856,6 +877,67 @@ func sanitizeTableName(target string) string {
 func (r *Runner) getTableColumns(table string) ([]string, error) {
 	query := fmt.Sprintf("SELECT * FROM ondatra_get_column_names('%s')", escapeSQL(table))
 	return r.sess.QueryRows(query)
+}
+
+// ensureColumnsExist verifies that all named columns are present in the temp
+// table's output schema. Used to validate @unique_key, @incremental, etc.
+// against the actual SELECT result, instead of letting the model "succeed"
+// on first run (backfill) and fail cryptically on the second run when CDC
+// or merge tries to reference the missing column. (Bug 16 + 17)
+//
+// columnList may be a single column ("id") or comma-separated ("year, month").
+func (r *Runner) ensureColumnsExist(tmpTable, directive, columnList string) error {
+	actual, err := r.getTableColumns(tmpTable)
+	if err != nil {
+		return fmt.Errorf("get columns to validate %s: %w", directive, err)
+	}
+	actualSet := make(map[string]bool, len(actual))
+	for _, c := range actual {
+		actualSet[strings.ToLower(c)] = true
+	}
+	for _, want := range strings.Split(columnList, ",") {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		if !actualSet[strings.ToLower(want)] {
+			return fmt.Errorf("%s column %q is not in the model output (available columns: %s)",
+				directive, want, strings.Join(actual, ", "))
+		}
+	}
+	return nil
+}
+
+// ensureUniqueKeyNotNull rejects merge operations where the source temp table
+// has NULL values in the @unique_key column(s). NULL keys can't be merged
+// reliably (NULL = NULL is FALSE in standard SQL, and IS NOT DISTINCT FROM
+// produces ambiguous UPDATEs when multiple source NULL rows match multiple
+// target NULL rows). The user should fix the data or add @constraint: <key> NOT NULL.
+//
+// Supports both single-column keys ("id") and composite keys ("year, month").
+func (r *Runner) ensureUniqueKeyNotNull(tmpTable, uniqueKey string) error {
+	// Build a WHERE clause that matches any row with at least one NULL key column.
+	cols := strings.Split(uniqueKey, ",")
+	var conds []string
+	for _, c := range cols {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		conds = append(conds, fmt.Sprintf("%s IS NULL", duckdb.QuoteIdentifier(c)))
+	}
+	if len(conds) == 0 {
+		return nil
+	}
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", tmpTable, strings.Join(conds, " OR "))
+	result, err := r.sess.QueryValue(query)
+	if err != nil {
+		return fmt.Errorf("check unique_key NULLs: %w", err)
+	}
+	if result == "0" || result == "" {
+		return nil
+	}
+	return fmt.Errorf("%s row(s) have NULL in unique_key column(s) [%s] — unique keys must not be NULL (fix the source data or add @constraint: %s NOT NULL)", result, uniqueKey, uniqueKey)
 }
 
 // filterKindColumns removes kind-specific columns from a schema before comparison.

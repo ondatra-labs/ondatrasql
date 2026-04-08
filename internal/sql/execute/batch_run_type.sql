@@ -12,7 +12,9 @@ latest_commits AS (
         commit_extra_info->>'sql_hash' AS prev_hash,
         commit_extra_info->>'depends' AS depends_raw,
         snapshot_id,
-        ROW_NUMBER() OVER (PARTITION BY commit_extra_info->>'model'
+        -- Partition on lowercased model so case-variant commits are deduped
+        -- to a single row (matches the case-insensitive lookup story).
+        ROW_NUMBER() OVER (PARTITION BY LOWER(commit_extra_info->>'model')
                           ORDER BY snapshot_id DESC) AS rn
     FROM %s.snapshots()
     WHERE commit_extra_info->>'model' IS NOT NULL
@@ -31,7 +33,7 @@ model_status AS (
         END AS depends_invalid,
         lc.snapshot_id AS model_snapshot_id
     FROM model_input m
-    LEFT JOIN latest_commits lc ON lc.model = m.target AND lc.rn = 1
+    LEFT JOIN latest_commits lc ON LOWER(lc.model) = LOWER(m.target) AND lc.rn = 1
 ),
 -- Unnest table dependencies for models with valid depends arrays
 table_deps AS (
@@ -54,8 +56,8 @@ dep_status AS (
             ELSE 'unchanged'
         END AS status
     FROM table_deps td
-    JOIN model_status ms ON ms.target = td.target
-    LEFT JOIN latest_commits lc ON lc.model = td.dep AND lc.rn = 1
+    JOIN model_status ms ON LOWER(ms.target) = LOWER(td.target)
+    LEFT JOIN latest_commits lc ON LOWER(lc.model) = LOWER(td.dep) AND lc.rn = 1
 ),
 -- Summarize dependency status per table model
 table_dep_summary AS (
@@ -97,7 +99,10 @@ SELECT
         -- Non-table kinds
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'first run'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'sql changed'
-        WHEN ms.kind != 'table' THEN 'unchanged'
+        -- For incremental kinds (append/merge/scd2/partition/tracked) the SQL
+        -- being unchanged doesn't mean nothing happens — the model still runs
+        -- to ingest new source rows. (Bug 15)
+        WHEN ms.kind != 'table' THEN 'incremental run'
         -- Table kind
         WHEN ms.prev_hash = '' THEN 'first run'
         WHEN ms.prev_hash != ms.current_hash THEN 'sql changed'

@@ -1,0 +1,22 @@
+# Bug 27: when sandbox skips a model (no upstream changes, deps unchanged),
+# the validation status line must say "Audits: N not evaluated (model skipped)"
+# rather than "Audits: N passed". The earlier wording suggested the audits ran
+# and passed, leading users to believe a misconfigured audit was safe to deploy.
+
+exec ondatrasql init
+mkdir models/raw
+cp m.sql models/raw/audited.sql
+
+# First run prod so the model exists in the catalog (sandbox compares vs prod).
+exec ondatrasql run raw.audited
+
+# Sandbox the same model unchanged → sandbox detects nothing changed and
+# skips. Audits did NOT run, so the status line must reflect that.
+exec ondatrasql sandbox raw.audited
+stdout 'Audits: 1 not evaluated \(model skipped\)'
+! stdout 'Audits: 1 passed'
+
+-- m.sql --
+-- @kind: table
+-- @audit: row_count >= 1
+SELECT 1 AS x

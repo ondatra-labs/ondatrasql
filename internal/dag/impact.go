@@ -121,9 +121,12 @@ func AnalyzeTransitiveImpact(sess *duckdb.Session, changedModel, transitiveModel
 		return nil, err
 	}
 
+	// Use case-insensitive matching to stay consistent with analyzeModelImpact
+	// (which uses strings.EqualFold for source-table comparisons). Otherwise a
+	// downstream stored as `Mart.Orders` wouldn't match a query for `mart.orders`.
 	isDirectDep := false
 	for _, d := range downstream {
-		if d == transitiveModel {
+		if strings.EqualFold(d, transitiveModel) {
 			isDirectDep = true
 			break
 		}
@@ -138,24 +141,27 @@ func AnalyzeTransitiveImpact(sess *duckdb.Session, changedModel, transitiveModel
 }
 
 // GetFullImpactTree returns all models affected by a change, including transitive dependencies.
-// Returns models in topological order (direct dependencies first, then their dependents).
+// Models appear once each, in DFS pre-order from changedModel's downstreams.
 func GetFullImpactTree(sess *duckdb.Session, changedModel string) ([]string, error) {
 	var result []string
+	// `visited` doubles as the "already in result" set so each model appears
+	// at most once even when reached through multiple paths (e.g. X→A→D AND
+	// X→D would otherwise append D twice — the previous code only guarded
+	// re-recursion, not re-appending).
 	visited := make(map[string]bool)
+	visited[changedModel] = true // exclude self from result, prevent cycles
 
 	var traverse func(model string) error
 	traverse = func(model string) error {
-		if visited[model] {
-			return nil
-		}
-		visited[model] = true
-
 		downstream, err := backfill.GetDownstreamModels(sess, model)
 		if err != nil {
 			return err
 		}
-
 		for _, d := range downstream {
+			if visited[d] {
+				continue
+			}
+			visited[d] = true
 			result = append(result, d)
 			if err := traverse(d); err != nil {
 				return err

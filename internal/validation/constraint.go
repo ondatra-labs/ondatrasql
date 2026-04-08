@@ -88,15 +88,19 @@ func ConstraintToSQL(directive, table string) (string, error) {
 			},
 		},
 		// col >= N (and other comparisons)
+		// Bug 28: val may contain single quotes (e.g. 'active'). Escape them
+		// for the printf-arg context, but pass val unchanged into the actual
+		// WHERE clause where it's a SQL literal already.
 		{
 			regexp.MustCompile(`^(\w+)\s*(>=|<=|>|<|=|!=)\s*(.+)$`),
 			func(m []string, t string) string {
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
+				escapedVal := escapeSQLString(val)
 				return fmt.Sprintf(
 					`SELECT printf('%%s %%s %%s failed: found %%d violations (example: %%s)', '%s', '%s', '%s', COUNT(*), MIN(%s)::VARCHAR)
 					FROM %s WHERE %s %s %s HAVING COUNT(*) > 0`,
-					col, op, val, col, t, col, invOp, val)
+					col, op, escapedVal, col, t, col, invOp, val)
 			},
 		},
 		// col BETWEEN x AND y

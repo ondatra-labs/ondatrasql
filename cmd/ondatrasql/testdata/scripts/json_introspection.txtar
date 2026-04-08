@@ -1,0 +1,29 @@
+# Bug 5: --json mode was silently ignored on the introspection commands
+# stats / history / describe — they always rendered the human-friendly box.
+# After the fix, --json emits structured JSON to stdout (the box still
+# renders to stderr via the output package, so it's still visible to
+# humans but doesn't pollute pipes).
+
+exec ondatrasql init
+mkdir models/staging
+cp m.sql models/staging/orders.sql
+exec ondatrasql run staging.orders
+
+# --json stats — structured output on stdout
+exec ondatrasql --json stats
+stdout '"ModelCount":'
+stdout '"AllModels":'
+stdout '"Name":"staging.orders"'
+
+# --json history — structured output on stdout
+exec ondatrasql --json history
+stdout '"runs":'
+stdout 'staging.orders'
+
+# --json describe — structured output on stdout
+exec ondatrasql --json describe staging.orders
+stdout '"Target":"staging.orders"'
+
+-- m.sql --
+-- @kind: table
+SELECT 1 AS id, 'hello' AS name

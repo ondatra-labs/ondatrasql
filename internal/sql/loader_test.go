@@ -120,6 +120,28 @@ func TestLoadQueryStatsAllModels(t *testing.T) {
 	if !strings.Contains(content, "ROW_NUMBER()") {
 		t.Error("expected ROW_NUMBER() in query")
 	}
+	// Regression: PARTITION BY must lowercase the model name so case-variant
+	// commits dedup to a single "latest" row, matching the case-insensitive
+	// lookup story used by GetModelCommitInfo, ondatra_get_downstream, etc.
+	if !strings.Contains(content, "PARTITION BY LOWER(commit_extra_info->>'model')") {
+		t.Error("expected PARTITION BY LOWER(...) for case-insensitive dedup")
+	}
+}
+
+// Regression: stats_basic and stats_kind_breakdown count distinct models
+// using LOWER() so case-variant commits don't double-count.
+func TestLoadQueryStats_CaseInsensitiveModelCount(t *testing.T) {
+	SetCatalogAlias("lake")
+
+	for _, name := range []string{"stats_basic", "stats_kind_breakdown"} {
+		content, err := LoadQuery(name)
+		if err != nil {
+			t.Fatalf("LoadQuery(%q): %v", name, err)
+		}
+		if !strings.Contains(content, "COUNT(DISTINCT LOWER(commit_extra_info->>'model'))") {
+			t.Errorf("%s: expected COUNT(DISTINCT LOWER(model)) for case-insensitive dedup", name)
+		}
+	}
 }
 
 func TestLoadQueryLineageAllModels(t *testing.T) {
@@ -133,8 +155,14 @@ func TestLoadQueryLineageAllModels(t *testing.T) {
 	if strings.Contains(content, "{{catalog}}") {
 		t.Error("{{catalog}} placeholder not replaced")
 	}
-	if !strings.Contains(content, "DISTINCT") {
-		t.Error("expected DISTINCT in query")
+	// The query now uses ROW_NUMBER() OVER (PARTITION BY LOWER(...)) instead
+	// of SELECT DISTINCT to dedup case-variant model names while keeping the
+	// original-case display value from the most recent commit.
+	if !strings.Contains(content, "ROW_NUMBER") {
+		t.Error("expected ROW_NUMBER dedup in query")
+	}
+	if !strings.Contains(content, "LOWER(") {
+		t.Error("expected LOWER() for case-insensitive dedup")
 	}
 }
 

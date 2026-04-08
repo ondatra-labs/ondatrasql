@@ -1,0 +1,48 @@
+# Bug 18-21: --limit must be a positive integer for both `query` and `history`.
+# Earlier:
+#   query --limit 0   → silently returned ALL rows (limit ignored)
+#   query --limit -1  → same
+#   history --limit 0 → returned 0 rows ("No runs found")
+#   history --limit -5 → leaked DuckDB Binder Error
+# Now: rejected at parse time with a clean error mentioning the actual value.
+
+exec ondatrasql init
+mkdir models/staging
+cp model.sql models/staging/qt.sql
+exec ondatrasql run staging.qt
+
+# --- query --limit 0 / -1 — both rejected ---
+! exec ondatrasql query staging.qt --limit 0
+stderr 'must be a positive integer'
+stderr '\(got 0\)'
+
+! exec ondatrasql query staging.qt --limit -1
+stderr 'must be a positive integer'
+stderr '\(got -1\)'
+
+# --- history --limit 0 / -5 — both rejected ---
+! exec ondatrasql history --limit 0
+stderr 'must be a positive integer'
+stderr '\(got 0\)'
+
+! exec ondatrasql history --limit -5
+stderr 'must be a positive integer'
+stderr '\(got -5\)'
+
+# --- positive limits still work ---
+exec ondatrasql query staging.qt --limit 2
+stdout 'Alice'
+
+exec ondatrasql history --limit 3
+stdout 'Run History'
+
+# --- no flag at all still works (default behavior unchanged) ---
+exec ondatrasql query staging.qt
+stdout 'Alice'
+
+exec ondatrasql history
+stdout 'Run History'
+
+-- model.sql --
+-- @kind: table
+SELECT 1 AS id, 'Alice' AS name

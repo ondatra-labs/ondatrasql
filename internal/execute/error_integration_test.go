@@ -91,19 +91,13 @@ func TestRun_Merge_MissingUniqueKey(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	// First run creates as table (backfill), second run tries merge without UK
+	// Bug 16 fix: missing @unique_key fails IMMEDIATELY on first run
+	// instead of cryptically on the second. The user shouldn't have to
+	// run twice to discover the misconfiguration.
 	runner := execute.NewRunner(p.Sess, execute.ModeRun, "test")
 	_, err = runner.Run(context.Background(), model)
-	if err != nil {
-		// First run should succeed (backfill creates table)
-		t.Fatalf("first run failed: %v", err)
-	}
-
-	// Second run: now it's incremental and will try merge — fails on missing unique_key
-	runner2 := execute.NewRunner(p.Sess, execute.ModeRun, "test2")
-	_, err = runner2.Run(context.Background(), model)
 	if err == nil {
-		t.Fatal("expected error for merge without unique_key")
+		t.Fatal("expected error for merge without unique_key on first run")
 	}
 	if !strings.Contains(err.Error(), "merge kind requires unique_key") {
 		t.Errorf("expected 'merge kind requires unique_key' error, got: %v", err)

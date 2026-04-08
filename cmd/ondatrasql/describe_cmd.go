@@ -122,6 +122,13 @@ func runDescribe(cfg *config.Config, target string) error {
 		return fmt.Errorf("gather model info: %w", err)
 	}
 
+	// In --json mode, emit the structured info to stdout. The box rendering
+	// still runs but its output is routed to stderr by the output package.
+	if output.JSONEnabled {
+		output.EmitJSON(info)
+		return nil
+	}
+
 	// Print the formatted output
 	printModelBox(info)
 

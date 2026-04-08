@@ -158,6 +158,24 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		}
 
 	case "merge":
+		if model.UniqueKey == "" {
+			return 0, fmt.Errorf("merge kind requires unique_key directive")
+		}
+		// Validate that the unique_key columns actually exist in the model
+		// output (Bug 16) and don't contain NULL (Bug 22). Both checks run
+		// on every merge — including backfill — so issues fail loudly on
+		// the FIRST run instead of cryptically on the second.
+		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
+			return 0, err
+		}
+		if err := r.ensureUniqueKeyNotNull(tmpTable, model.UniqueKey); err != nil {
+			return 0, err
+		}
+		if model.Incremental != "" {
+			if err := r.ensureColumnsExist(tmpTable, "@incremental", model.Incremental); err != nil {
+				return 0, err
+			}
+		}
 		if !targetExists {
 			mainSQL = sql.MustFormat("execute/table.sql", model.Target, tmpTable)
 		} else if isBackfill {
@@ -165,10 +183,6 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 				model.Target, model.Target, tmpTable)
 		} else {
 			// Use MERGE INTO for upsert (DuckLake doesn't support INSERT OR REPLACE)
-			if model.UniqueKey == "" {
-				return 0, fmt.Errorf("merge kind requires unique_key directive")
-			}
-			// Build MERGE INTO statement
 			// Get columns from temp table for UPDATE SET clause
 			cols, err := r.getTableColumns(tmpTable)
 			if err != nil {
@@ -181,6 +195,14 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		if model.UniqueKey == "" {
 			return 0, fmt.Errorf("scd2 kind requires unique_key directive")
 		}
+		// Bug 16 + 22: validate unique_key columns exist and contain no NULLs.
+		// SCD2 uses unique_key as the row identity for change detection.
+		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
+			return 0, err
+		}
+		if err := r.ensureUniqueKeyNotNull(tmpTable, model.UniqueKey); err != nil {
+			return 0, err
+		}
 		// SCD2 handles its own transaction - return early
 		return r.materializeSCD2(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
 
@@ -188,12 +210,28 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		if model.UniqueKey == "" {
 			return 0, fmt.Errorf("partition kind requires unique_key directive")
 		}
+		// Bug 16 + 22: validate unique_key columns exist and contain no NULLs.
+		// Partition uses unique_key as the partition identifier.
+		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
+			return 0, err
+		}
+		if err := r.ensureUniqueKeyNotNull(tmpTable, model.UniqueKey); err != nil {
+			return 0, err
+		}
 		// Partition handles its own transaction - return early
 		return r.materializePartition(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
 
 	case "tracked":
 		if model.UniqueKey == "" {
 			return 0, fmt.Errorf("tracked kind requires unique_key directive")
+		}
+		// Bug 16 + 22: validate unique_key columns exist and contain no NULLs.
+		// Tracked uses unique_key as the row identity for content-hash dedup.
+		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
+			return 0, err
+		}
+		if err := r.ensureUniqueKeyNotNull(tmpTable, model.UniqueKey); err != nil {
+			return 0, err
 		}
 		// Tracked handles its own transaction - return early
 		return r.materializeTracked(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)

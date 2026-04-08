@@ -5,6 +5,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -46,5 +47,41 @@ func TestMin(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("min(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+// TestQuoteTarget verifies that schema.table targets get properly quoted
+// for inclusion in SQL queries (defends against injection via model names).
+func TestQuoteTarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"raw.orders", `"raw"."orders"`},
+		{"staging.customer_history", `"staging"."customer_history"`},
+		{"orders", `"orders"`}, // single-part fallback
+	}
+	for _, tt := range tests {
+		got := quoteTarget(tt.input)
+		if got != tt.want {
+			t.Errorf("quoteTarget(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestTableExistsIn_InvalidTargetShape covers the shape-validation path.
+// Targets without a schema.table separator must produce a clear error
+// before any SQL is constructed — silently returning (false, nil) would
+// classify a misformatted input as "missing" and feed it to the
+// downstream "new table" branch.
+func TestTableExistsIn_InvalidTargetShape(t *testing.T) {
+	t.Parallel()
+	_, err := tableExistsIn(nil, "lake", "no_schema_separator")
+	if err == nil {
+		t.Fatal("expected error for invalid target shape")
+	}
+	if !strings.Contains(err.Error(), "schema.table") {
+		t.Errorf("error should mention expected format, got: %v", err)
 	}
 }

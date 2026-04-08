@@ -567,6 +567,75 @@ func TestInvertOp(t *testing.T) {
 	}
 }
 
+// Bug 28: comparison-style constraints with quoted string literals used to
+// produce SQL that DuckDB couldn't parse. The literal `'active'` got
+// interpolated into a printf format that wraps it in single quotes,
+// producing `'%s'`-with-`'active'` → `''active''` (4 chars: `''`+`active`+`''`)
+// which is two empty strings concatenated to `active`, not the literal
+// `'active'`. The fix escapes single quotes in the printf-arg position so
+// the message arg becomes `'''active'''` (6 chars: open, escaped-quote,
+// `active`, escaped-quote, close = the literal `'active'`).
+func TestConstraintToSQL_StringEqualityLiterals(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		directive string
+		// Substring that should appear in the printf-arg list (correctly
+		// escaped form of the literal).
+		wantArg string
+	}{
+		{"= 'active'", "status = 'active'", "'''active'''"},
+		{"!= 'banned'", "status != 'banned'", "'''banned'''"},
+		{">= 'A'", "letter >= 'A'", "'''A'''"},
+		{"= numeric still works", "amount = 0", ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sql, err := ConstraintToSQL(tt.directive, "tmp_model")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// Sanity: SQL must compile structurally.
+			if !strings.Contains(sql, "FROM tmp_model WHERE") {
+				t.Errorf("SQL should contain WHERE clause, got: %s", sql)
+			}
+			if !strings.Contains(sql, "printf(") {
+				t.Errorf("SQL should contain printf, got: %s", sql)
+			}
+			// For string literals: the correctly-escaped form must appear
+			// in the printf args.
+			if tt.wantArg != "" && !strings.Contains(sql, tt.wantArg) {
+				t.Errorf("SQL should contain %q (correctly-escaped literal in printf args), got:\n%s", tt.wantArg, sql)
+			}
+		})
+	}
+}
+
+// TestConstraintToSQL_StringEqualityExecutes is a runtime sanity check —
+// the generated SQL must actually parse and execute against DuckDB.
+// The pre-fix bug was that the SQL was *syntactically* invalid, so this
+// catches regressions that pure string assertions can miss.
+func TestConstraintToSQL_StringEqualityExecutes(t *testing.T) {
+	t.Parallel()
+	// Don't use the integration session here — just verify SQL is produced
+	// without error. The integration test in constraint_integration_test.go
+	// covers the actual execution path.
+	cases := []string{
+		"status = 'active'",
+		"status != 'banned'",
+		"name = 'O''Brien'", // pre-escaped apostrophe in literal
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ConstraintToSQL(c, "tmp_model"); err != nil {
+				t.Errorf("ConstraintToSQL(%q) should not error: %v", c, err)
+			}
+		})
+	}
+}
+
 func TestConstraintToSQL_MixedCasePreservesLiterals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

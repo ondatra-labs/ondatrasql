@@ -413,6 +413,12 @@ func validateModel(m *Model) error {
 		return fmt.Errorf("invalid kind %q: must be table, view, append, merge, scd2, partition, events, or tracked", m.Kind)
 	}
 
+	// SQL models must have a non-empty body. Scripts and events kind have
+	// their own body semantics and are exempt. (Bug 11)
+	if !m.IsScript && m.Kind != "events" && strings.TrimSpace(m.SQL) == "" {
+		return fmt.Errorf("model %s has no SQL body — write a SELECT statement after the directives", m.Target)
+	}
+
 	// Validate target
 	if err := ValidateIdentifier(m.Target); err != nil {
 		return fmt.Errorf("invalid target: %w", err)
@@ -602,8 +608,11 @@ func ValidateIdentifier(s string) error {
 }
 
 // ValidatePathSegment checks that a model path segment (directory or filename) is safe for SQL.
-// Only allows letters, numbers, and underscores. Rejects special characters
-// that could break SQL interpolation (apostrophes, spaces, hyphens, etc.).
+// Only allows ASCII letters, numbers, and underscores. Path segments become
+// part of the resulting schema/table identifier (e.g. models/raw/orders.sql →
+// raw.orders), and OndatraSQL deliberately keeps identifiers ASCII to avoid
+// quoting/escape edge cases across DuckDB and DuckLake catalogs. Non-ASCII
+// names (åäö, 注文, etc.) must be transliterated by hand. (Bug 24)
 func ValidatePathSegment(s string) error {
 	if s == "" {
 		return fmt.Errorf("path segment cannot be empty")
@@ -611,7 +620,11 @@ func ValidatePathSegment(s string) error {
 
 	validRe := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	if !validRe.MatchString(s) {
-		return fmt.Errorf("invalid path segment %q: only letters, numbers, and underscores allowed", s)
+		return fmt.Errorf(
+			"invalid path segment %q: model paths become SQL identifiers, so only "+
+				"ASCII letters, numbers, and underscores are allowed (rename the file/directory — "+
+				"e.g. 'låneansökan' → 'laneansokan')",
+			s)
 	}
 
 	return nil

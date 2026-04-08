@@ -32,6 +32,19 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 		return fmt.Errorf("SQL file is empty: %s", sqlFile)
 	}
 
+	// sql/ files run real catalog/maintenance operations against DuckLake
+	// metadata. Sandbox mode attaches the prod metadata catalog as READ_ONLY,
+	// so any metadata-writing function fails partway through with a cryptic
+	// transaction error. Sandbox previews don't make sense for these scripts
+	// anyway — reject upfront with a clear message. (Bug 2)
+	cmdName := strings.TrimSuffix(filepath.Base(sqlFile), ".sql")
+	if sandboxMode {
+		return fmt.Errorf(
+			"%q cannot run in sandbox mode: sql/ scripts execute real catalog "+
+				"operations against DuckLake metadata (run without 'sandbox' to "+
+				"execute on prod)", cmdName)
+	}
+
 	// Auto-create sandbox if needed
 	var sandboxDir string
 	if sandboxMode {
@@ -61,9 +74,6 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 			return fmt.Errorf("init session: %w", err)
 		}
 	}
-
-	// Extract command name from file path for display
-	cmdName := strings.TrimSuffix(filepath.Base(sqlFile), ".sql")
 
 	// Print header
 	printTopBorder()

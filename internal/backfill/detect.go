@@ -262,13 +262,28 @@ func areAllTypesPromotable(changes []TypeChange, sess *duckdb.Session) bool {
 	return result == "true"
 }
 
-// GetPreviousSnapshot returns the current snapshot ID to use as a baseline.
-// Call this BEFORE materialize - the returned ID becomes the "previous" snapshot
-// after materialize creates a new one. Used for audits/rollback comparison.
-// Returns 0 if there is no snapshot yet.
-// Uses ondatra_current_snapshot macro loaded at session startup.
+// GetPreviousSnapshot returns the snapshot ID of the latest commit for THIS
+// model. Call this BEFORE materialize — the returned ID becomes the "previous"
+// snapshot after materialize creates a new one. Used for audits/rollback
+// comparison. Returns 0 if the model has never been committed, so audits that
+// compare against a previous version skip cleanly on the first run.
+//
+// In sandbox mode, snapshot history must come from the prod catalog — sandbox
+// has no committed history of its own. The audit SQL on the receiving side
+// then time-travels against the same prod-prefixed reference (see runner.go's
+// `historicalTable` plumbing) so the snapshot ID is valid where it's used.
+// (Review finding 1)
 func GetPreviousSnapshot(sess *duckdb.Session, target string) (int64, error) {
-	result, err := sess.QueryValue("SELECT ondatra_current_snapshot()")
+	snapshotCatalog := sess.CatalogAlias()
+	if sess.ProdAlias() != "" {
+		snapshotCatalog = sess.ProdAlias()
+	}
+	query := fmt.Sprintf(
+		`SELECT COALESCE((SELECT snapshot_id FROM %s.snapshots()
+			WHERE LOWER(commit_extra_info->>'model') = LOWER('%s')
+			ORDER BY snapshot_id DESC LIMIT 1), 0)`,
+		snapshotCatalog, escapeSQL(target))
+	result, err := sess.QueryValue(query)
 	if err != nil {
 		return 0, nil
 	}

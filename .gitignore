@@ -7,6 +7,7 @@ dist/
 # IDE
 .idea/
 .vscode/
+.obsidian/
 
 # Temp
 *.log
@@ -14,6 +15,9 @@ dist/
 coverage*.out
 cmd_cov.out
 *_test.out
+
+# rapid testing failure dumps
+internal/*/testdata/rapid/
 
 # Docs (internal)
 docs/

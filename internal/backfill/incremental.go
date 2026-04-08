@@ -92,7 +92,7 @@ func GetIncrementalState(sess *duckdb.Session, target, cursor, initial string) (
 			snapshotCatalog = sess.ProdAlias()
 		}
 		lastRunSQL := fmt.Sprintf(`SELECT snapshot_time::VARCHAR FROM %s.snapshots()
-			WHERE commit_extra_info->>'model' = '%s'
+			WHERE LOWER(commit_extra_info->>'model') = LOWER('%s')
 			ORDER BY snapshot_id DESC LIMIT 1`,
 			snapshotCatalog, escapeSQL(target))
 

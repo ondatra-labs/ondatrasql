@@ -588,3 +588,247 @@ func TestGetOutputName_Fallback(t *testing.T) {
 	// Constants don't produce lineage but exercise getOutputName
 	_ = lineage
 }
+
+// --- Regression: AST set-operation node handling ---
+//
+// DuckDB represents UNION / UNION ALL / INTERSECT / EXCEPT as
+// SET_OPERATION_NODE with `left`/`right` sub-nodes. Earlier versions of the
+// extractor only modelled SELECT_NODE and silently dropped both column
+// lineage AND DAG dependencies for set-op queries — leading to incremental
+// runs not triggering downstream rebuilds when an upstream table changed.
+
+func TestExtract_UnionAllTables(t *testing.T) {
+	// Both sides of a UNION must contribute to the dependency graph,
+	// otherwise downstream models won't get rebuilt when one side changes.
+	sql := `SELECT name AS x FROM staging.left_tbl
+	        UNION ALL
+	        SELECT name AS x FROM staging.right_tbl`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, tbl := range tables {
+		seen[tbl] = true
+	}
+	if !seen["staging.left_tbl"] {
+		t.Errorf("expected staging.left_tbl in dependencies, got %v", tables)
+	}
+	if !seen["staging.right_tbl"] {
+		t.Errorf("expected staging.right_tbl in dependencies, got %v", tables)
+	}
+}
+
+func TestExtract_UnionAllColumnLineage(t *testing.T) {
+	// Each output column gets sources from BOTH sides of the union.
+	sql := `SELECT name AS x FROM staging.left_tbl
+	        UNION ALL
+	        SELECT name AS x FROM staging.right_tbl`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(lineages))
+	}
+	got := lineages[0]
+	if got.Column != "x" {
+		t.Errorf("expected column x, got %s", got.Column)
+	}
+	tables := make(map[string]bool)
+	for _, s := range got.Sources {
+		tables[s.Table] = true
+	}
+	if !tables["staging.left_tbl"] {
+		t.Errorf("expected source staging.left_tbl, got %+v", got.Sources)
+	}
+	if !tables["staging.right_tbl"] {
+		t.Errorf("expected source staging.right_tbl, got %+v", got.Sources)
+	}
+}
+
+func TestExtract_CteWithUnion(t *testing.T) {
+	// resolveCTE has its own AST walker; if it doesn't recurse into Left/Right
+	// the column traces back to the CTE name itself ("c.x") instead of the
+	// real upstream tables.
+	sql := `WITH c AS (
+	            SELECT name AS x FROM staging.left_tbl
+	            UNION ALL
+	            SELECT name AS x FROM staging.right_tbl
+	        )
+	        SELECT x FROM c`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 || lineages[0].Column != "x" {
+		t.Fatalf("expected column x, got %+v", lineages)
+	}
+	tables := make(map[string]bool)
+	for _, s := range lineages[0].Sources {
+		tables[s.Table] = true
+	}
+	if tables["c"] {
+		t.Errorf("CTE name 'c' leaked into resolved sources: %+v", lineages[0].Sources)
+	}
+	if !tables["staging.left_tbl"] || !tables["staging.right_tbl"] {
+		t.Errorf("expected resolved sources from both upstream tables, got %+v", lineages[0].Sources)
+	}
+}
+
+// --- Regression: subquery aliases in FROM clauses ---
+//
+// `FROM (SELECT ...) AS sub` was historically dropped by the alias collector,
+// so column references through the alias resolved to nothing.
+
+func TestExtract_SubqueryAliasQualified(t *testing.T) {
+	// `sub.x` must resolve via the subquery's own select list to the underlying
+	// upstream table.
+	sql := `SELECT sub.x FROM (SELECT t.id AS x FROM raw.things t) sub`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 || lineages[0].Column != "x" {
+		t.Fatalf("expected column x, got %+v", lineages)
+	}
+	if len(lineages[0].Sources) == 0 {
+		t.Fatalf("expected at least one source, got 0")
+	}
+	src := lineages[0].Sources[0]
+	if src.Table != "raw.things" || src.Column != "id" {
+		t.Errorf("expected source raw.things.id, got %+v", src)
+	}
+}
+
+func TestExtract_UnqualifiedColFromSoleSubquery(t *testing.T) {
+	// Earlier `collectAliases` left primaryTable empty when the only FROM
+	// source was a subquery, so unqualified column references resolved to
+	// nothing. The fix tracks primarySubquery and resolves through it.
+	sql := `SELECT col FROM (SELECT t.id AS col FROM raw.things t) sub`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 || lineages[0].Column != "col" {
+		t.Fatalf("expected column col, got %+v", lineages)
+	}
+	if len(lineages[0].Sources) == 0 {
+		t.Fatalf("expected at least one source for unqualified col, got 0")
+	}
+	src := lineages[0].Sources[0]
+	if src.Table != "raw.things" || src.Column != "id" {
+		t.Errorf("expected source raw.things.id, got %+v", src)
+	}
+}
+
+// --- Regression: window function aggregate classification ---
+
+func TestExtract_WindowAggregate(t *testing.T) {
+	// `SUM(amount) OVER ()` was previously class:WINDOW with the function
+	// name on the WINDOW node — the extractor only walked FUNCTION nodes
+	// and lost the source link entirely. The output column should now
+	// trace back to the source column with TransformAggregation.
+	sql := `SELECT id, SUM(amount) OVER () AS total FROM staging.orders`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	var totalLineage *ColumnLineage
+	for i := range lineages {
+		if lineages[i].Column == "total" {
+			totalLineage = &lineages[i]
+			break
+		}
+	}
+	if totalLineage == nil {
+		t.Fatalf("expected output column 'total', got %+v", lineages)
+	}
+	if len(totalLineage.Sources) == 0 {
+		t.Fatalf("window aggregate lost source link entirely")
+	}
+	src := totalLineage.Sources[0]
+	if src.Column != "amount" {
+		t.Errorf("expected source column amount, got %s", src.Column)
+	}
+	if src.Transformation != TransformAggregation {
+		t.Errorf("expected AGGREGATION transform for SUM(...) OVER (), got %s", src.Transformation)
+	}
+}
+
+// --- Regression: set-op subquery alias column lineage ---
+//
+// `FROM (SELECT ... UNION ALL SELECT ...) sub` is the combination of the
+// two earlier fixes (set-op nodes + subquery aliases). resolveSubqueryColumn
+// used to walk only sub.Node.SelectList, but a set-op top node has no
+// SelectList — sources live in Left/Right. The fix delegates to
+// resolveSelectNodeCols which handles set-op merging.
+
+func TestExtract_SetOpSubqueryAlias_Qualified(t *testing.T) {
+	sql := `SELECT sub.x FROM (
+	            SELECT name AS x FROM staging.left_tbl
+	            UNION ALL
+	            SELECT name AS x FROM staging.right_tbl
+	        ) sub`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 || lineages[0].Column != "x" {
+		t.Fatalf("expected column x, got %+v", lineages)
+	}
+	tables := make(map[string]bool)
+	for _, s := range lineages[0].Sources {
+		tables[s.Table] = true
+	}
+	if tables["sub"] {
+		t.Errorf("subquery alias 'sub' leaked into resolved sources: %+v", lineages[0].Sources)
+	}
+	if !tables["staging.left_tbl"] || !tables["staging.right_tbl"] {
+		t.Errorf("expected resolved sources from both upstream tables, got %+v", lineages[0].Sources)
+	}
+}
+
+func TestExtract_SetOpSubqueryAlias_Unqualified(t *testing.T) {
+	sql := `SELECT x FROM (
+	            SELECT name AS x FROM staging.left_tbl
+	            UNION ALL
+	            SELECT name AS x FROM staging.right_tbl
+	        ) sub`
+	lineages, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(lineages) != 1 || lineages[0].Column != "x" {
+		t.Fatalf("expected column x, got %+v", lineages)
+	}
+	tables := make(map[string]bool)
+	for _, s := range lineages[0].Sources {
+		tables[s.Table] = true
+	}
+	if !tables["staging.left_tbl"] || !tables["staging.right_tbl"] {
+		t.Errorf("expected resolved sources from both upstream tables, got %+v", lineages[0].Sources)
+	}
+}
+
+// --- Regression: subquery dependency extraction ---
+//
+// Bug 31: `FROM (SELECT ... FROM upstream) AS sub` lost dependencies in the
+// DAG so the runner skipped dependent models when upstream changed.
+
+func TestExtract_SubqueryFromDependencyExtraction(t *testing.T) {
+	sql := `SELECT s.x FROM (SELECT id AS x FROM raw.upstream) s`
+	tables, err := GetAllTables(shared, sql)
+	if err != nil {
+		t.Fatalf("GetAllTables: %v", err)
+	}
+	found := false
+	for _, tbl := range tables {
+		if tbl == "raw.upstream" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected raw.upstream in dependencies, got %v", tables)
+	}
+}

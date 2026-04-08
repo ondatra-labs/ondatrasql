@@ -23,6 +23,26 @@ func quoteTarget(target string) string {
 	return duckdb.QuoteIdentifier(target)
 }
 
+// tableExistsIn checks via information_schema whether a schema.table exists
+// in the given catalog. Returns (exists, error). The caller MUST handle the
+// error explicitly — collapsing it to a bool would just move the silent
+// "any failure means missing" mis-classification one level deeper, which is
+// the bug this helper was originally written to avoid.
+func tableExistsIn(sess *duckdb.Session, catalog, target string) (bool, error) {
+	parts := strings.SplitN(target, ".", 2)
+	if len(parts) != 2 {
+		return false, fmt.Errorf("invalid target %q (expected schema.table)", target)
+	}
+	val, err := sess.QueryValue(fmt.Sprintf(
+		"SELECT COUNT(*) FROM information_schema.tables "+
+			"WHERE table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'",
+		duckdb.EscapeSQL(catalog), duckdb.EscapeSQL(parts[0]), duckdb.EscapeSQL(parts[1])))
+	if err != nil {
+		return false, err
+	}
+	return val != "0" && val != "", nil
+}
+
 // printSandboxResult prints a compact result line for DAG sandbox runs.
 func printSandboxResult(result *execute.Result, target string, err error) {
 	if result == nil {
@@ -70,41 +90,48 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 		}
 
 		// Check if table exists in sandbox via information_schema (avoids
-		// error-type guessing from SELECT COUNT(*) failures).
-		parts := strings.SplitN(m.Target, ".", 2)
-		if len(parts) != 2 {
-			unchanged++
-			continue
-		}
-		existsVal, existsErr := sess.QueryValue(fmt.Sprintf(
-			"SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = 'sandbox' AND table_schema = '%s' AND table_name = '%s'",
-			duckdb.EscapeSQL(parts[0]), duckdb.EscapeSQL(parts[1])))
+		// error-type guessing from SELECT COUNT(*) failures). A real
+		// metadata-query failure is surfaced as a warning rather than
+		// silently classified as "missing".
+		existsInSandbox, existsErr := tableExistsIn(sess, sess.CatalogAlias(), m.Target)
 		if existsErr != nil {
-			// Metadata query itself failed — warn instead of silently skipping.
-			printPaddedLine(fmt.Sprintf("  [WARN] %s: cannot check sandbox table: %s", m.Target, truncate(existsErr.Error(), 40)))
+			printPaddedLine(fmt.Sprintf("  [WARN] %s: sandbox metadata error: %s", m.Target, truncate(existsErr.Error(), 40)))
 			warnings++
 			continue
 		}
-		if existsVal == "0" {
+		if !existsInSandbox {
 			// Table doesn't exist in sandbox — model was skipped (no changes),
 			// prod table is visible via search_path. Count as unchanged.
 			unchanged++
 			continue
 		}
 
-		sandboxCount, sandboxErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM sandbox.%s", quoteTarget(m.Target)))
+		sandboxCount, sandboxErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.CatalogAlias(), quoteTarget(m.Target)))
 		if sandboxErr != nil {
 			printPaddedLine(fmt.Sprintf("  [WARN] %s: sandbox query error: %s", m.Target, truncate(sandboxErr.Error(), 40)))
 			warnings++
 			continue
 		}
 
-		// Check if table exists in prod
-		prodCount, prodErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(m.Target)))
-		if prodErr != nil {
+		// Check if table exists in prod via information_schema, not via
+		// catching errors from COUNT(*). Real metadata-query failures are
+		// warnings, not silent "new table" reclassification.
+		existsInProd, prodExistsErr := tableExistsIn(sess, sess.ProdAlias(), m.Target)
+		if prodExistsErr != nil {
+			printPaddedLine(fmt.Sprintf("  [WARN] %s: prod metadata error: %s", m.Target, truncate(prodExistsErr.Error(), 40)))
+			warnings++
+			continue
+		}
+		if !existsInProd {
 			// New table (doesn't exist in prod, but exists in sandbox)
 			changed++
 			changedModels = append(changedModels, m.Target)
+			continue
+		}
+		prodCount, prodErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(m.Target)))
+		if prodErr != nil {
+			printPaddedLine(fmt.Sprintf("  [WARN] %s: prod query error: %s", m.Target, truncate(prodErr.Error(), 40)))
+			warnings++
 			continue
 		}
 
@@ -122,7 +149,7 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 			if m.Kind == "scd2" {
 				diffTemplate = "queries/sandbox_diff_count_scd2.sql"
 			}
-			addedSQL := sql.MustFormat(diffTemplate, "sandbox", sess.ProdAlias(), m.Target)
+			addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), m.Target)
 			added, _ := sess.QueryValue(addedSQL)
 			var addedCount int64
 			fmt.Sscanf(added, "%d", &addedCount)
@@ -179,21 +206,30 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 	printPaddedLine(target)
 
-	// Check if new table
-	prodCount, prodErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(target)))
-	if prodErr != nil {
+	// Check if new table — via information_schema, not by catching COUNT
+	// errors. Surface a metadata-query failure as a warning, not as a
+	// silent "new table" reclassification.
+	existsInProd, existsErr := tableExistsIn(sess, sess.ProdAlias(), target)
+	if existsErr != nil {
+		printPaddedLine(fmt.Sprintf("  [WARN] prod metadata error: %s", truncate(existsErr.Error(), 50)))
+		printEmptyLine()
+		return
+	}
+	if !existsInProd {
 		printPaddedLine("  (new table)")
-		// Show column count for new tables
-		parts := strings.Split(target, ".")
-		tableName := target
-		if len(parts) == 2 {
+		// Show column count for new tables. Schema must be in the WHERE
+		// clause to avoid mixing columns from same-named tables across
+		// schemas (e.g. raw.orders vs staging.orders).
+		schemaName, tableName := "", target
+		if parts := strings.SplitN(target, ".", 2); len(parts) == 2 {
+			schemaName = parts[0]
 			tableName = parts[1]
 		}
-		sandboxCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM sandbox.%s", quoteTarget(target)))
+		sandboxCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.CatalogAlias(), quoteTarget(target)))
 		colCount, err := sess.QueryValue(fmt.Sprintf(`
 			SELECT COUNT(*) FROM information_schema.columns
-			WHERE table_catalog = 'sandbox' AND table_name = '%s'
-		`, duckdb.EscapeSQL(tableName)))
+			WHERE table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'
+		`, duckdb.EscapeSQL(sess.CatalogAlias()), duckdb.EscapeSQL(schemaName), duckdb.EscapeSQL(tableName)))
 		if err == nil && sandboxCount != "" {
 			printPaddedLine(fmt.Sprintf("  Rows: %s, Columns: %s", sandboxCount, colCount))
 		}
@@ -201,54 +237,49 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 		return
 	}
 
-	sandboxCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM sandbox.%s", quoteTarget(target)))
+	prodCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(target)))
+	sandboxCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.CatalogAlias(), quoteTarget(target)))
 
 	var prod, sandbox int64
 	fmt.Sscanf(prodCount, "%d", &prod)
 	fmt.Sscanf(sandboxCount, "%d", &sandbox)
 
-	// Check and show schema changes FIRST (schema evolution)
-	parts := strings.Split(target, ".")
-	tableName := target
-	if len(parts) == 2 {
-		tableName = parts[1]
-	}
-
-	schemaSQL := sql.MustFormat("queries/sandbox_schema_diff.sql", "sandbox", sess.ProdAlias(), tableName)
-	result, err := sess.Query(schemaSQL)
-	if err == nil && result != "" {
-		lines := strings.Split(strings.TrimSpace(result), "\n")
-		if len(lines) > 1 {
-			var added, removed, changed []string
-			for _, line := range lines[1:] {
-				cols := strings.Split(line, "\t")
-				if len(cols) < 4 {
-					continue
-				}
-				colName := strings.TrimSpace(cols[0])
-				prodType := strings.TrimSpace(cols[1])
-				sandboxType := strings.TrimSpace(cols[2])
-				changeType := strings.TrimSpace(cols[3])
-				switch changeType {
-				case "added":
-					added = append(added, fmt.Sprintf("%s (%s)", colName, sandboxType))
-				case "removed":
-					removed = append(removed, fmt.Sprintf("%s (%s)", colName, prodType))
-				case "type_changed":
-					changed = append(changed, fmt.Sprintf("%s: %s→%s", colName, prodType, sandboxType))
-				}
+	// Check and show schema changes FIRST (schema evolution).
+	// Pass the full schema.table target so the SQL filters by both
+	// catalog AND schema, avoiding cross-schema name collisions.
+	schemaSQL := sql.MustFormat("queries/sandbox_schema_diff.sql", sess.CatalogAlias(), sess.ProdAlias(), target)
+	// Use QueryRowsMap so the rows are properly parsed — the previous
+	// code split sess.Query's CSV output on '\t' and silently dropped
+	// every row, hiding all schema-evolution rendering in DAG summary.
+	if rows, err := sess.QueryRowsMap(schemaSQL); err == nil && len(rows) > 0 {
+		var added, removed, changed []string
+		for _, row := range rows {
+			colName := row["column_name"]
+			prodType := row["prod_type"]
+			sandboxType := row["sandbox_type"]
+			changeType := row["change_type"]
+			if colName == "" {
+				continue
 			}
-			if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
-				printPaddedLine("  SCHEMA EVOLUTION:")
-				if len(added) > 0 {
-					printPaddedLine(fmt.Sprintf("    + Added: %s", strings.Join(added, ", ")))
-				}
-				if len(removed) > 0 {
-					printPaddedLine(fmt.Sprintf("    - Removed: %s", strings.Join(removed, ", ")))
-				}
-				if len(changed) > 0 {
-					printPaddedLine(fmt.Sprintf("    ~ Changed: %s", strings.Join(changed, ", ")))
-				}
+			switch changeType {
+			case "added":
+				added = append(added, fmt.Sprintf("%s (%s)", colName, sandboxType))
+			case "removed":
+				removed = append(removed, fmt.Sprintf("%s (%s)", colName, prodType))
+			case "type_changed":
+				changed = append(changed, fmt.Sprintf("%s: %s→%s", colName, prodType, sandboxType))
+			}
+		}
+		if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+			printPaddedLine("  SCHEMA EVOLUTION:")
+			if len(added) > 0 {
+				printPaddedLine(fmt.Sprintf("    + Added: %s", strings.Join(added, ", ")))
+			}
+			if len(removed) > 0 {
+				printPaddedLine(fmt.Sprintf("    - Removed: %s", strings.Join(removed, ", ")))
+			}
+			if len(changed) > 0 {
+				printPaddedLine(fmt.Sprintf("    ~ Changed: %s", strings.Join(changed, ", ")))
 			}
 		}
 	}
@@ -276,8 +307,8 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 		diffTemplate = "queries/sandbox_diff_count_scd2.sql"
 		sampleTemplate = "queries/sandbox_sample_scd2.sql"
 	}
-	addedSQL := sql.MustFormat(diffTemplate, "sandbox", sess.ProdAlias(), target)
-	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), "sandbox", target)
+	addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), target)
+	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
 	added, _ := sess.QueryValue(addedSQL)
 	removed, _ := sess.QueryValue(removedSQL)
 	var addedCount, removedCount int64
@@ -294,7 +325,7 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 
 		// Show sample of changes (max 2 each)
 		if addedCount > 0 {
-			sampleSQL := sql.MustFormat(sampleTemplate, "sandbox", sess.ProdAlias(), target, "2")
+			sampleSQL := sql.MustFormat(sampleTemplate, sess.CatalogAlias(), sess.ProdAlias(), target, "2")
 			sampleResult, err := sess.Query(sampleSQL)
 			if err == nil && sampleResult != "" {
 				lines := strings.Split(sampleResult, "\n")
@@ -309,7 +340,7 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 			}
 		}
 		if removedCount > 0 {
-			sampleSQL := sql.MustFormat(sampleTemplate, sess.ProdAlias(), "sandbox", target, "2")
+			sampleSQL := sql.MustFormat(sampleTemplate, sess.ProdAlias(), sess.CatalogAlias(), target, "2")
 			sampleResult, err := sess.Query(sampleSQL)
 			if err == nil && sampleResult != "" {
 				lines := strings.Split(sampleResult, "\n")
@@ -335,21 +366,28 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 	printSectionBorder("Diff vs Prod")
 	printEmptyLine()
 
-	// Check if table exists in prod
-	prodCount, prodErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(target)))
-	if prodErr != nil {
-		// Table is new, doesn't exist in prod
+	// Check via information_schema, not by catching COUNT errors —
+	// otherwise any prod query failure gets misclassified as "new table".
+	// A real metadata-query failure surfaces as a warning instead.
+	existsInProd, existsErr := tableExistsIn(sess, sess.ProdAlias(), target)
+	if existsErr != nil {
+		printPaddedLine(fmt.Sprintf("[WARN] prod metadata error: %s", truncate(existsErr.Error(), 50)))
+		printEmptyLine()
+		return
+	}
+	if !existsInProd {
 		printPaddedLine("(new table)")
 		showNewTableSchema(sess, target)
 		printEmptyLine()
 		return
 	}
+	prodCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(target)))
 
 	// Show schema changes first
 	showSchemaDiff(sess, target)
 
 	// Get sandbox count
-	sandboxCount, sandboxErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM sandbox.%s", quoteTarget(target)))
+	sandboxCount, sandboxErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.CatalogAlias(), quoteTarget(target)))
 	if sandboxErr != nil {
 		printEmptyLine()
 		return
@@ -383,8 +421,8 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 		diffTemplate = "queries/sandbox_diff_count_scd2.sql"
 	}
 
-	addedSQL := sql.MustFormat(diffTemplate, "sandbox", sess.ProdAlias(), target)
-	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), "sandbox", target)
+	addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), target)
+	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
 
 	added, _ := sess.QueryValue(addedSQL)
 	removed, _ := sess.QueryValue(removedSQL)
@@ -415,15 +453,18 @@ func showSampleDiff(sess *duckdb.Session, target, kind string, addedCount, remov
 		sampleTemplate = "queries/sandbox_sample_scd2.sql"
 	}
 
-	// Show added rows (in sandbox but not in prod)
+	// Show added rows (in sandbox but not in prod). The Query result
+	// is CSV-shaped with the column header on the first line — slice
+	// from index 1 to skip it, otherwise the header gets rendered as
+	// a "+ doubled,msg" sample row, which is wrong and confusing.
 	if addedCount > 0 {
-		addedSQL := sql.MustFormat(sampleTemplate, "sandbox", sess.ProdAlias(), target, "2")
+		addedSQL := sql.MustFormat(sampleTemplate, sess.CatalogAlias(), sess.ProdAlias(), target, "2")
 		result, err := sess.Query(addedSQL)
 		if err == nil && result != "" {
 			lines := strings.Split(result, "\n")
 			if len(lines) > 1 {
 				printPaddedLine("Sample added:")
-				for _, line := range lines[:min(3, len(lines))] {
+				for _, line := range lines[1:min(3, len(lines))] {
 					if line != "" {
 						printPaddedLine("  + " + truncate(line, 54))
 					}
@@ -432,15 +473,15 @@ func showSampleDiff(sess *duckdb.Session, target, kind string, addedCount, remov
 		}
 	}
 
-	// Show removed rows (in prod but not in sandbox)
+	// Show removed rows (in prod but not in sandbox) — same header skip.
 	if removedCount > 0 {
-		removedSQL := sql.MustFormat(sampleTemplate, sess.ProdAlias(), "sandbox", target, "2")
+		removedSQL := sql.MustFormat(sampleTemplate, sess.ProdAlias(), sess.CatalogAlias(), target, "2")
 		result, err := sess.Query(removedSQL)
 		if err == nil && result != "" {
 			lines := strings.Split(result, "\n")
 			if len(lines) > 1 {
 				printPaddedLine("Sample removed:")
-				for _, line := range lines[:min(3, len(lines))] {
+				for _, line := range lines[1:min(3, len(lines))] {
 					if line != "" {
 						printPaddedLine("  - " + truncate(line, 54))
 					}
@@ -466,36 +507,29 @@ func min(a, b int) int {
 
 // showSchemaDiff shows schema changes between sandbox and prod.
 func showSchemaDiff(sess *duckdb.Session, target string) {
-	// Parse schema.table format
-	parts := strings.Split(target, ".")
-	tableName := target
-	if len(parts) == 2 {
-		tableName = parts[1]
-	}
-
-	schemaSQL := sql.MustFormat("queries/sandbox_schema_diff.sql", "sandbox", sess.ProdAlias(), tableName)
-	result, err := sess.Query(schemaSQL)
-	if err != nil || result == "" {
+	// Pass the full schema.table target — the SQL filters by both
+	// catalog AND schema to avoid cross-schema name collisions.
+	schemaSQL := sql.MustFormat("queries/sandbox_schema_diff.sql", sess.CatalogAlias(), sess.ProdAlias(), target)
+	// Use QueryRowsMap so the rows are properly parsed — the previous code
+	// split sess.Query's CSV output on '\t' (which CSV doesn't use), so
+	// every row got dropped silently and schema evolution rendering was
+	// effectively dead code.
+	rows, err := sess.QueryRowsMap(schemaSQL)
+	if err != nil || len(rows) == 0 {
 		return
-	}
-
-	lines := strings.Split(strings.TrimSpace(result), "\n")
-	if len(lines) <= 1 {
-		return // No header or no changes
 	}
 
 	hasChanges := false
 	var added, removed, changed []string
 
-	for _, line := range lines[1:] { // Skip header
-		cols := strings.Split(line, "\t")
-		if len(cols) < 4 {
+	for _, row := range rows {
+		colName := row["column_name"]
+		prodType := row["prod_type"]
+		sandboxType := row["sandbox_type"]
+		changeType := row["change_type"]
+		if colName == "" {
 			continue
 		}
-		colName := strings.TrimSpace(cols[0])
-		prodType := strings.TrimSpace(cols[1])
-		sandboxType := strings.TrimSpace(cols[2])
-		changeType := strings.TrimSpace(cols[3])
 
 		switch changeType {
 		case "added":
@@ -529,37 +563,36 @@ func showSchemaDiff(sess *duckdb.Session, target string) {
 
 // showNewTableSchema shows the schema of a new table in sandbox.
 func showNewTableSchema(sess *duckdb.Session, target string) {
-	// Parse schema.table format
-	parts := strings.Split(target, ".")
-	tableName := target
-	if len(parts) == 2 {
+	// Parse schema.table format. Schema is REQUIRED in the WHERE clause —
+	// otherwise raw.orders and staging.orders would mix columns into one
+	// listing because they share the same table_name in the same catalog.
+	schemaName, tableName := "", target
+	if parts := strings.SplitN(target, ".", 2); len(parts) == 2 {
+		schemaName = parts[0]
 		tableName = parts[1]
 	}
 
-	// Get columns from sandbox
+	// Get columns from sandbox (filtered by schema to disambiguate
+	// same-named tables across schemas). Uses QueryRowsMap so we get
+	// properly-parsed rows — sess.Query produces CSV but the previous
+	// code split the result on '\t' and silently dropped every row.
 	colSQL := fmt.Sprintf(`
 		SELECT column_name, data_type
 		FROM information_schema.columns
-		WHERE table_catalog = 'sandbox' AND table_name = '%s'
+		WHERE table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'
 		ORDER BY ordinal_position
-	`, duckdb.EscapeSQL(tableName))
+	`, duckdb.EscapeSQL(sess.CatalogAlias()), duckdb.EscapeSQL(schemaName), duckdb.EscapeSQL(tableName))
 
-	result, err := sess.Query(colSQL)
-	if err != nil || result == "" {
-		return
-	}
-
-	lines := strings.Split(strings.TrimSpace(result), "\n")
-	if len(lines) <= 1 {
+	rows, err := sess.QueryRowsMap(colSQL)
+	if err != nil || len(rows) == 0 {
 		return
 	}
 
 	printPaddedLine("Columns:")
-	for _, line := range lines[1:] { // Skip header
-		cols := strings.Split(line, "\t")
-		if len(cols) >= 2 {
-			colName := strings.TrimSpace(cols[0])
-			colType := strings.TrimSpace(cols[1])
+	for _, row := range rows {
+		colName := row["column_name"]
+		colType := row["data_type"]
+		if colName != "" {
 			printPaddedLine(fmt.Sprintf("  • %s (%s)", colName, colType))
 		}
 	}

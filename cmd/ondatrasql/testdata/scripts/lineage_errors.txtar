@@ -1,0 +1,36 @@
+# Bug 3: `lineage <nonexistent>` used to say "no commit info found for X",
+# implying the model existed but hadn't been committed. The fix validates
+# the model exists in models/ first via findModel and produces the canonical
+# "model not found: X" error matching `run`/`describe`.
+#
+# Bug 25: `lineage <model.column>` on a non-existent column rendered an
+# empty box instead of an error. The fix validates the column exists in
+# the model's output schema and lists available columns in the error.
+
+exec ondatrasql init
+mkdir models/staging
+cp m.sql models/staging/orders.sql
+exec ondatrasql run staging.orders
+
+# --- Bug 3: nonexistent model ---
+! exec ondatrasql lineage staging.does_not_exist
+stderr 'model not found: staging.does_not_exist'
+# Must NOT use the misleading old wording.
+! stderr 'no commit info found'
+
+# --- Bug 25: nonexistent column ---
+! exec ondatrasql lineage staging.orders.no_such_column
+stderr 'column "no_such_column" not found in staging.orders'
+stderr 'available:'
+# Must NOT silently render an empty box.
+
+# --- Sanity: lineage on a real model + real column still works ---
+exec ondatrasql lineage staging.orders
+stdout 'staging.orders'
+
+exec ondatrasql lineage staging.orders.id
+stdout 'staging.orders'
+
+-- m.sql --
+-- @kind: table
+SELECT 1 AS id, 'hello' AS name

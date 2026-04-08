@@ -196,16 +196,14 @@ func TestRun_MergeKind_RequiresUniqueKey(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 
-	// First run creates the table (backfill doesn't need unique_key)
+	// Bug 16: missing @unique_key fails IMMEDIATELY on first run instead
+	// of cryptically on the second.
 	p.AddModel("staging/no_uk.sql", `-- @kind: merge
 SELECT 1 AS id, 'x' AS name
 `)
-	runModel(t, p, "staging/no_uk.sql")
-
-	// Second run tries incremental merge without unique_key → error
 	_, err := runModelErr(t, p, "staging/no_uk.sql")
 	if err == nil {
-		t.Fatal("expected error for merge without unique_key")
+		t.Fatal("expected error for merge without unique_key on first run")
 	}
 }
 
@@ -3153,216 +3151,172 @@ SELECT 1 AS id
 	}
 }
 
+// Bug 17: @incremental referencing a non-existent column must be rejected
+// at materialize time with a clear error pointing at the available columns,
+// not silently emit a CDC SQL that DuckDB later rejects with a binder error.
+func TestRun_IncrementalKeyNotInColumns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+	p.AddModel("staging/bad_inc.sql", `-- @kind: merge
+-- @unique_key: id
+-- @incremental: nonexistent_ts
+SELECT 1::INTEGER AS id, 'hello' AS name
+`)
+	_, err := runModelErr(t, p, "staging/bad_inc.sql")
+	if err == nil {
+		t.Fatal("expected error for non-existent @incremental column on first run")
+	}
+	if !strings.Contains(err.Error(), "nonexistent_ts") {
+		t.Errorf("error should name the offending column, got: %v", err)
+	}
+}
+
 func TestRun_MergeKeyNotInColumns(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// unique_key references a column that doesn't exist
+	// Bug 16: @unique_key referencing a non-existent column must be
+	// rejected on the first run with a clear error pointing at the
+	// available columns, not silently succeed and explode on the second.
 	p := testutil.NewProject(t)
 	p.AddModel("staging/bad_uk.sql", `-- @kind: merge
 -- @unique_key: nonexistent_key
 SELECT 1 AS id, 'hello' AS name
 `)
-	r1 := runModel(t, p, "staging/bad_uk.sql") // backfill works (no MERGE needed)
-	if r1.RowsAffected != 1 {
-		t.Errorf("backfill rows = %d, want 1", r1.RowsAffected)
-	}
-
-	// Second run tries incremental MERGE with invalid key → error
 	_, err := runModelErr(t, p, "staging/bad_uk.sql")
 	if err == nil {
-		t.Fatal("expected error for merge with non-existent unique_key column")
+		t.Fatal("expected error for non-existent @unique_key column on first run")
+	}
+	if !strings.Contains(err.Error(), "nonexistent_key") {
+		t.Errorf("error should name the offending column, got: %v", err)
 	}
 }
 
 // =============================================================================
-// Prio 1: NULL in unique_key — MERGE with NULL keys creates duplicates
+// Bug 22: NULL @unique_key values must be rejected (used to silently duplicate)
 // =============================================================================
 
-func TestRun_Merge_NullUniqueKey_CreatesDuplicates(t *testing.T) {
+func TestRun_Merge_NullUniqueKey_Rejected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// SQL standard: NULL = NULL → NULL (not TRUE), so MERGE ON (target.id = source.id)
-	// never matches when id IS NULL → NULL rows always treated as NOT MATCHED → duplicates.
+	// Pre-Bug-22 behavior: MERGE silently created duplicate rows because
+	// NULL = NULL is NULL (not TRUE), so the merge ON clause never matched.
+	// Post-fix: every merge run validates that unique_key columns contain
+	// no NULLs and refuses to materialize otherwise.
 	p := testutil.NewProject(t)
 
-	sqlCode := `-- @kind: merge
+	p.AddModel("staging/null_merge.sql", `-- @kind: merge
 -- @unique_key: id
-SELECT NULL AS id, 'ghost' AS name
-`
-	p.AddModel("staging/null_merge.sql", sqlCode)
+SELECT NULL::INTEGER AS id, 'ghost' AS name
+`)
 
-	// Run 1: backfill → 1 row
-	r1 := runModel(t, p, "staging/null_merge.sql")
-	if r1.RowsAffected != 1 {
-		t.Errorf("run1 rows = %d, want 1", r1.RowsAffected)
+	_, err := runModelErr(t, p, "staging/null_merge.sql")
+	if err == nil {
+		t.Fatal("expected error for NULL in @unique_key column")
 	}
-
-	// Run 2: incremental merge → NULL key won't match existing NULL row → INSERT
-	r2 := runModel(t, p, "staging/null_merge.sql")
-	if r2.RunType != "incremental" {
-		t.Errorf("run2 type = %q, want incremental", r2.RunType)
-	}
-
-	// Should have 2 rows now (duplicate due to NULL key)
-	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.null_merge")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if count != "2" {
-		t.Errorf("count = %s, want 2 (NULL keys create duplicates in MERGE)", count)
+	if !strings.Contains(err.Error(), "NULL") {
+		t.Errorf("error should mention NULL, got: %v", err)
 	}
 }
 
-func TestRun_Merge_MixedNullAndNonNullKeys(t *testing.T) {
+func TestRun_Merge_MixedNullAndNonNullKeys_Rejected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// Verifies that non-NULL keys still merge correctly while NULL keys duplicate.
+	// Even ONE NULL in the unique_key column should fail the run —
+	// otherwise that NULL row creates a silent duplicate after a few runs.
 	p := testutil.NewProject(t)
 
-	sqlCode := `-- @kind: merge
+	p.AddModel("staging/mixed_null.sql", `-- @kind: merge
 -- @unique_key: id
-SELECT 1 AS id, 'Alice' AS name
+SELECT 1::INTEGER AS id, 'Alice' AS name
 UNION ALL SELECT NULL, 'Ghost'
-`
-	p.AddModel("staging/mixed_null.sql", sqlCode)
+`)
 
-	// Run 1: backfill → 2 rows
-	runModel(t, p, "staging/mixed_null.sql")
-
-	// Run 2: incremental → id=1 matches (upsert), NULL doesn't match (insert)
-	r2 := runModel(t, p, "staging/mixed_null.sql")
-	if r2.RunType != "incremental" {
-		t.Errorf("run2 type = %q, want incremental", r2.RunType)
+	_, err := runModelErr(t, p, "staging/mixed_null.sql")
+	if err == nil {
+		t.Fatal("expected error for mixed NULL/non-NULL in @unique_key")
 	}
-
-	// id=1: 1 row (merged), NULL: 2 rows (original + new) = 3 total
-	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.mixed_null")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if count != "3" {
-		t.Errorf("count = %s, want 3 (1 merged + 2 NULL duplicates)", count)
-	}
-
-	// Verify the non-NULL key has exactly 1 row
-	nonNull, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.mixed_null WHERE id = 1")
-	if nonNull != "1" {
-		t.Errorf("non-null id rows = %s, want 1", nonNull)
-	}
-
-	// Verify NULL keys have 2 rows (duplicate due to NULL = NULL is not TRUE in MERGE)
-	nullRows, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.mixed_null WHERE id IS NULL")
-	if nullRows != "2" {
-		t.Errorf("null id rows = %s, want 2 (NULL = NULL is not TRUE in MERGE)", nullRows)
+	if !strings.Contains(err.Error(), "NULL") {
+		t.Errorf("error should mention NULL, got: %v", err)
 	}
 }
 
 // =============================================================================
-// Prio 1: NULL in unique_key — partition DELETE with NULL won't match
+// Bug 22: NULL partition key must be rejected (used to leak partition rows)
 // =============================================================================
 
-func TestRun_Partition_NullPartitionKey(t *testing.T) {
+func TestRun_Partition_NullPartitionKey_Rejected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// DELETE FROM target WHERE (region) IN (SELECT DISTINCT region FROM temp)
-	// NULL IN (...) → NULL (not TRUE), so NULL-partition rows won't be deleted.
-	// First run creates the data. Second run should handle NULL partitions.
+	// Pre-Bug-22: DELETE WHERE region IN (...) didn't match NULL because
+	// NULL IN (...) is NULL (not TRUE), so NULL-partition rows accumulated
+	// silently across runs. Post-fix: NULL @unique_key rejected upfront.
 	p := testutil.NewProject(t)
 
-	sqlCode := `-- @kind: partition
+	p.AddModel("staging/null_part.sql", `-- @kind: partition
 -- @unique_key: region
-SELECT 1 AS id, NULL AS region, 100 AS amount
+SELECT 1::INTEGER AS id, NULL::VARCHAR AS region, 100 AS amount
 UNION ALL SELECT 2, 'US', 200
-`
-	p.AddModel("staging/null_part.sql", sqlCode)
+`)
 
-	// Run 1: backfill → 2 rows
-	r1 := runModel(t, p, "staging/null_part.sql")
-	if r1.RowsAffected != 2 {
-		t.Errorf("run1 rows = %d, want 2", r1.RowsAffected)
+	_, err := runModelErr(t, p, "staging/null_part.sql")
+	if err == nil {
+		t.Fatal("expected error for NULL in @unique_key (partition)")
 	}
-
-	// Run 2: incremental → DELETE WHERE region IN (NULL, 'US')
-	// NULL IN (...) is NULL → NULL-partition rows NOT deleted → duplicated
-	// US partition rows ARE deleted and re-inserted
-	r2 := runModel(t, p, "staging/null_part.sql")
-	if r2.RunType != "incremental" {
-		t.Errorf("run2 type = %q, want incremental", r2.RunType)
-	}
-
-	// US rows: 1 (deleted + re-inserted), NULL rows: 2 (not deleted + inserted again)
-	usRows, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.null_part WHERE region = 'US'")
-	if usRows != "1" {
-		t.Errorf("US rows = %s, want 1 (partition replaced correctly)", usRows)
-	}
-
-	nullRows, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.null_part WHERE region IS NULL")
-	if nullRows != "2" {
-		t.Errorf("null region rows = %s, want 2 (NULL partition not matched by IN clause)", nullRows)
+	if !strings.Contains(err.Error(), "NULL") {
+		t.Errorf("error should mention NULL, got: %v", err)
 	}
 }
 
-func TestRun_Partition_OnlyNullPartition(t *testing.T) {
+func TestRun_Partition_OnlyNullPartition_Rejected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// Edge case: all rows have NULL partition key
 	p := testutil.NewProject(t)
 
-	sqlCode := `-- @kind: partition
+	p.AddModel("staging/all_null_part.sql", `-- @kind: partition
 -- @unique_key: region
-SELECT 1 AS id, NULL AS region
-`
-	p.AddModel("staging/all_null_part.sql", sqlCode)
+SELECT 1::INTEGER AS id, NULL::VARCHAR AS region
+`)
 
-	// Run 1: backfill
-	runModel(t, p, "staging/all_null_part.sql")
-
-	// Run 2: incremental → no rows deleted (NULL doesn't match)
-	r2 := runModel(t, p, "staging/all_null_part.sql")
-	if r2.RunType != "incremental" {
-		t.Errorf("run2 type = %q, want incremental", r2.RunType)
+	_, err := runModelErr(t, p, "staging/all_null_part.sql")
+	if err == nil {
+		t.Fatal("expected error for all-NULL @unique_key (partition)")
 	}
-
-	// 2 rows: original not deleted + new inserted
-	count, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.all_null_part")
-	if count != "2" {
-		t.Errorf("count = %s, want 2 (NULL partition accumulates)", count)
+	if !strings.Contains(err.Error(), "NULL") {
+		t.Errorf("error should mention NULL, got: %v", err)
 	}
 }
 
 // =============================================================================
-// Prio 1: SCD2 with NULL unique_key
+// Bug 22: SCD2 with NULL @unique_key must be rejected
 // =============================================================================
 
-func TestRun_SCD2_NullUniqueKey(t *testing.T) {
+func TestRun_SCD2_NullUniqueKey_Rejected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// SCD2 uses IS DISTINCT FROM for change detection, but EXCEPT for new/deleted detection.
-	// NULL unique_key is handled differently than MERGE.
+	// SCD2 uses unique_key as the row identity for change detection.
+	// NULL keys break IS DISTINCT FROM-based comparisons in subtle ways
+	// — Bug 22's fix rejects them upfront for all kinds (merge, scd2,
+	// partition, tracked).
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/scd2_null.sql", `-- @kind: scd2
 -- @unique_key: id
-SELECT NULL AS id, 'ghost' AS name
+SELECT NULL::INTEGER AS id, 'ghost' AS name
 `)
-	r1 := runModel(t, p, "staging/scd2_null.sql")
-	if r1.RowsAffected != 1 {
-		t.Errorf("run1 rows = %d, want 1", r1.RowsAffected)
+	_, err := runModelErr(t, p, "staging/scd2_null.sql")
+	if err == nil {
+		t.Fatal("expected error for NULL in @unique_key (scd2)")
 	}
-
-	// Verify SCD2 columns
-	val, err := p.Sess.QueryValue("SELECT is_current FROM staging.scd2_null WHERE id IS NULL")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if val != "true" {
-		t.Errorf("is_current = %s, want true", val)
+	if !strings.Contains(err.Error(), "NULL") {
+		t.Errorf("error should mention NULL, got: %v", err)
 	}
 }
 

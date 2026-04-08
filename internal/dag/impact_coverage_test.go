@@ -107,11 +107,20 @@ SELECT a.id, b.val FROM staging.a AS a JOIN staging.b AS b ON a.id = 1`)
 		t.Errorf("expected mart.c in tree, got %v", tree)
 	}
 
-	// The visited map prevents infinite recursion but mart.c may appear
-	// multiple times in result since append happens before traverse dedup.
-	// The important thing is that all downstream models are present.
-	if len(tree) < 3 {
-		t.Errorf("expected at least 3 entries in tree, got %d: %v", len(tree), tree)
+	// Each downstream model must appear exactly once. mart.c is reached
+	// through both staging.a and staging.b in this diamond, but the dedup
+	// in GetFullImpactTree should prevent the duplicate append.
+	if len(tree) != 3 {
+		t.Errorf("expected exactly 3 entries (staging.a, staging.b, mart.c), got %d: %v", len(tree), tree)
+	}
+	martCCount := 0
+	for _, m := range tree {
+		if m == "mart.c" {
+			martCCount++
+		}
+	}
+	if martCCount != 1 {
+		t.Errorf("mart.c should appear exactly once (diamond dedup), got %d in %v", martCCount, tree)
 	}
 }
 
@@ -171,5 +180,49 @@ SELECT region, SUM(amount) AS total FROM raw.src GROUP BY region`)
 	}
 	if len(impact.AffectedColumns) == 0 && impact.Reason == "" {
 		t.Error("expected either affected columns or a reason")
+	}
+}
+
+// TestAnalyzeTransitiveImpact_CaseInsensitive verifies that the entire
+// case-insensitive lookup story works end-to-end. This used to be broken
+// at three layers and any case variant would silently lose impact:
+//
+//   - The `ondatra_get_downstream` macro used `LIKE`, case-sensitive
+//   - The `ondatra_get_commit_info` macro used `=`, case-sensitive
+//   - `AnalyzeTransitiveImpact` itself compared the downstream list
+//     against `transitiveModel` using `==`, also case-sensitive
+//
+// Now the macros use `LOWER()`/`ILIKE` and the Go function uses
+// `strings.EqualFold`, so any combination of cases must resolve.
+func TestAnalyzeTransitiveImpact_CaseInsensitive(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT 1 AS id, 100 AS amount`)
+	runModel(t, p, "raw/src.sql")
+
+	p.AddModel("staging/agg.sql", `-- @kind: table
+SELECT id, amount FROM raw.src`)
+	runModel(t, p, "staging/agg.sql")
+
+	cases := []struct {
+		changed     string
+		transitive  string
+		description string
+	}{
+		{"raw.src", "staging.agg", "both lowercase (canonical)"},
+		{"RAW.SRC", "staging.agg", "uppercase changed model"},
+		{"raw.src", "STAGING.AGG", "uppercase transitive model"},
+		{"Raw.Src", "Staging.Agg", "mixed case both"},
+	}
+	for _, tc := range cases {
+		impact, err := dag.AnalyzeTransitiveImpact(p.Sess, tc.changed, tc.transitive)
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.description, err)
+			continue
+		}
+		if impact == nil {
+			t.Errorf("%s: expected non-nil impact (case mismatch lost it)", tc.description)
+		}
 	}
 }

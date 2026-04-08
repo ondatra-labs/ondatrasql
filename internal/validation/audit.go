@@ -7,28 +7,58 @@ package validation
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
+
+// percentileFractionRe matches the fraction in `percentile(col, N)` so we
+// can validate it before pattern dispatch — DuckDB's PERCENTILE_CONT only
+// accepts 0–1, but the percentage convention is intuitive enough that
+// users will write `95` and hit a cryptic Binder Error otherwise. (Bug 32)
+var percentileFractionRe = regexp.MustCompile(`(?i)^percentile\(\s*\w+\s*,\s*([0-9.]+)\s*\)`)
 
 // AuditToSQL converts an audit directive to a validation SQL query.
 // The returned query should return 0 rows if the audit passes.
 // On failure, returns a descriptive error message using DuckDB's printf().
-// The table parameter is the target table name.
-// For audits that compare with history, prevSnapshot is the previous snapshot ID.
-func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
+//
+// `table` is the target table reference for current-data clauses (e.g.
+// `raw.zzz_snap`). `historicalTable` is the reference used inside time-travel
+// `AT (VERSION => N)` clauses. In normal (prod) runs the two are identical.
+// In sandbox mode the caller passes a catalog-prefixed name like
+// `lake.raw.zzz_snap` so historical audits can read prod's snapshot history
+// while the current-data side still reads the sandbox materialization.
+// `prevSnapshot` is the previous snapshot ID for historical comparisons.
+func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (string, error) {
 	directive = strings.TrimSpace(directive)
 	if directive == "" {
 		return "", fmt.Errorf("empty audit")
 	}
+	if historicalTable == "" {
+		historicalTable = table
+	}
+
+	// Bug 32: catch percentile fractions outside [0,1] before pattern
+	// dispatch so the user gets a clear, actionable parse-time error
+	// instead of a downstream "PERCENTILEs can only take parameters in
+	// the range [0, 1]" Binder Error at run time.
+	if pm := percentileFractionRe.FindStringSubmatch(directive); pm != nil {
+		if f, err := strconv.ParseFloat(pm[1], 64); err == nil {
+			if f < 0 || f > 1 {
+				return "", fmt.Errorf(
+					"percentile fraction must be in [0, 1]: got %s — use a fraction like 0.95, not the percentage 95",
+					pm[1])
+			}
+		}
+	}
 
 	patterns := []struct {
 		regex   *regexp.Regexp
-		handler func(matches []string, table string, prev int64) string
+		handler func(matches []string, table, histTable string, prev int64) string
 	}{
 		// row_count >= N
 		{
 			regexp.MustCompile(`(?i)^row_count\s*(>=|<=|>|<|=)\s*(\d+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				op, n := m[1], m[2]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
@@ -40,24 +70,27 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// row_count_change < N%
 		{
 			regexp.MustCompile(`(?i)^row_count_change\s*<\s*(\d+)%%?$`),
-			func(m []string, t string, prev int64) string {
+			func(m []string, t, h string, prev int64) string {
 				pct := m[1]
 				if prev == 0 {
 					return "SELECT 1 WHERE 0" // No previous snapshot, pass
 				}
+				// `t` = current data (sandbox in sandbox mode); `h` =
+				// historical reference (catalog-prefixed in sandbox so the
+				// AT VERSION clause finds prod's snapshot).
 				return fmt.Sprintf(
 					`SELECT printf('row_count_change failed: changed %%.1f%%%% (threshold: <%%s%%%%)',
 						ABS((SELECT COUNT(*) FROM %s) - (SELECT COUNT(*) FROM %s AT (VERSION => %d))) * 100.0
 						/ NULLIF((SELECT COUNT(*) FROM %s AT (VERSION => %d)), 0), '%s')
 					WHERE ABS((SELECT COUNT(*) FROM %s) - (SELECT COUNT(*) FROM %s AT (VERSION => %d))) * 100.0
 						/ NULLIF((SELECT COUNT(*) FROM %s AT (VERSION => %d)), 0) >= %s`,
-					t, t, prev, t, prev, pct, t, t, prev, t, prev, pct)
+					t, h, prev, h, prev, pct, t, h, prev, h, prev, pct)
 			},
 		},
 		// freshness(col, 24h)
 		{
 			regexp.MustCompile(`(?i)^freshness\((\w+),\s*(\d+)([hd])\)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, n, unit := m[1], m[2], m[3]
 				interval := n
 				unitName := "hours"
@@ -77,7 +110,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// mean(col) BETWEEN x AND y
 		{
 			regexp.MustCompile(`(?i)^mean\((\w+)\)\s+BETWEEN\s+(.+)\s+AND\s+(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, low, high := m[1], m[2], m[3]
 				return fmt.Sprintf(
 					`SELECT printf('mean(%%s) BETWEEN failed: actual mean is %%.4f (expected [%%s, %%s])', '%s',
@@ -89,7 +122,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// mean(col) >= x (and other comparisons)
 		{
 			regexp.MustCompile(`(?i)^mean\((\w+)\)\s*(>=|<=|>|<|=)\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
@@ -101,7 +134,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// stddev(col) < X
 		{
 			regexp.MustCompile(`(?i)^stddev\((\w+)\)\s*<\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, val := m[1], m[2]
 				return fmt.Sprintf(
 					`SELECT printf('stddev(%%s) < %%s failed: actual stddev is %%.4f', '%s', '%s', (SELECT STDDEV(%s) FROM %s))
@@ -112,7 +145,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// min(col) >= X
 		{
 			regexp.MustCompile(`(?i)^min\((\w+)\)\s*(>=|<=|>|<|=)\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
@@ -124,7 +157,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// max(col) <= X
 		{
 			regexp.MustCompile(`(?i)^max\((\w+)\)\s*(>=|<=|>|<|=)\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
@@ -136,7 +169,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// sum(col) < X
 		{
 			regexp.MustCompile(`(?i)^sum\((\w+)\)\s*(>=|<=|>|<|=)\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
@@ -148,7 +181,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// zscore(col) < N
 		{
 			regexp.MustCompile(`(?i)^zscore\((\w+)\)\s*<\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, n := m[1], m[2]
 				return fmt.Sprintf(
 					`SELECT printf('zscore(%%s) < %%s failed: found outlier with zscore %%.2f', '%s', '%s',
@@ -160,7 +193,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// percentile(col, 0.95) < X
 		{
 			regexp.MustCompile(`(?i)^percentile\((\w+),\s*([0-9.]+)\)\s*(>=|<=|>|<|=)\s*(.+)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, pct, op, val := m[1], m[2], m[3], m[4]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
@@ -173,7 +206,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// reconcile_count(other_table)
 		{
 			regexp.MustCompile(`(?i)^reconcile_count\((.+)\)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				other := m[1]
 				return fmt.Sprintf(
 					`SELECT printf('reconcile_count failed: %%s has %%d rows, %%s has %%d rows', '%s',
@@ -185,7 +218,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// reconcile_sum(col, other.col)
 		{
 			regexp.MustCompile(`(?i)^reconcile_sum\((\w+),\s*(\S+)\.(\w+)\)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, other, otherCol := m[1], m[2], m[3]
 				return fmt.Sprintf(
 					`SELECT printf('reconcile_sum failed: %%s.%%s = %%s, %%s.%%s = %%s', '%s', '%s',
@@ -194,41 +227,36 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 					t, col, col, t, other, otherCol, otherCol, other, col, t, otherCol, other)
 			},
 		},
-		// column_exists(col) - schema-aware lookup via information_schema
+		// column_exists(col) - introspection via DESCRIBE (DuckLake-compatible)
 		{
 			regexp.MustCompile(`(?i)^column_exists\((\w+)\)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col := m[1]
-				schema, table := splitSchemaTable(t)
 				return fmt.Sprintf(
-					`WITH _col_check AS (SELECT 1 AS found FROM information_schema.columns
-						WHERE table_schema = '%s' AND table_name = '%s' AND column_name = '%s' LIMIT 1)
-					SELECT 'column_exists failed: column %s not found in %s'
-					WHERE NOT EXISTS(SELECT 1 FROM _col_check)`,
-					schema, table, col, col, t)
+					`SELECT 'column_exists failed: column %s not found in %s'
+					WHERE NOT EXISTS(SELECT 1 FROM (DESCRIBE %s) WHERE column_name = '%s')`,
+					col, t, t, col)
 			},
 		},
-		// column_type(col, TYPE) - schema-aware lookup via information_schema
+		// column_type(col, TYPE) - introspection via DESCRIBE (DuckLake-compatible)
 		// TYPE can be e.g. DECIMAL, DECIMAL(18,2), VARCHAR(255)
 		{
 			regexp.MustCompile(`(?i)^column_type\((\w+),\s*([\w()., ]+)\)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				col, typ := m[1], strings.TrimSpace(m[2])
-				schema, table := splitSchemaTable(t)
 				upperTyp := strings.ToUpper(typ)
 				return fmt.Sprintf(
-					`WITH _col_type AS (SELECT UPPER(data_type) AS dt FROM information_schema.columns
-						WHERE table_schema = '%s' AND table_name = '%s' AND column_name = '%s' LIMIT 1)
-					SELECT 'column_type failed: %s.%s is ' || COALESCE((SELECT dt FROM _col_type), 'NOT FOUND') ||
+					`SELECT 'column_type failed: %s.%s is ' ||
+						COALESCE((SELECT UPPER(column_type) FROM (DESCRIBE %s) WHERE column_name = '%s' LIMIT 1), 'NOT FOUND') ||
 						' (expected %s)'
-					WHERE COALESCE((SELECT dt FROM _col_type), '') != '%s'`,
-					schema, table, col, t, col, upperTyp, upperTyp)
+					WHERE COALESCE((SELECT UPPER(column_type) FROM (DESCRIBE %s) WHERE column_name = '%s' LIMIT 1), '') != '%s'`,
+					t, col, t, col, upperTyp, t, col, upperTyp)
 			},
 		},
 		// golden('path/to/expected.csv')
 		{
 			regexp.MustCompile(`(?i)^golden\('([^']+)'\)$`),
-			func(m []string, t string, _ int64) string {
+			func(m []string, t string, _ string, _ int64) string {
 				path := m[1]
 				// Compare with CSV file - return diff count
 				return fmt.Sprintf(
@@ -243,7 +271,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 		// distribution(col) STABLE
 		{
 			regexp.MustCompile(`(?i)^distribution\((\w+)\)\s+STABLE(?:\(([0-9.]+)\))?$`),
-			func(m []string, t string, prev int64) string {
+			func(m []string, t, h string, prev int64) string {
 				col := m[1]
 				threshold := "0.1"
 				if len(m) > 2 && m[2] != "" {
@@ -252,6 +280,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 				if prev == 0 {
 					return "SELECT 1 WHERE 0" // No previous snapshot, pass
 				}
+				// `t` = current data; `h` = historical reference for AT VERSION.
 				return fmt.Sprintf(
 					`WITH curr AS (SELECT %s, COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS pct FROM %s GROUP BY %s),
 					prev AS (SELECT %s, COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS pct FROM %s AT (VERSION => %d) GROUP BY %s)
@@ -259,7 +288,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 						c.%s::VARCHAR, ABS(COALESCE(c.pct, 0) - COALESCE(p.pct, 0)) * 100, '%s')
 					FROM curr c LEFT JOIN prev p ON c.%s = p.%s
 					WHERE ABS(COALESCE(c.pct, 0) - COALESCE(p.pct, 0)) > %s LIMIT 1`,
-					col, t, col, col, t, prev, col, col, col, threshold, col, col, threshold)
+					col, t, col, col, h, prev, col, col, col, threshold, col, col, threshold)
 			},
 		},
 	}
@@ -268,7 +297,7 @@ func AuditToSQL(directive, table string, prevSnapshot int64) (string, error) {
 	// Captures preserve original case (column names, literals, paths).
 	for _, p := range patterns {
 		if matches := p.regex.FindStringSubmatch(directive); matches != nil {
-			return p.handler(matches, table, prevSnapshot), nil
+			return p.handler(matches, table, historicalTable, prevSnapshot), nil
 		}
 	}
 
@@ -289,7 +318,12 @@ func splitSchemaTable(target string) (string, string) {
 // Returns a query that returns all audit violations in one round-trip.
 // Each row in the result contains an error message for a failed audit.
 // If all audits pass, the query returns no rows.
-func AuditsToBatchSQL(directives []string, table string, prevSnapshot int64) (string, []error) {
+//
+// `historicalTable` lets the caller redirect time-travel `AT (VERSION => N)`
+// clauses to a different reference (e.g. `lake.raw.foo` in sandbox mode so
+// historical audits read prod's snapshot history). If empty, defaults to
+// `table`.
+func AuditsToBatchSQL(directives []string, table, historicalTable string, prevSnapshot int64) (string, []error) {
 	if len(directives) == 0 {
 		return "", nil
 	}
@@ -298,7 +332,7 @@ func AuditsToBatchSQL(directives []string, table string, prevSnapshot int64) (st
 	var parseErrors []error
 
 	for _, directive := range directives {
-		sql, err := AuditToSQL(directive, table, prevSnapshot)
+		sql, err := AuditToSQL(directive, table, historicalTable, prevSnapshot)
 		if err != nil {
 			parseErrors = append(parseErrors, fmt.Errorf("audit parse error: %w", err))
 			continue

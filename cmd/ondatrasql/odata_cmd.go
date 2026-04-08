@@ -37,6 +37,12 @@ func runOData(ctx context.Context, cfg *config.Config, port string) error {
 		return fmt.Errorf("no models with @expose directive found\n\nAdd -- @expose to models you want to serve via OData")
 	}
 
+	// Validate port up front so a busy port surfaces a clean error
+	// instead of being delayed inside the server goroutine. (Bug 26)
+	if err := checkPortAvailable(port); err != nil {
+		return fmt.Errorf("port %s unavailable: %w", port, err)
+	}
+
 	// Init DuckDB session
 	sess, err := duckdb.NewSession("")
 	if err != nil {

@@ -7,9 +7,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/collect"
@@ -39,6 +41,32 @@ func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error
 		return fmt.Errorf("no @kind: events models found in %s", cfg.ModelsPath)
 	}
 
+	// Validate ports BEFORE opening Badger. Otherwise a busy port leaves
+	// a stale Badger lock behind on retry, masking the real port-bind
+	// failure with a confusing "another process is using this Badger
+	// database" error on the next attempt. (Bug 26)
+	//
+	// The admin port is auto-derived as public+1 — surface that in errors
+	// so users aren't surprised by a port number they didn't pick.
+	pNum, parseErr := strconv.Atoi(publicPort)
+	if parseErr != nil {
+		return fmt.Errorf("invalid port %q: %w", publicPort, parseErr)
+	}
+	if pNum < 1 || pNum > 65534 {
+		return fmt.Errorf("invalid public port %d: must be 1-65534 (admin port = public+1, so 65535 is reserved)", pNum)
+	}
+	adminPort := strconv.Itoa(pNum + 1)
+	if err := checkPortAvailable(publicPort); err != nil {
+		return fmt.Errorf("public port %s unavailable: %w", publicPort, err)
+	}
+	// Admin server only binds 127.0.0.1, so check the same address —
+	// otherwise we'd reject ports that are busy on a different interface
+	// but would actually have worked for the loopback admin server.
+	// (Review finding 3)
+	if err := checkLoopbackPortAvailable(adminPort); err != nil {
+		return fmt.Errorf("admin port %s (public+1) unavailable: %w — pick a different public port so the admin port is also free", adminPort, err)
+	}
+
 	// Open Badger store
 	badgerDir := filepath.Join(cfg.ProjectDir, ".ondatra", "events")
 	if err := os.MkdirAll(badgerDir, 0755); err != nil {
@@ -47,6 +75,15 @@ func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error
 
 	store, err := collect.Open(badgerDir)
 	if err != nil {
+		// Translate Badger's directory-lock error to something honest:
+		// we know the store is locked, we don't know by what. (Bug 26)
+		if strings.Contains(err.Error(), "Cannot acquire directory lock") {
+			return fmt.Errorf(
+				"events store at %s is locked by another process — "+
+					"if no other 'ondatrasql events' is running, the lock may be "+
+					"stale (remove %s/LOCK to recover)",
+				badgerDir, badgerDir)
+		}
 		return fmt.Errorf("open event store: %w", err)
 	}
 	defer store.Close()
@@ -57,13 +94,6 @@ func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error
 	if err := store.RecoverAllInflight(); err != nil {
 		return fmt.Errorf("recover inflight: %w", err)
 	}
-
-	// Admin port is always public+1
-	pNum, parseErr := strconv.Atoi(publicPort)
-	if parseErr != nil {
-		return fmt.Errorf("invalid port %q: %w", publicPort, parseErr)
-	}
-	adminPort := strconv.Itoa(pNum + 1)
 
 	// Write admin port to a runtime file so `ondatrasql run` can find it.
 	// Removed on shutdown.
@@ -119,6 +149,30 @@ func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error
 	case err := <-errCh:
 		return err
 	}
+}
+
+// checkPortAvailable verifies that the given TCP port can be bound on
+// 0.0.0.0. Returns an error describing the conflict otherwise. Used to
+// fail fast before opening Badger so a busy port doesn't leave a stale
+// directory lock that masks the real error on the next attempt.
+func checkPortAvailable(port string) error {
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		return err
+	}
+	return ln.Close()
+}
+
+// checkLoopbackPortAvailable verifies the port is bindable on 127.0.0.1
+// specifically — used for servers that only listen on loopback (e.g. the
+// events admin server) so we don't reject a port that's busy on a public
+// interface but free on loopback. (Review finding 3)
+func checkLoopbackPortAvailable(port string) error {
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		return err
+	}
+	return ln.Close()
 }
 
 type eventModelInfo struct {

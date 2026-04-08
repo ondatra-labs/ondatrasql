@@ -1,0 +1,34 @@
+# Round 4 finding: showSampleDiff used to include the CSV header row
+# in the "Sample added/removed" output. The header (column names like
+# "id,name") got rendered with a `+` / `-` prefix as if it were a row,
+# which made it look like the column structure had changed when only
+# the values had. The fix slices `lines[1:...]` to skip the header,
+# matching the sibling showDiff function.
+
+exec ondatrasql init
+mkdir models/raw
+cp v1.sql models/raw/m.sql
+exec ondatrasql run raw.m
+
+# Change the values (not the schema) and sandbox: should diff cleanly.
+cp v2.sql models/raw/m.sql
+exec ondatrasql sandbox raw.m
+
+# Sample added/removed lines must contain the actual data row, not the
+# CSV header that came from Query() output.
+stdout 'Sample added:'
+stdout '\+ 14'
+stdout 'Sample removed:'
+stdout '- 10'
+
+# The header `+ doubled,msg` (or any naked column-name list with the
+# diff prefix) must NOT appear.
+! stdout '\+ doubled,msg'
+! stdout '- doubled,msg'
+
+-- v1.sql --
+-- @kind: table
+SELECT 10 AS doubled, 'world' AS msg
+-- v2.sql --
+-- @kind: table
+SELECT 14 AS doubled, 'sandbox' AS msg

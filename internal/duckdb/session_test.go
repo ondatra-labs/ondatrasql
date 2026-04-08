@@ -424,18 +424,21 @@ func TestSession_QueryPrint_JSON(t *testing.T) {
 			t.Errorf("QueryPrint json: %v", err)
 		}
 	})
-	var rows []map[string]string
+	// Bug 4/6 fix: JSON output preserves native types — id is a number,
+	// msg is a string. Decode into []map[string]any so both can land in
+	// their natural Go type.
+	var rows []map[string]any
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatalf("invalid JSON: %v\noutput:\n%s", err, out)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 JSON row, got %d", len(rows))
 	}
-	if rows[0]["id"] != "1" {
-		t.Errorf("id = %q, want %q", rows[0]["id"], "1")
+	if got, ok := rows[0]["id"].(float64); !ok || got != 1 {
+		t.Errorf("id = %v (%T), want JSON number 1", rows[0]["id"], rows[0]["id"])
 	}
 	if rows[0]["msg"] != "hello" {
-		t.Errorf("msg = %q, want %q", rows[0]["msg"], "hello")
+		t.Errorf("msg = %v, want \"hello\"", rows[0]["msg"])
 	}
 }
 
@@ -788,18 +791,19 @@ func TestSession_QueryPrint_BooleanValues(t *testing.T) {
 			t.Errorf("QueryPrint boolean: %v", err)
 		}
 	})
-	var rows []map[string]string
+	// Bug 4/6 fix: booleans render as JSON true/false, not strings.
+	var rows []map[string]any
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatalf("invalid JSON: %v\noutput:\n%s", err, out)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
-	if rows[0]["flag"] != "true" {
-		t.Errorf("flag = %q, want %q", rows[0]["flag"], "true")
+	if rows[0]["flag"] != true {
+		t.Errorf("flag = %v, want JSON true", rows[0]["flag"])
 	}
-	if rows[0]["other"] != "false" {
-		t.Errorf("other = %q, want %q", rows[0]["other"], "false")
+	if rows[0]["other"] != false {
+		t.Errorf("other = %v, want JSON false", rows[0]["other"])
 	}
 }
 
@@ -1592,5 +1596,174 @@ func TestSession_SetHighWaterMark_ClosedSession(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "closed") {
 		t.Errorf("error = %q, want it to mention 'closed'", err.Error())
+	}
+}
+
+// --- Regression: EnsureReadOnly statement-type filtering ---
+//
+// `ondatrasql sql` is documented as read-only. Earlier allowlists let
+// PRAGMA and CALL through even though both can mutate session/catalog state.
+
+func TestEnsureReadOnly_AllowsSelect(t *testing.T) {
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnsureReadOnly("SELECT 1"); err != nil {
+		t.Errorf("SELECT 1 should pass read-only check: %v", err)
+	}
+	if err := s.EnsureReadOnly("WITH x AS (SELECT 1) SELECT * FROM x"); err != nil {
+		t.Errorf("WITH ... SELECT should pass read-only check: %v", err)
+	}
+}
+
+func TestEnsureReadOnly_AllowsRelation(t *testing.T) {
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnsureReadOnly("DESCRIBE SELECT 1 AS a"); err != nil {
+		t.Errorf("DESCRIBE should pass: %v", err)
+	}
+	if err := s.EnsureReadOnly("SHOW TABLES"); err != nil {
+		t.Errorf("SHOW TABLES should pass: %v", err)
+	}
+}
+
+func TestEnsureReadOnly_RejectsCallProcedure(t *testing.T) {
+	// CALL is the syntax used for DuckLake maintenance procedures like
+	// ducklake_merge_adjacent_files which mutate catalog state. The
+	// allowlist used to include STATEMENT_TYPE_CALL, letting them through.
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	// pg_catalog.pg_table_is_visible is a benign callable; we just need
+	// the parser to recognise the CALL form.
+	err = s.EnsureReadOnly("CALL pragma_database_size()")
+	if err == nil {
+		t.Fatal("CALL should be rejected by read-only check")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("expected error to mention 'read-only', got %q", err.Error())
+	}
+}
+
+func TestEnsureReadOnly_RejectsMutatingPragma(t *testing.T) {
+	// PRAGMA threads / memory_limit / enable_profiling all mutate session
+	// state. Toggle-style pragmas (no `=value`) parse as STATEMENT_TYPE_PRAGMA;
+	// assignment-style pragmas parse as STATEMENT_TYPE_SET. Both must reject.
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	cases := []string{
+		"PRAGMA enable_profiling",
+		"PRAGMA disable_optimizer",
+		"PRAGMA threads=4",
+		"PRAGMA memory_limit='1GB'",
+	}
+	for _, q := range cases {
+		err := s.EnsureReadOnly(q)
+		if err == nil {
+			t.Errorf("%q should be rejected by read-only check", q)
+			continue
+		}
+		if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%q: expected error to mention 'read-only', got %q", q, err.Error())
+		}
+	}
+}
+
+func TestEnsureReadOnly_RejectsDDL(t *testing.T) {
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	// Pre-create the table so DuckDB's prepare doesn't reject DML/ALTER
+	// with a Catalog Error before the read-only check has a chance to run.
+	if err := s.Exec("CREATE TABLE rdo_test (a INT)"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	cases := map[string]string{
+		"CREATE TABLE rdo_other (a INT)":      "CREATE",
+		"DROP TABLE IF EXISTS rdo_test":       "DROP",
+		"ALTER TABLE rdo_test RENAME TO rdo2": "ALTER",
+		"INSERT INTO rdo_test VALUES (1)":     "INSERT",
+		"DELETE FROM rdo_test":                "DELETE",
+		"UPDATE rdo_test SET a=1":             "UPDATE",
+	}
+	for q, kind := range cases {
+		err := s.EnsureReadOnly(q)
+		if err == nil {
+			t.Errorf("%s: %q should be rejected", kind, q)
+			continue
+		}
+		if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%s: expected error to mention 'read-only', got %q", kind, err.Error())
+		}
+	}
+}
+
+// --- Regression: jsonValue precision for DECIMAL and HUGEINT ---
+//
+// Earlier `jsonValue` rendered duckdb.Decimal via Float64() which silently
+// rounds large/precise decimals (e.g. 18-digit monetary amounts). HUGEINT
+// (*big.Int) had no case at all and fell through to fmt.Sprintf "%v".
+
+func TestQueryPrint_DecimalExactPrecision(t *testing.T) {
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	out := captureStdout(t, func() {
+		err := s.QueryPrint("SELECT CAST('12345678901234567.89' AS DECIMAL(20,2)) AS d", "json")
+		if err != nil {
+			t.Fatalf("QueryPrint: %v", err)
+		}
+	})
+	if !strings.Contains(out, "12345678901234567.89") {
+		t.Errorf("decimal precision lost in JSON output:\n%s", out)
+	}
+}
+
+func TestQueryPrint_HugeIntExactPrecision(t *testing.T) {
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	out := captureStdout(t, func() {
+		// 21-digit number doesn't fit in int64; HUGEINT can hold it.
+		err := s.QueryPrint("SELECT CAST('123456789012345678901' AS HUGEINT) AS h", "json")
+		if err != nil {
+			t.Fatalf("QueryPrint: %v", err)
+		}
+	})
+	if !strings.Contains(out, "123456789012345678901") {
+		t.Errorf("HUGEINT precision lost in JSON output:\n%s", out)
+	}
+}
+
+func TestEnsureReadOnly_RejectsMultiStatement(t *testing.T) {
+	// Multi-statement queries used to slip through PrepareContext silently;
+	// the fix uses Prepare() which auto-rejects.
+	s, err := NewSession(":memory:?threads=1&memory_limit=256MB")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer s.Close()
+	err = s.EnsureReadOnly("SELECT 1; SELECT 2")
+	if err == nil {
+		t.Fatal("multi-statement query should be rejected")
+	}
+	if !strings.Contains(err.Error(), "one statement at a time") {
+		t.Errorf("expected error to mention multi-statement guidance, got %q", err.Error())
 	}
 }

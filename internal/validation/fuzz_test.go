@@ -90,7 +90,7 @@ func FuzzAuditToSQL(f *testing.F) {
 	f.Add("'; DROP TABLE x; --", "tmp", int64(-1))
 
 	f.Fuzz(func(t *testing.T, directive, table string, prevSnapshot int64) {
-		sql, err := AuditToSQL(directive, table, prevSnapshot)
+		sql, err := AuditToSQL(directive, table, "", prevSnapshot)
 		if err != nil {
 			return
 		}
@@ -152,7 +152,7 @@ func FuzzAuditToSQLSyntax(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, directive string, prevSnapshot int64) {
 		// table is always an internal identifier, never user input.
-		sql, err := AuditToSQL(directive, "staging.orders", prevSnapshot)
+		sql, err := AuditToSQL(directive, "staging.orders", "", prevSnapshot)
 		if err != nil {
 			return
 		}

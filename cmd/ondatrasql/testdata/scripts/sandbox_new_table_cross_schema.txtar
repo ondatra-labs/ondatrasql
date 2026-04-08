@@ -1,0 +1,35 @@
+# Review finding (Low): the "new table" presentation in sandbox used to
+# query information_schema.columns with WHERE table_catalog = '?' AND
+# table_name = '?' (no schema filter). If raw.orders existed in prod and
+# the user added a new staging.orders model, the column listing for
+# staging.orders would mix in raw.orders's columns. Fix adds table_schema
+# to the WHERE clause.
+
+exec ondatrasql init
+mkdir models/raw
+mkdir models/staging
+cp raw.sql models/raw/orders.sql
+cp staging.sql models/staging/orders.sql
+
+# Run only raw.orders so it lives in the catalog
+exec ondatrasql run raw.orders
+
+# Sandbox staging.orders → it's a NEW table. The "new table" schema
+# listing must show staging.orders's columns (a, b), not mix in raw.orders's
+# columns (id, region, amount).
+exec ondatrasql sandbox staging.orders
+stdout '\(new table\)'
+# staging.orders has columns a, b
+stdout 'a \(VARCHAR\)'
+stdout 'b \(INTEGER\)'
+# raw.orders columns must NOT appear
+! stdout 'id \(INTEGER\)'
+! stdout 'region \(VARCHAR\)'
+! stdout 'amount \(INTEGER\)'
+
+-- raw.sql --
+-- @kind: table
+SELECT 1::INTEGER AS id, 'US' AS region, 100::INTEGER AS amount
+-- staging.sql --
+-- @kind: table
+SELECT 'hello' AS a, 42::INTEGER AS b

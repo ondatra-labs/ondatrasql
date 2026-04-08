@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.9.0"
+var version = "0.10.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -229,13 +229,13 @@ Auth:
   auth                    List available OAuth2 providers
   auth <provider>         Authenticate with an OAuth2 provider
 
-SQL Commands (from sql/ folder):
-  merge [sandbox]         Merge small files (ducklake_merge_adjacent_files)
-  expire [sandbox]        Expire old snapshots (ducklake_expire_snapshots)
-  cleanup [sandbox]       Delete old files (ducklake_cleanup_old_files)
-  orphaned [sandbox]      Delete orphaned files (ducklake_delete_orphaned_files)
-  rewrite [sandbox]       Rewrite files with deletes (ducklake_rewrite_data_files)
-  checkpoint [sandbox]    Run all maintenance in order
+SQL Commands (from sql/ folder, prod-only — sandbox not supported):
+  merge                   Merge small files (ducklake_merge_adjacent_files)
+  expire                  Expire old snapshots (ducklake_expire_snapshots)
+  cleanup                 Delete old files (ducklake_cleanup_old_files)
+  orphaned                Delete orphaned files (ducklake_delete_orphaned_files)
+  rewrite                 Rewrite files with deletes (ducklake_rewrite_data_files)
+  checkpoint              Run all maintenance in order
 
 Global Options:
   --json                  Emit JSON lines to stdout (human output to stderr)`, version)

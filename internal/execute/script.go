@@ -309,10 +309,16 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	}
 	result.RowsAffected = rowsAffected
 
-	// Run audits (batched - single query for all audits)
+	// Run audits (batched - single query for all audits).
+	// In sandbox mode, redirect AT VERSION clauses to the prod catalog —
+	// see runner.go for the rationale.
 	stepStart = time.Now()
 	if len(model.Audits) > 0 {
-		batchSQL, parseErrors := validation.AuditsToBatchSQL(model.Audits, model.Target, prevSnapshot)
+		historicalTable := model.Target
+		if r.sess.ProdAlias() != "" {
+			historicalTable = r.sess.ProdAlias() + "." + model.Target
+		}
+		batchSQL, parseErrors := validation.AuditsToBatchSQL(model.Audits, model.Target, historicalTable, prevSnapshot)
 
 		// Add any parse errors
 		for _, err := range parseErrors {

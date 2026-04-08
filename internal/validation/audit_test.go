@@ -187,8 +187,8 @@ func TestAuditToSQL(t *testing.T) {
 			directive: "column_exists(order_id)",
 			table:     "staging.orders",
 			wantParts: []string{
-				"information_schema.columns",
-				"table_schema = 'staging' AND table_name = 'orders' AND column_name = 'order_id'",
+				"DESCRIBE staging.orders",
+				"column_name = 'order_id'",
 				"column_exists failed:",
 			},
 		},
@@ -197,8 +197,8 @@ func TestAuditToSQL(t *testing.T) {
 			directive: "column_type(amount, DECIMAL)",
 			table:     "staging.orders",
 			wantParts: []string{
-				"information_schema.columns",
-				"table_schema = 'staging' AND table_name = 'orders' AND column_name = 'amount'",
+				"DESCRIBE staging.orders",
+				"column_name = 'amount'",
 				"column_type failed:",
 				"expected DECIMAL",
 			},
@@ -208,7 +208,7 @@ func TestAuditToSQL(t *testing.T) {
 			directive: "column_type(amount, DECIMAL(18,2))",
 			table:     "staging.orders",
 			wantParts: []string{
-				"information_schema.columns",
+				"DESCRIBE staging.orders",
 				"column_name = 'amount'",
 				"expected DECIMAL(18,2)",
 			},
@@ -268,7 +268,7 @@ func TestAuditToSQL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sql, err := AuditToSQL(tt.directive, tt.table, tt.prevSnapshot)
+			sql, err := AuditToSQL(tt.directive, tt.table, "", tt.prevSnapshot)
 
 			if tt.wantErrMsg != "" {
 				if err == nil {
@@ -321,13 +321,12 @@ func TestSplitSchemaTable(t *testing.T) {
 
 func TestAuditToSQL_ColumnExistsNoSchema(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("column_exists(id)", "orders", 0)
+	sql, err := AuditToSQL("column_exists(id)", "orders", "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, part := range []string{
-		"table_schema = 'main'",
-		"table_name = 'orders'",
+		"DESCRIBE orders",
 		"column_name = 'id'",
 	} {
 		if !strings.Contains(sql, part) {
@@ -338,7 +337,7 @@ func TestAuditToSQL_ColumnExistsNoSchema(t *testing.T) {
 
 func TestAuditToSQL_FreshnessDays(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("freshness(created_at, 3d)", "staging.orders", 0)
+	sql, err := AuditToSQL("freshness(created_at, 3d)", "staging.orders", "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -349,9 +348,200 @@ func TestAuditToSQL_FreshnessDays(t *testing.T) {
 	}
 }
 
+// --- Regression: historicalTable redirects AT VERSION clauses ---
+//
+// In sandbox mode the previous-snapshot ID lives in the prod catalog, not
+// the sandbox catalog. The audit SQL needs to time-travel against the
+// prod-prefixed reference; otherwise DuckLake errors with "No snapshot
+// found at version N". Callers (runner.go / script.go) pass the prefixed
+// name as `historicalTable`. Two patterns use it:
+//   - row_count_change < N%
+//   - distribution(col) STABLE
+
+func TestAuditToSQL_RowCountChange_HistoricalTable(t *testing.T) {
+	t.Parallel()
+	sql, err := AuditToSQL("row_count_change < 50%", "raw.t", "lake.raw.t", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Current data must come from the unprefixed (sandbox-local) name
+	if !strings.Contains(sql, "FROM raw.t)") {
+		t.Errorf("expected current side to read from raw.t, got: %s", sql)
+	}
+	// Historical comparison must use the prod-prefixed name
+	if !strings.Contains(sql, "FROM lake.raw.t AT (VERSION => 42)") {
+		t.Errorf("expected historical side to use lake.raw.t AT VERSION, got: %s", sql)
+	}
+	// Sanity: the unprefixed name must NOT appear in any AT VERSION clause
+	if strings.Contains(sql, "raw.t AT (VERSION =>") && !strings.Contains(sql, "lake.raw.t AT (VERSION =>") {
+		t.Errorf("AT VERSION used unprefixed name (would fail in sandbox), got: %s", sql)
+	}
+}
+
+func TestAuditToSQL_DistributionStable_HistoricalTable(t *testing.T) {
+	t.Parallel()
+	sql, err := AuditToSQL("distribution(category) STABLE", "raw.t", "lake.raw.t", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// `curr` reads current data from raw.t (no prefix)
+	if !strings.Contains(sql, "FROM raw.t GROUP BY category") {
+		t.Errorf("expected curr to read from raw.t, got: %s", sql)
+	}
+	// `prev` time-travels via prod-prefixed reference
+	if !strings.Contains(sql, "FROM lake.raw.t AT (VERSION => 42)") {
+		t.Errorf("expected prev to use lake.raw.t AT VERSION, got: %s", sql)
+	}
+}
+
+func TestAuditToSQL_HistoricalTableDefaultsToTable(t *testing.T) {
+	t.Parallel()
+	// When historicalTable is empty (prod runs), AT VERSION clauses must
+	// fall back to the unprefixed `table` argument.
+	sql, err := AuditToSQL("row_count_change < 50%", "raw.t", "", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(sql, "FROM raw.t AT (VERSION => 42)") {
+		t.Errorf("expected unprefixed AT VERSION when historicalTable is empty, got: %s", sql)
+	}
+}
+
+// --- Regression: historical audits skip on first run (Bug 33 + 35) ---
+//
+// Earlier `row_count_change` and `distribution STABLE` failed on the first
+// run with "Catalog Error: Table with name X does not exist at version N!"
+// because the previous-snapshot lookup returned the global current-catalog
+// snapshot rather than 0 (= "no commit yet"). The fix returns 0 from
+// GetPreviousSnapshot when the model has never been committed, and the
+// audit patterns short-circuit `prev == 0` to a no-op `SELECT 1 WHERE 0`.
+
+func TestAuditToSQL_RowCountChange_FirstRunSkips(t *testing.T) {
+	t.Parallel()
+	sql, err := AuditToSQL("row_count_change < 50%", "raw.t", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// First run = prev snapshot 0 = audit must be a no-op.
+	if sql != "SELECT 1 WHERE 0" {
+		t.Errorf("expected no-op SQL on first run (prev=0), got: %s", sql)
+	}
+	// Crucially: must NOT contain `AT (VERSION => 0)` which would error out.
+	if strings.Contains(sql, "AT (VERSION") {
+		t.Errorf("first-run audit must not time-travel, got: %s", sql)
+	}
+}
+
+func TestAuditToSQL_DistributionStable_FirstRunSkips(t *testing.T) {
+	t.Parallel()
+	sql, err := AuditToSQL("distribution(category) STABLE", "raw.t", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sql != "SELECT 1 WHERE 0" {
+		t.Errorf("expected no-op SQL on first run (prev=0), got: %s", sql)
+	}
+	if strings.Contains(sql, "AT (VERSION") {
+		t.Errorf("first-run audit must not time-travel, got: %s", sql)
+	}
+}
+
+// --- Regression: column_exists / column_type via DESCRIBE (Bug 30) ---
+//
+// Earlier these audits used `information_schema.columns` which under
+// DuckLake routes to `duckdb_columns` and fails with "Unsupported catalog
+// type for duckdb_columns". The fix replaces the lookup with a
+// `(DESCRIBE schema.table)` subquery that DuckLake supports natively.
+// Combining the two audits in one batch surfaced the bug as an
+// "Invalid Unicode" error (downstream symptom of the same broken path).
+
+func TestAuditToSQL_ColumnExists_UsesDescribe(t *testing.T) {
+	t.Parallel()
+	sql, err := AuditToSQL("column_exists(id)", "raw.t", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(sql, "DESCRIBE raw.t") {
+		t.Errorf("expected DESCRIBE-based lookup, got: %s", sql)
+	}
+	if strings.Contains(sql, "information_schema.columns") {
+		t.Errorf("regression: still using information_schema.columns (broken in DuckLake), got: %s", sql)
+	}
+}
+
+func TestAuditToSQL_ColumnType_UsesDescribe(t *testing.T) {
+	t.Parallel()
+	sql, err := AuditToSQL("column_type(amount, INTEGER)", "raw.t", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(sql, "DESCRIBE raw.t") {
+		t.Errorf("expected DESCRIBE-based lookup, got: %s", sql)
+	}
+	if strings.Contains(sql, "information_schema.columns") {
+		t.Errorf("regression: still using information_schema.columns (broken in DuckLake), got: %s", sql)
+	}
+}
+
+func TestAuditsToBatchSQL_ColumnExistsPlusColumnType(t *testing.T) {
+	t.Parallel()
+	// Bug 30 specifically: combining the two used to produce a batch SQL
+	// with `WITH _col_check ...` and `WITH _col_type ...` set up in a way
+	// that triggered the Unicode/integer-overflow downstream errors.
+	// The fix removes the CTEs entirely.
+	sql, errs := AuditsToBatchSQL(
+		[]string{"column_exists(id)", "column_type(amount, INTEGER)"},
+		"raw.t", "", 0,
+	)
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	if strings.Contains(sql, "_col_check") || strings.Contains(sql, "_col_type") {
+		t.Errorf("regression: CTE-based lookups still present, got: %s", sql)
+	}
+	if strings.Contains(sql, "information_schema.columns") {
+		t.Errorf("regression: still using information_schema.columns, got: %s", sql)
+	}
+	if !strings.Contains(sql, "DESCRIBE raw.t") {
+		t.Errorf("expected DESCRIBE-based lookup, got: %s", sql)
+	}
+}
+
+// --- Regression: percentile fraction validation (Bug 32) ---
+//
+// percentile(col, 95) used to fall through to DuckDB's PERCENTILE_CONT and
+// produce a cryptic Binder Error at run time. Now we reject 0–100 values
+// at parse time with a clear actionable message.
+
+func TestAuditToSQL_PercentileFraction_OutOfRange(t *testing.T) {
+	t.Parallel()
+	cases := []string{"95", "1.5", "100"}
+	for _, frac := range cases {
+		_, err := AuditToSQL("percentile(amount, "+frac+") < 100", "raw.t", "", 0)
+		if err == nil {
+			t.Errorf("percentile fraction %s should be rejected at parse time", frac)
+			continue
+		}
+		if !strings.Contains(err.Error(), "[0, 1]") {
+			t.Errorf("error should mention valid range, got: %v", err)
+		}
+	}
+}
+
+func TestAuditToSQL_PercentileFraction_InRange(t *testing.T) {
+	t.Parallel()
+	cases := []string{"0", "0.5", "0.95", "1"}
+	for _, frac := range cases {
+		_, err := AuditToSQL("percentile(amount, "+frac+") < 100", "raw.t", "", 0)
+		if err != nil {
+			t.Errorf("percentile fraction %s should be accepted, got: %v", frac, err)
+		}
+	}
+}
+
 func TestAuditToSQL_DistributionStableNoPrev(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("distribution(status) STABLE", "staging.orders", 0)
+	sql, err := AuditToSQL("distribution(status) STABLE", "staging.orders", "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -370,7 +560,7 @@ func TestAuditToSQL_UsesTableParam(t *testing.T) {
 		"column_exists(id)",
 	}
 	for _, d := range directives {
-		sql, err := AuditToSQL(d, "custom.my_table", 0)
+		sql, err := AuditToSQL(d, "custom.my_table", "", 0)
 		if err != nil {
 			t.Errorf("directive %q: unexpected error: %v", d, err)
 			continue
@@ -383,7 +573,7 @@ func TestAuditToSQL_UsesTableParam(t *testing.T) {
 
 func TestAuditsToBatchSQL_AllInvalid(t *testing.T) {
 	t.Parallel()
-	sql, errs := AuditsToBatchSQL([]string{"bad1", "bad2"}, "staging.orders", 0)
+	sql, errs := AuditsToBatchSQL([]string{"bad1", "bad2"}, "staging.orders", "", 0)
 	if sql != "" {
 		t.Errorf("expected empty SQL when all audits invalid, got %q", sql)
 	}
@@ -434,7 +624,7 @@ func TestAuditsToBatchSQL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sql, errs := AuditsToBatchSQL(tt.directives, "staging.orders", 0)
+			sql, errs := AuditsToBatchSQL(tt.directives, "staging.orders", "", 0)
 
 			if len(errs) != tt.wantErrors {
 				t.Errorf("got %d errors, want %d", len(errs), tt.wantErrors)
@@ -492,7 +682,7 @@ func TestAuditToSQL_MixedCasePreservesLiterals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sql, err := AuditToSQL(tt.directive, "test_table", 0)
+			sql, err := AuditToSQL(tt.directive, "test_table", "", 0)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

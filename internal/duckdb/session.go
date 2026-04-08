@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/duckdb/duckdb-go/v2" // DuckDB driver
+	duckdbdriver "github.com/duckdb/duckdb-go/v2" // DuckDB driver (aliased; internal package is also named duckdb)
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
@@ -175,6 +176,128 @@ func (s *Session) RawConn(fn func(any) error) error {
 		return errors.New("session closed")
 	}
 	return s.conn.Raw(fn)
+}
+
+// allowedSQLStmtTypes is the set of DuckDB statement types accepted by
+// `ondatrasql sql`. The command is read-only by design — anything that
+// modifies data, schema, session state, or attaches/loads is rejected.
+//
+// STATEMENT_TYPE_CALL is intentionally NOT in this set: although the name
+// suggests "function call", DuckDB uses it for top-level procedure calls
+// (`CALL ducklake_merge_adjacent_files(...)`, `CALL ducklake_expire_snapshots(...)`)
+// which mutate catalog state. Table functions like `read_csv()`, `glob()`,
+// and `lake.snapshots()` are invoked via FROM clauses and parse as SELECTs,
+// so they remain accessible.
+//
+// STATEMENT_TYPE_PRAGMA is also NOT in this set: DuckDB has read pragmas
+// (`PRAGMA show_tables`, `PRAGMA table_info('foo')`) AND mutating ones
+// (`PRAGMA threads=1`, `PRAGMA memory_limit='8GB'`, `PRAGMA enable_profiling`)
+// — both share the same statement type. Letting the type through would
+// allow session-state mutations. The read-pragma equivalents are already
+// available as RELATION statements (`SHOW TABLES`, `DESCRIBE foo`,
+// `SUMMARIZE foo`), so users lose nothing by going through those.
+var allowedSQLStmtTypes = map[duckdbdriver.StmtType]bool{
+	duckdbdriver.STATEMENT_TYPE_SELECT:   true, // SELECT, WITH ... SELECT, FROM-first, VALUES
+	duckdbdriver.STATEMENT_TYPE_EXPLAIN:  true, // EXPLAIN, EXPLAIN ANALYZE
+	duckdbdriver.STATEMENT_TYPE_RELATION: true, // DESCRIBE, SHOW, SUMMARIZE
+}
+
+// EnsureReadOnly verifies the query is a read-only statement.
+// It prepares the statement against DuckDB to determine its type, then
+// rejects anything not in allowedSQLStmtTypes.
+//
+// Used by `ondatrasql sql` to prevent accidental DDL/DML — users should
+// write models in models/ for data mutations.
+func (s *Session) EnsureReadOnly(query string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return errors.New("session closed")
+	}
+
+	var stmtType duckdbdriver.StmtType
+	rawErr := s.conn.Raw(func(driverConn any) error {
+		innerConn, ok := driverConn.(*duckdbdriver.Conn)
+		if !ok {
+			return fmt.Errorf("driver connection is not *duckdb.Conn: %T", driverConn)
+		}
+		// Use Prepare (not PrepareContext) — Prepare rejects multi-statement
+		// queries automatically, which is what we want for `ondatrasql sql`.
+		stmt, err := innerConn.Prepare(query)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		ddbStmt, ok := stmt.(*duckdbdriver.Stmt)
+		if !ok {
+			return fmt.Errorf("prepared statement is not *duckdb.Stmt: %T", stmt)
+		}
+		stmtType, err = ddbStmt.StatementType()
+		return err
+	})
+	if rawErr != nil {
+		// Translate driver-internal multi-statement error into a user-friendly message.
+		if strings.Contains(rawErr.Error(), "multi-statement") {
+			return errors.New("ondatrasql sql accepts only one statement at a time (got multi-statement query — split into separate calls)")
+		}
+		return fmt.Errorf("validate query: %w", rawErr)
+	}
+
+	if !allowedSQLStmtTypes[stmtType] {
+		return fmt.Errorf("ondatrasql sql is read-only: %s statements are not allowed (use models in models/ for data mutations)", stmtTypeName(stmtType))
+	}
+	return nil
+}
+
+// stmtTypeName returns a human-readable name for a DuckDB statement type.
+// Used in error messages from EnsureReadOnly.
+func stmtTypeName(t duckdbdriver.StmtType) string {
+	switch t {
+	case duckdbdriver.STATEMENT_TYPE_INSERT:
+		return "INSERT"
+	case duckdbdriver.STATEMENT_TYPE_UPDATE:
+		return "UPDATE"
+	case duckdbdriver.STATEMENT_TYPE_DELETE:
+		return "DELETE"
+	case duckdbdriver.STATEMENT_TYPE_CREATE, duckdbdriver.STATEMENT_TYPE_CREATE_FUNC:
+		return "CREATE"
+	case duckdbdriver.STATEMENT_TYPE_DROP:
+		return "DROP"
+	case duckdbdriver.STATEMENT_TYPE_ALTER:
+		return "ALTER"
+	case duckdbdriver.STATEMENT_TYPE_COPY:
+		return "COPY"
+	case duckdbdriver.STATEMENT_TYPE_TRANSACTION:
+		return "TRANSACTION (BEGIN/COMMIT/ROLLBACK)"
+	case duckdbdriver.STATEMENT_TYPE_VACUUM:
+		return "VACUUM"
+	case duckdbdriver.STATEMENT_TYPE_ATTACH:
+		return "ATTACH"
+	case duckdbdriver.STATEMENT_TYPE_DETACH:
+		return "DETACH"
+	case duckdbdriver.STATEMENT_TYPE_LOAD:
+		return "LOAD"
+	case duckdbdriver.STATEMENT_TYPE_EXPORT:
+		return "EXPORT"
+	case duckdbdriver.STATEMENT_TYPE_MULTI:
+		return "multi-statement (use one statement per call)"
+	case duckdbdriver.STATEMENT_TYPE_SET, duckdbdriver.STATEMENT_TYPE_VARIABLE_SET:
+		return "SET"
+	case duckdbdriver.STATEMENT_TYPE_PREPARE:
+		return "PREPARE"
+	case duckdbdriver.STATEMENT_TYPE_EXECUTE:
+		return "EXECUTE"
+	case duckdbdriver.STATEMENT_TYPE_CALL:
+		return "CALL (procedure)"
+	case duckdbdriver.STATEMENT_TYPE_PRAGMA:
+		return "PRAGMA (mutates session — use SHOW/DESCRIBE/SUMMARIZE for read-only introspection)"
+	case duckdbdriver.STATEMENT_TYPE_INVALID:
+		return "invalid"
+	default:
+		return fmt.Sprintf("statement type %d", int(t))
+	}
 }
 
 // ExecContext executes SQL with context support.
@@ -419,8 +542,11 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 		return err
 	}
 
-	// Collect all rows
-	var data [][]string
+	// Collect all rows. We keep both the raw any values (for JSON, which needs
+	// to preserve types) and the stringified form (for markdown/csv which only
+	// produce text). The stringification happens once per row up front.
+	var rawData [][]any
+	var strData [][]string
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -430,11 +556,16 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 		if err := rows.Scan(ptrs...); err != nil {
 			return err
 		}
-		row := make([]string, len(cols))
+		// Copy vals so subsequent Scan() calls don't overwrite our row data.
+		rawRow := make([]any, len(cols))
+		copy(rawRow, vals)
+		rawData = append(rawData, rawRow)
+
+		strRow := make([]string, len(cols))
 		for i, v := range vals {
-			row[i] = anyToString(v)
+			strRow[i] = anyToString(v)
 		}
-		data = append(data, row)
+		strData = append(strData, strRow)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -444,11 +575,11 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 	// Print based on format
 	switch format {
 	case "json":
-		return printJSON(cols, data)
+		return printJSON(cols, rawData)
 	case "csv":
-		return printCSV(cols, data)
+		return printCSV(cols, strData)
 	default:
-		return printMarkdown(cols, data)
+		return printMarkdown(cols, strData)
 	}
 }
 
@@ -672,7 +803,7 @@ func (s *Session) SetHighWaterMark(target string) error {
 	}
 	sqlStr := fmt.Sprintf(`SET VARIABLE dag_start_snapshot = COALESCE(
 		(SELECT snapshot_id FROM %s.snapshots()
-		 WHERE commit_extra_info->>'model' = '%s'
+		 WHERE LOWER(commit_extra_info->>'model') = LOWER('%s')
 		 ORDER BY snapshot_id DESC LIMIT 1), 0);`, catalog, strings.ReplaceAll(target, "'", "''"))
 	return s.Exec(sqlStr)
 }
@@ -976,13 +1107,16 @@ func printMarkdown(cols []string, data [][]string) error {
 	return nil
 }
 
-func printJSON(cols []string, data [][]string) error {
-	var rows []map[string]string
+// printJSON emits rows as a JSON array of objects, preserving native types.
+// Numbers stay numbers, booleans stay booleans, NULL becomes null.
+// Bug 4 + 6 fix: previously took [][]string which discarded type information.
+func printJSON(cols []string, data [][]any) error {
+	var rows []map[string]any
 	for _, row := range data {
-		m := make(map[string]string)
+		m := make(map[string]any, len(cols))
 		for i, col := range cols {
 			if i < len(row) {
-				m[col] = row[i]
+				m[col] = jsonValue(row[i])
 			}
 		}
 		rows = append(rows, m)
@@ -990,6 +1124,35 @@ func printJSON(cols []string, data [][]string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(rows)
+}
+
+// jsonValue converts a database value to a JSON-friendly Go type.
+// Times become RFC3339 strings; DuckDB Decimal and HUGEINT (*big.Int) are
+// emitted as json.Number to preserve full precision; everything else passes
+// through unchanged (numbers stay numbers, bools stay bools, nil becomes
+// JSON null, []byte becomes a string).
+func jsonValue(v any) any {
+	if v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case time.Time:
+		return val.Format(time.RFC3339Nano)
+	case []byte:
+		return string(val)
+	case duckdbdriver.Decimal:
+		// Use the exact decimal string via json.Number — converting to
+		// float64 silently rounds large/precise decimals (e.g. 18-digit
+		// monetary amounts) and is a regression we already avoid in the
+		// OData path. (Review finding 2)
+		return json.Number(val.String())
+	case *big.Int:
+		// HUGEINT (int128) doesn't fit in any native JSON number type;
+		// emit the exact integer string via json.Number.
+		return json.Number(val.String())
+	default:
+		return val
+	}
 }
 
 func printCSV(cols []string, data [][]string) error {

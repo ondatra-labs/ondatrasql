@@ -7,14 +7,16 @@ WITH latest AS (
         CAST(commit_extra_info->>'rows_affected' AS BIGINT) as rows,
         CAST(commit_extra_info->>'duration_ms' AS INTEGER) as duration,
         CASE
-            WHEN snapshot_time::DATE = CURRENT_DATE THEN strftime(snapshot_time, '%%H:%%M')
-            ELSE strftime(snapshot_time, '%%m-%%d')
+            WHEN snapshot_time::DATE = CURRENT_DATE THEN strftime(snapshot_time, '%H:%M')
+            ELSE strftime(snapshot_time, '%m-%d')
         END as last_run,
-        ROW_NUMBER() OVER (PARTITION BY commit_extra_info->>'model' ORDER BY snapshot_id DESC) as rn
+        -- PARTITION on lowercased model so case-variant commits dedup to a
+        -- single "latest" row, matching the case-insensitive lookup story.
+        ROW_NUMBER() OVER (PARTITION BY LOWER(commit_extra_info->>'model') ORDER BY snapshot_id DESC) as rn
     FROM {{catalog}}.snapshots()
     WHERE commit_extra_info->>'model' IS NOT NULL
 )
 SELECT model, kind, run_type, rows, duration, last_run
 FROM latest
 WHERE rn = 1
-ORDER BY model
+ORDER BY LOWER(model)

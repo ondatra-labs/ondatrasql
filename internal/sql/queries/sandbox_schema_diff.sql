@@ -1,15 +1,22 @@
 -- sandbox_schema_diff.sql - Compare schema between sandbox and prod
--- Args: %[1]s = sandbox catalog, %[2]s = prod catalog, %[3]s = target table
+-- Args: %[1]s = sandbox catalog, %[2]s = prod catalog, %[3]s = schema.table target
+--
+-- The target is now expected as a schema-qualified name (schema.table).
+-- Without the schema filter raw.orders and staging.orders would mix
+-- columns into a single diff because they share the same table_name in
+-- the same catalog.
 
 WITH sandbox_cols AS (
     SELECT column_name, data_type
     FROM information_schema.columns
-    WHERE table_catalog = '%[1]s' AND table_name = '%[3]s'
+    WHERE table_catalog = '%[1]s'
+      AND table_schema || '.' || table_name = '%[3]s'
 ),
 prod_cols AS (
     SELECT column_name, data_type
     FROM information_schema.columns
-    WHERE table_catalog = '%[2]s' AND table_name = '%[3]s'
+    WHERE table_catalog = '%[2]s'
+      AND table_schema || '.' || table_name = '%[3]s'
 )
 SELECT
     COALESCE(s.column_name, p.column_name) as column_name,
