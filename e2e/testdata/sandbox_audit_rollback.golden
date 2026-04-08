@@ -1,7 +1,7 @@
 target: staging.audited
 kind: table
 run_type: backfill
-rows_affected: 1
+rows_affected: 0
 run_reason: sql changed
 error: audit parse error: unknown audit format: amount > 0
 exec_error: false
