@@ -66,7 +66,11 @@ func (r *Runner) runView(model *parser.Model, result *Result, start time.Time) (
 		}
 		tablesToQualify := make(map[string]bool)
 		for _, t := range tables {
-			if !r.tableExistsInCatalog(t.Table, r.sess.CatalogAlias()) {
+			exists, existsErr := r.tableExistsInCatalog(t.Table, r.sess.CatalogAlias())
+			if existsErr != nil {
+				return nil, existsErr
+			}
+			if !exists {
 				tablesToQualify[strings.ToLower(t.Table)] = true
 			}
 		}

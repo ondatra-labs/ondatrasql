@@ -39,6 +39,13 @@ func (r *Runner) DeserializeAST(astJSON string) (string, error) {
 	return r.deserializeAST(astJSON)
 }
 
+// TableExistsInCatalog exposes tableExistsInCatalog for regression testing.
+// Pinned by tests that verify lookup failures are surfaced as errors rather
+// than silently collapsed to "table does not exist".
+func (r *Runner) TableExistsInCatalog(table, catalog string) (bool, error) {
+	return r.tableExistsInCatalog(table, catalog)
+}
+
 // QualifyAndDeserialize qualifies tables in AST and deserializes back to SQL.
 func (r *Runner) QualifyAndDeserialize(astJSON string, tablesToQualify map[string]bool, catalog string) (string, error) {
 	root, err := parseASTJSON(astJSON)

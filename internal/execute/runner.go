@@ -324,7 +324,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		sandboxUpstreamChanged := false
 		if r.sess.ProdAlias() != "" {
 			for _, t := range allTableNames {
-				if r.tableExistsInCatalog(t, r.sess.CatalogAlias()) {
+				exists, err := r.tableExistsInCatalog(t, r.sess.CatalogAlias())
+				if err != nil {
+					return nil, err
+				}
+				if exists {
 					sandboxUpstreamChanged = true
 					break
 				}
@@ -370,11 +374,17 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			// No upstream changes. In sandbox mode, if target doesn't exist in
 			// sandbox, skip entirely — the prod table is visible via search_path.
 			// Creating an empty table would shadow it and produce a false diff.
-			if r.sess.ProdAlias() != "" && !r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias()) {
-				result.RunType = "skip"
-				result.RunReason = "no upstream changes"
-				result.Duration = time.Since(start)
-				return result, nil
+			if r.sess.ProdAlias() != "" {
+				exists, existsErr := r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias())
+				if existsErr != nil {
+					return nil, existsErr
+				}
+				if !exists {
+					result.RunType = "skip"
+					result.RunReason = "no upstream changes"
+					result.Duration = time.Since(start)
+					return result, nil
+				}
 			}
 			var emptyErr error
 			execSQL, emptyErr = r.applyEmptySmartCDC(astJSON, cdcTables)
@@ -411,7 +421,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			if !strings.Contains(t, ".") {
 				continue
 			}
-			if !r.tableExistsInCatalog(t, r.sess.CatalogAlias()) {
+			exists, existsErr := r.tableExistsInCatalog(t, r.sess.CatalogAlias())
+			if existsErr != nil {
+				return nil, existsErr
+			}
+			if !exists {
 				tablesToQualify[strings.ToLower(t)] = true
 			}
 		}
@@ -468,7 +482,12 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// This handles the case where CDC runs (hasChanges=true due to other
 	// catalog commits) but the source tables didn't actually change.
 	if isIncremental && !needsBackfill && r.sess.ProdAlias() != "" {
-		if !r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias()) {
+		exists, existsErr := r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias())
+		if existsErr != nil {
+			r.cleanup(tmpTable)
+			return nil, existsErr
+		}
+		if !exists {
 			countVal, countErr := r.sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable))
 			if countErr == nil && countVal == "0" {
 				r.cleanup(tmpTable)
@@ -715,17 +734,28 @@ func isTableNotExistError(err error) bool {
 
 // tableExistsInCatalog checks if a schema-qualified table (e.g. "raw.source")
 // exists in a specific catalog using information_schema.
-func (r *Runner) tableExistsInCatalog(table, catalog string) bool {
+//
+// Returns (false, nil) for unqualified names — they resolve via search_path
+// and don't need explicit catalog qualification.
+//
+// Returns the underlying query error rather than collapsing it to "not exists".
+// The earlier behaviour silently treated transient information_schema failures
+// as "table missing", which fed wrong inputs into schema-evolution and skip
+// logic (e.g. forcing a backfill on a table that actually had data).
+func (r *Runner) tableExistsInCatalog(table, catalog string) (bool, error) {
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) != 2 {
-		return false // Unqualified names resolve via search path, no fix needed
+		return false, nil // Unqualified names resolve via search path, no fix needed
 	}
 	schema, tbl := parts[0], parts[1]
 	q := fmt.Sprintf(
 		"SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'",
 		escapeSQL(catalog), escapeSQL(schema), escapeSQL(tbl))
 	val, err := r.sess.QueryValue(q)
-	return err == nil && val != "0"
+	if err != nil {
+		return false, fmt.Errorf("check table %s in catalog %s: %w", table, catalog, err)
+	}
+	return val != "0", nil
 }
 
 // cleanup removes the temp table.

@@ -398,6 +398,90 @@ SELECT 1 AS id`)
 	if !strings.Contains(got, "staging.sbox") {
 		t.Errorf("expected model in sandbox output, got: %s", got)
 	}
+
+	// The sandbox directory must be cleaned up on the success path too —
+	// pin it here so the deferred-cleanup refactor isn't silently reverted.
+	if _, err := os.Stat(filepath.Join(p.Dir, ".sandbox")); !os.IsNotExist(err) {
+		t.Errorf(".sandbox dir should not exist after successful sandbox run, got err=%v", err)
+	}
+}
+
+// TestRun_Sandbox_SingleModel_FailedRun_CleansUpDir is a regression test for
+// the sandbox cleanup leak fixed in cmd/ondatrasql/model.go.
+//
+// Bug: when a sandbox model run failed (e.g. audit failure), the cleanup of
+// the .sandbox directory was gated on `sandboxMode && err == nil`, so failed
+// runs left the directory behind. The next sandbox run would silently reuse
+// the dirty state instead of starting fresh, hiding catalog drift.
+//
+// Fix: defer os.RemoveAll(sandboxDir) right after createSandbox so cleanup
+// runs on every exit path. This test pins that contract.
+func TestRun_Sandbox_SingleModel_FailedRun_CleansUpDir(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	// Use an audit pattern that the @audit DSL parser does NOT recognize.
+	// The sandbox materialize path will fail with "audit parse error",
+	// returning a non-nil err from runner.Run, which under the old code
+	// would skip the cleanup branch entirely.
+	p.AddModel("staging/sbox_fail.sql", `-- @kind: table
+-- @audit: amount > 0
+SELECT 1 AS id, 100 AS amount`)
+
+	_ = captureOutput(t, func() {
+		// Either return value is acceptable — the contract under test is
+		// the filesystem state, not the error propagation shape.
+		_ = run([]string{"sandbox", "staging.sbox_fail"})
+	})
+
+	if _, err := os.Stat(filepath.Join(p.Dir, ".sandbox")); !os.IsNotExist(err) {
+		t.Errorf(".sandbox dir must be removed after failed sandbox run (got err=%v) — see model.go cleanup-leak fix", err)
+	}
+}
+
+// TestRun_Sandbox_DAG_InitSandboxFailure_CleansUpDir is the DAG-mode regression
+// test for cmd/ondatrasql/dag.go. The bug class is the same as model.go but
+// the trigger is different: in dag.go, model failures flow through the RunDAG
+// callback (no early return), so the original cleanup block at the end of the
+// `if sandboxMode` branch was actually reached on model failures. The genuine
+// leak path is when InitSandbox itself fails — the function returns at line 77
+// without ever reaching the cleanup, leaving the .sandbox directory behind.
+//
+// To trigger that path deterministically, we pre-seed `.sandbox/sandbox.sqlite`
+// with a non-SQLite blob so the createSandbox auto-step is skipped (dir exists)
+// and DuckLake's ATTACH inside InitSandbox fails on the corrupt file. The fix
+// (deferred RemoveAll right after createSandbox) must still wipe the directory
+// even though InitSandbox returned early.
+func TestRun_Sandbox_DAG_InitSandboxFailure_CleansUpDir(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	p.AddModel("staging/dag_ok.sql", `-- @kind: table
+SELECT 1 AS id`)
+
+	// Pre-seed a corrupt .sandbox so createSandbox is skipped (dir exists)
+	// and ATTACH inside InitSandbox fails on the bogus catalog file.
+	sandboxDir := filepath.Join(p.Dir, ".sandbox")
+	if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
+		t.Fatalf("seed sandbox dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxDir, "sandbox.sqlite"), []byte("not a sqlite file"), 0o644); err != nil {
+		t.Fatalf("seed corrupt sqlite: %v", err)
+	}
+
+	_ = captureOutput(t, func() {
+		// `sandbox` with no model name → DAG mode. Expected to fail at
+		// InitSandbox; we ignore the error shape and pin the filesystem.
+		_ = run([]string{"sandbox"})
+	})
+
+	if _, err := os.Stat(sandboxDir); !os.IsNotExist(err) {
+		t.Errorf(".sandbox dir must be removed even when InitSandbox fails (got err=%v) — see dag.go cleanup-leak fix", err)
+	}
 }
 
 func TestRun_Query(t *testing.T) {

@@ -96,6 +96,12 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 				return fmt.Errorf("create sandbox: %w", err)
 			}
 		}
+		// Defer cleanup so the sandbox directory is removed on every exit
+		// path — including failures during InitSandbox or model execution.
+		// Without this, a failed run leaves a stale .sandbox/ behind that
+		// the next run would silently reuse instead of starting fresh.
+		// Defers are LIFO, so this runs AFTER the sess.Close() defer below.
+		defer os.RemoveAll(sandboxDir)
 	}
 
 	// Generate dag_run_id
@@ -132,7 +138,8 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 
 	result, err := runner.Run(ctx, model)
 
-	// Show automatic diff and impact in sandbox mode, then cleanup
+	// Show automatic diff and impact in sandbox mode (success path only).
+	// Cleanup is handled by the deferred RemoveAll above for both paths.
 	if sandboxMode && err == nil {
 		// Print result inside box
 		printSectionBorder("Result")
@@ -150,10 +157,8 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 		showSandboxDiff(sess, model.Target, model.Kind)
 		showSandboxImpact(cfg, model.Target)
 
-		// Close box and cleanup
+		// Close box (cleanup is handled by deferred RemoveAll above)
 		printBottomBorder()
-		sess.Close()
-		os.RemoveAll(sandboxDir)
 	} else {
 		// Normal mode - print simple result
 		printResult(result)

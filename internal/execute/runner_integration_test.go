@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
+	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
@@ -44,6 +45,79 @@ func runModelErr(t *testing.T, p *testutil.Project, relPath string) (*execute.Re
 	}
 	runner := execute.NewRunner(p.Sess, execute.ModeRun, dag.GenerateRunID())
 	return runner.Run(context.Background(), model)
+}
+
+// TestRunner_TableExistsInCatalog_SurfaceErrors pins the (bool, error)
+// contract on the runner method that the materialize / runner / view code
+// paths use to decide whether to skip, force backfill, or qualify with prod.
+//
+// Earlier, the helper returned only a bool and silently collapsed every
+// error from information_schema (closed session, missing extension, query
+// timeout) to "table does not exist". That mis-classification then fed
+// the materialize path, which would force a backfill on a table that
+// actually had data — a data-loss-shaped bug. This test pins the contract
+// so future refactors don't quietly re-introduce the swallowed error.
+func TestRunner_TableExistsInCatalog_SurfaceErrors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+	p.AddModel("staging/users.sql", `-- @kind: table
+SELECT 1 AS id, 'Alice' AS name
+`)
+	runModel(t, p, "staging/users.sql")
+
+	runner := execute.NewRunner(p.Sess, execute.ModeRun, dag.GenerateRunID())
+
+	// Existing table → (true, nil). The catalog alias must match what
+	// catalog.sql attached the lake as ("lake" per testutil.NewProject).
+	exists, err := runner.TableExistsInCatalog("staging.users", "lake")
+	if err != nil {
+		t.Fatalf("existing table: unexpected error: %v", err)
+	}
+	if !exists {
+		t.Error("existing table: want exists=true")
+	}
+
+	// Missing table → (false, nil)
+	exists, err = runner.TableExistsInCatalog("staging.does_not_exist", "lake")
+	if err != nil {
+		t.Fatalf("missing table: unexpected error: %v", err)
+	}
+	if exists {
+		t.Error("missing table: want exists=false")
+	}
+
+	// Unqualified target (no schema separator) → (false, nil) — these
+	// resolve via search_path and don't need explicit qualification.
+	exists, err = runner.TableExistsInCatalog("no_separator", "lake")
+	if err != nil {
+		t.Fatalf("unqualified: unexpected error: %v", err)
+	}
+	if exists {
+		t.Error("unqualified: want exists=false")
+	}
+
+	// Closed session → must surface the error, NOT collapse to (false, nil).
+	// This is the regression contract: the previous bool-only signature
+	// silently mis-classified this case as "table missing".
+	closedSess, sErr := duckdb.NewSession(":memory:")
+	if sErr != nil {
+		t.Fatalf("new session: %v", sErr)
+	}
+	closedSess.Close()
+	closedRunner := execute.NewRunner(closedSess, execute.ModeRun, dag.GenerateRunID())
+
+	exists, err = closedRunner.TableExistsInCatalog("staging.users", "lake")
+	if err == nil {
+		t.Fatal("closed session: expected error, got nil")
+	}
+	if exists {
+		t.Errorf("closed session: want exists=false on error, got true")
+	}
+	if !strings.Contains(err.Error(), "staging.users") {
+		t.Errorf("closed session: error should name the table, got: %v", err)
+	}
 }
 
 func TestRun_TableKind(t *testing.T) {

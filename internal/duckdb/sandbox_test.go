@@ -79,6 +79,62 @@ func TestInitSandbox(t *testing.T) {
 	}
 }
 
+// TestInitSandbox_SetOptionFailurePropagates is a regression test for the
+// silently-swallowed error on the data_inlining disable call inside
+// InitSandbox. The fix changed `s.Exec(...)` (return value ignored) to
+// `if err := s.Exec(...); err != nil { return ... }`.
+//
+// We pin the contract by swapping the option name for one that DuckLake
+// rejects ("Not implemented Error: Unsupported option"), which makes the
+// underlying Exec return an error. InitSandbox MUST surface that error
+// instead of silently proceeding with inlining still enabled — the whole
+// reason the workaround exists is that ALTER + inlined data corrupts the
+// sandbox catalog (see ducklake-inlined-data-alter-bug.md).
+func TestInitSandbox_SetOptionFailurePropagates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+
+	prodCatalogPath := filepath.Join(dir, "prod_ducklake.sqlite")
+	prodDataPath := filepath.Join(dir, "prod_data")
+	prodConnStr := "ducklake:sqlite:" + prodCatalogPath
+
+	// Materialize the prod catalog so the sandbox attach succeeds.
+	setupSess, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatalf("create setup session: %v", err)
+	}
+	if err := setupSess.Exec("ATTACH 'ducklake:sqlite:" + prodCatalogPath + "' AS lake (DATA_PATH '" + prodDataPath + "')"); err != nil {
+		setupSess.Close()
+		t.Fatalf("create prod catalog: %v", err)
+	}
+	setupSess.Close()
+
+	// Swap the option name for one DuckLake rejects. The defer ensures
+	// the global is restored even if t.Fatal short-circuits the test.
+	originalOption := sandboxDataInliningOptionName
+	sandboxDataInliningOptionName = "definitely_not_a_real_option_xyz"
+	defer func() { sandboxDataInliningOptionName = originalOption }()
+
+	sandboxCatalog := filepath.Join(dir, "sandbox_ducklake.sqlite")
+	sess, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+
+	err = sess.InitSandbox(configDir, prodConnStr, prodDataPath, sandboxCatalog, "lake")
+	if err == nil {
+		t.Fatal("InitSandbox: expected error from rejected set_option, got nil — the data inlining disable error is being silently swallowed (regression of the v0.11.x sandbox fix)")
+	}
+	if !strings.Contains(err.Error(), "data inlining") {
+		t.Errorf("InitSandbox error should be wrapped with 'data inlining' context, got: %v", err)
+	}
+}
+
 func TestQueryPrint_Markdown(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")

@@ -141,8 +141,15 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 
 	// In sandbox mode, force backfill if target table doesn't exist in sandbox.
 	// TRUNCATE + INSERT and incremental operations require the table to exist.
+	// A transient information_schema error here used to be silently treated as
+	// "table missing" and forced an unintended backfill on tables that actually
+	// had data. Now we surface the error instead.
 	if !isBackfill && r.sess.ProdAlias() != "" {
-		if !r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias()) {
+		exists, existsErr := r.tableExistsInCatalog(model.Target, r.sess.CatalogAlias())
+		if existsErr != nil {
+			return 0, existsErr
+		}
+		if !exists {
 			isBackfill = true
 		}
 	}

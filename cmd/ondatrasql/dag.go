@@ -41,6 +41,12 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 				return fmt.Errorf("create sandbox: %w", err)
 			}
 		}
+		// Defer cleanup so the sandbox directory is removed on every exit
+		// path — including failures during InitSandbox or model execution.
+		// Without this, a failed run leaves a stale .sandbox/ behind that
+		// the next run would silently reuse instead of starting fresh.
+		// Defers are LIFO, so this runs AFTER the sess.Close() defer below.
+		defer os.RemoveAll(sandboxDir)
 	}
 
 	// Generate a single dag_run_id for the entire DAG run
@@ -139,10 +145,6 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		printEmptyLine()
 		showDagSandboxSummary(sess, sortedModels, failedTargets)
 		printBottomBorder()
-
-		// Cleanup sandbox
-		sess.Close()
-		os.RemoveAll(sandboxDir)
 	}
 
 	if failed > 0 {

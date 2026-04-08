@@ -24,6 +24,13 @@ import (
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
+// sandboxDataInliningOptionName is the DuckLake catalog option that disables
+// row-level data inlining on the sandbox catalog. Held as a var (not a const)
+// so a regression test can swap it for a known-bad value to verify that the
+// error from CALL sandbox.set_option(...) is propagated rather than swallowed.
+// Production code paths must NOT mutate this.
+var sandboxDataInliningOptionName = "data_inlining_row_limit"
+
 // Session represents an embedded DuckDB connection.
 type Session struct {
 	db           *sql.DB
@@ -910,8 +917,16 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 	s.prodAlias = prodAlias
 	sqlfiles.SetCatalogAlias("sandbox")
 
-	// Disable data inlining on sandbox catalog (workaround for DuckLake ALTER + inlined data bug)
-	s.Exec("CALL sandbox.set_option('data_inlining_row_limit', 0)")
+	// Disable data inlining on sandbox catalog (workaround for DuckLake ALTER + inlined data bug).
+	// Failing here is not silently recoverable: with inlining still on, schema-evolution
+	// scenarios on sandbox tables can corrupt state. See ducklake-inlined-data-alter-bug.md.
+	//
+	// The option name is held in a package var (not a literal) so a regression
+	// test can swap it for a known-bad value and verify the error path is wired
+	// up. Production code paths never mutate it.
+	if err := s.Exec(fmt.Sprintf("CALL sandbox.set_option('%s', 0)", sandboxDataInliningOptionName)); err != nil {
+		return fmt.Errorf("disable sandbox data inlining: %w", err)
+	}
 
 	// CDC macros (in memory context, DuckLake doesn't support CREATE MACRO)
 	if cdcMacros, err := sqlfiles.Load("macros/cdc.sql"); err == nil {
