@@ -651,6 +651,60 @@ func TestAuditsToBatchSQL(t *testing.T) {
 	}
 }
 
+// AuditsToTransactionalSQL must wrap the batch in a CTE that calls
+// error() if any audit message survives the WHERE filter. This is the
+// shape required to abort an enclosing BEGIN/COMMIT atomically when an
+// audit fails — without it, audits would only return error rows that
+// can't roll back the surrounding transaction.
+func TestAuditsToTransactionalSQL(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty directives produce empty SQL", func(t *testing.T) {
+		t.Parallel()
+		sql, errs := AuditsToTransactionalSQL(nil, "staging.orders", "", 0)
+		if sql != "" || len(errs) != 0 {
+			t.Errorf("expected empty SQL and no errors, got %q / %v", sql, errs)
+		}
+	})
+
+	t.Run("wraps batch in CTE with error() call", func(t *testing.T) {
+		t.Parallel()
+		sql, errs := AuditsToTransactionalSQL(
+			[]string{"row_count >= 1", "min(amount) >= 0"},
+			"staging.orders", "", 0,
+		)
+		if len(errs) != 0 {
+			t.Fatalf("unexpected parse errors: %v", errs)
+		}
+		// Must include the structural pieces that make abort-on-failure work.
+		mustContain := []string{
+			"WITH audit_failures AS",
+			"string_agg(audit_msg",
+			"audit_msg IS NOT NULL",
+			"SELECT error('audit failed: ' || msg)",
+			"FROM audit_failures",
+			"WHERE msg IS NOT NULL",
+			"UNION ALL", // batch SQL still embedded
+		}
+		for _, s := range mustContain {
+			if !strings.Contains(sql, s) {
+				t.Errorf("transactional SQL missing %q\nFull SQL:\n%s", s, sql)
+			}
+		}
+	})
+
+	t.Run("propagates parse errors from underlying batch builder", func(t *testing.T) {
+		t.Parallel()
+		_, errs := AuditsToTransactionalSQL(
+			[]string{"this is not a valid audit", "row_count >= 1"},
+			"staging.orders", "", 0,
+		)
+		if len(errs) == 0 {
+			t.Error("expected parse error to propagate from AuditsToBatchSQL")
+		}
+	})
+}
+
 func TestAuditToSQL_MixedCasePreservesLiterals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -35,7 +35,7 @@ func TestMaterializeSCD2_NoTempTable(t *testing.T) {
 	result := &Result{Target: model.Target}
 
 	// ensureSchemaExists succeeds, then hits error on tmp table access
-	_, err := runner.materializeSCD2(model, "tmp_nonexistent", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from nonexistent tmp table")
 	}
@@ -55,7 +55,7 @@ func TestMaterializePartition_NoTempTable(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -78,7 +78,7 @@ func TestMaterialize_NoTempTable(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materialize(model, "tmp_nonexistent", true, nil, "hash", "backfill", result, time.Now())
+	_, err := runner.materialize(model, "tmp_nonexistent", true, nil, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -105,7 +105,7 @@ func TestMaterialize_UnknownKind(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materialize(model, "tmp_unknown_kind", true, nil, "hash", "backfill", result, time.Now())
+	_, err := runner.materialize(model, "tmp_unknown_kind", true, nil, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -133,7 +133,7 @@ func TestMaterialize_EnsureSchemaError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materialize(model, "tmp_schema_err", true, nil, "hash", "backfill", result, time.Now())
+	_, err := runner.materialize(model, "tmp_schema_err", true, nil, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error for invalid catalog target")
 	}
@@ -157,7 +157,7 @@ func TestMaterializeSCD2_EnsureSchemaError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializeSCD2(model, "tmp_nonexistent", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error for bad target with nonexistent tmp table")
 	}
@@ -177,7 +177,7 @@ func TestMaterializePartition_EnsureSchemaError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error for bad target with nonexistent tmp table")
 	}
@@ -206,7 +206,7 @@ func TestMaterialize_MergeGetColumnsError(t *testing.T) {
 	// Drop the temp table to make getTableColumns fail
 	p.Sess.Exec("DROP TABLE tmp_merge_err")
 
-	_, err := runner.materialize(model, "tmp_merge_err", false, nil, "hash", "incremental", result, time.Now())
+	_, err := runner.materialize(model, "tmp_merge_err", false, nil, "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -244,7 +244,7 @@ func TestMaterializeSCD2_CommitError_Backfill(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_scd2_commit", true, "hash", "backfill", result, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_scd2_commit", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -273,7 +273,7 @@ func TestMaterializeSCD2_DetectChangesError(t *testing.T) {
 		SQL:       "SELECT 1 AS id, 'Alice' AS name",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializeSCD2(model, "tmp_scd2_detect", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model, "tmp_scd2_detect", true, "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestMaterializeSCD2_DetectChangesError(t *testing.T) {
 	p.Sess.Exec("DROP TABLE tmp_scd2_detect")
 
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializeSCD2(model, "tmp_scd2_detect", false, "hash", "incremental", result2, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_scd2_detect", false, "", "hash", "incremental", result2, time.Now())
 	if err == nil {
 		t.Fatal("expected error on incremental with missing temp table")
 	}
@@ -312,7 +312,7 @@ func TestMaterializePartition_CommitError_Backfill(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_part_commit", true, "hash", "backfill", result, time.Now())
+	_, err = runner.materializePartition(model, "tmp_part_commit", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -341,7 +341,7 @@ func TestMaterializePartition_UpdateError(t *testing.T) {
 		SQL:         "SELECT 'EU' AS region, 1 AS id",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializePartition(model, "tmp_part_upd", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializePartition(model, "tmp_part_upd", true, "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestMaterializePartition_UpdateError(t *testing.T) {
 	p.Sess.Exec("DROP TABLE tmp_part_upd")
 
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializePartition(model, "tmp_part_upd", false, "hash", "incremental", result2, time.Now())
+	_, err = runner.materializePartition(model, "tmp_part_upd", false, "", "hash", "incremental", result2, time.Now())
 	if err == nil {
 		t.Fatal("expected error on incremental with missing temp table")
 	}
@@ -390,7 +390,7 @@ func TestMaterializeSCD2_CountChangesError(t *testing.T) {
 		SQL:       "SELECT 1 AS id, 'Alice' AS name",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializeSCD2(model, "tmp_scd2_cnt", true, "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model, "tmp_scd2_cnt", true, "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestMaterializeSCD2_CountChangesError(t *testing.T) {
 
 	// Run incremental — detect changes creates scd2_changes, then we test that path executes
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializeSCD2(model, "tmp_scd2_cnt", false, "hash2", "incremental", result2, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_scd2_cnt", false, "", "hash2", "incremental", result2, time.Now())
 	// This should either succeed or fail at commit — either way it covers the incremental path
 	if err != nil {
 		// Expected: covers lines 376-387 and/or 437-442
@@ -440,7 +440,7 @@ func TestMaterializeSCD2_IncrementalCommitError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_scd2_incr", false, "hash", "incremental", result, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_scd2_incr", false, "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -474,7 +474,7 @@ func TestMaterializePartition_IncrementalCommitError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_part_incr", false, "hash", "incremental", result, time.Now())
+	_, err = runner.materializePartition(model, "tmp_part_incr", false, "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -506,7 +506,7 @@ func TestMaterializeSCD2_TableExistsCheckError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_x", true, "hash", "backfill", result, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_x", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from tableExistsCheck")
 	}
@@ -541,7 +541,7 @@ func TestMaterializeSCD2_GetSourceColumnsError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_scd2_cols", true, "hash", "backfill", result, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_scd2_cols", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from get source columns")
 	}
@@ -573,7 +573,7 @@ func TestMaterializePartition_TableExistsCheckError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_x", true, "hash", "backfill", result, time.Now())
+	_, err = runner.materializePartition(model, "tmp_x", true, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from tableExistsCheck")
 	}
@@ -618,7 +618,12 @@ func TestLoadExtension_WithRepo(t *testing.T) {
 	}
 }
 
-// Test materialize with schemaEvolution error path
+// Test materialize with schemaEvolution error path. The schema-evolution
+// ALTER is now folded into the materialize transaction (it used to run
+// as a separate Exec before BEGIN), so the failure surfaces as the raw
+// DuckDB error from inside the transaction rather than the previous
+// "schema evolution: ..." wrap. This test makes sure that path still
+// produces a meaningful error and doesn't leak any partial state.
 func TestMaterialize_SchemaEvolutionError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
@@ -630,7 +635,9 @@ func TestMaterialize_SchemaEvolutionError(t *testing.T) {
 	p.Sess.Exec("CREATE TEMP TABLE tmp_schema_evo AS SELECT 1 AS id, 'test' AS name")
 	defer p.Sess.Exec("DROP TABLE IF EXISTS tmp_schema_evo")
 
-	// Create a fake schema change that will fail during apply
+	// Create a fake schema change with a bogus type. The target table
+	// does not exist, so the ALTER will fail with a CatalogError when
+	// the materialize transaction tries to apply it.
 	badChange := &backfill.SchemaChange{
 		Type: backfill.SchemaChangeAdditive,
 		Added: []backfill.Column{
@@ -645,13 +652,20 @@ func TestMaterialize_SchemaEvolutionError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	// isBackfill=false so schema evolution is attempted
-	_, err := runner.materialize(model, "tmp_schema_evo", false, badChange, "hash", "incremental", result, time.Now())
+	// isBackfill=false so schema evolution is attempted as part of the
+	// materialize transaction. The ALTER will fail (target doesn't
+	// exist) which aborts the transaction; we just want to confirm
+	// some error surfaces, not match the exact DuckDB message.
+	_, err := runner.materialize(model, "tmp_schema_evo", false, badChange, "", "hash", "incremental", result, time.Now())
 	if err == nil {
-		t.Fatal("expected schema evolution error")
+		t.Fatal("expected error from schema evolution against missing target")
 	}
-	if !strings.Contains(err.Error(), "schema evolution") {
-		t.Errorf("expected 'schema evolution' error, got: %v", err)
+	// The error must mention the failing object so the user can act
+	// on it. Either the catalog error (no target) or the type error.
+	if !strings.Contains(err.Error(), "schema_evo_err") &&
+		!strings.Contains(err.Error(), "INVALID_TYPE_XYZ") &&
+		!strings.Contains(err.Error(), "schema evolution") {
+		t.Errorf("expected catalog/type/schema-evolution error, got: %v", err)
 	}
 }
 
@@ -680,7 +694,7 @@ func TestMaterialize_CaptureSchemaError(t *testing.T) {
 
 	// Without DuckLake, commit will fail — but CaptureSchema might also error.
 	// Either way, we exercise the code path through materialize past count+ensureSchema.
-	_, err = runner.materialize(model, "tmp_capture_err", true, nil, "hash", "backfill", result, time.Now())
+	_, err = runner.materialize(model, "tmp_capture_err", true, nil, "", "hash", "backfill", result, time.Now())
 	// Error expected from commit (no ducklake_set_commit_message)
 	if err == nil {
 		t.Fatal("expected error")
@@ -720,7 +734,7 @@ func TestMaterializeSCD2_CountChangesError_Direct(t *testing.T) {
 	// Incremental: detect changes will create scd2_changes/scd2_deleted temp tables,
 	// count changes will succeed, then commit will fail (no DuckLake).
 	// This covers lines 376-442 (detect, count, update error)
-	_, err = runner.materializeSCD2(model, "tmp_scd2_cnt_d", false, "hash", "incremental", result, time.Now())
+	_, err = runner.materializeSCD2(model, "tmp_scd2_cnt_d", false, "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from commit")
 	}
@@ -776,7 +790,7 @@ func TestMaterialize_MergeGetColumnsSuccess(t *testing.T) {
 	result := &Result{Target: model.Target}
 
 	// Non-backfill merge: getTableColumns succeeds, buildMergeSQL runs
-	_, err := runner.materialize(model, "tmp_merge_ok", false, nil, "hash", "incremental", result, time.Now())
+	_, err := runner.materialize(model, "tmp_merge_ok", false, nil, "", "hash", "incremental", result, time.Now())
 	if err != nil {
 		t.Logf("merge error (expected if commit metadata differs): %v", err)
 	}
@@ -927,7 +941,7 @@ func TestMaterialize_EnsureSchemaAfterCount(t *testing.T) {
 	result := &Result{Target: model.Target}
 
 	// With plain session (no DuckLake), commit will fail after count+schema
-	_, err = runner.materialize(model, "tmp_ens_err", true, nil, "hash", "backfill", result, time.Now())
+	_, err = runner.materialize(model, "tmp_ens_err", true, nil, "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}

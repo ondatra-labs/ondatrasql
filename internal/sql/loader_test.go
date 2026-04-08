@@ -45,7 +45,10 @@ func TestSetCatalogAliasIgnoresEmpty(t *testing.T) {
 func TestMustFormatAppliesArgs(t *testing.T) {
 	SetCatalogAlias("lake")
 
-	result := MustFormat("execute/commit.sql", "INSERT INTO t VALUES (1)", "schema.table", "{}")
+	// commit.sql now takes four substitution slots:
+	//   1. main SQL, 2. pre-commit checks (audit error() wrapper or empty),
+	//   3. model target, 4. extra info JSON.
+	result := MustFormat("execute/commit.sql", "INSERT INTO t VALUES (1)", "", "schema.table", "{}")
 	if !strings.Contains(result, "INSERT INTO t VALUES (1)") {
 		t.Error("SQL not interpolated")
 	}

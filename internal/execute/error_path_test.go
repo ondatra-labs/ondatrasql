@@ -152,7 +152,7 @@ func TestRapid_Materialize_ClosedSession(t *testing.T) {
 		model := genErrModel().Draw(rt, "model")
 		result := &Result{Target: model.Target}
 
-		_, err := runner.materialize(model, "tmp_nonexistent", true, nil, "hash", "backfill", result, time.Now())
+		_, err := runner.materialize(model, "tmp_nonexistent", true, nil, "", "hash", "backfill", result, time.Now())
 		if err == nil {
 			rt.Fatalf("expected error for kind=%q on closed session", model.Kind)
 		}
@@ -174,7 +174,7 @@ func TestRapid_MaterializeSCD2_ClosedSession(t *testing.T) {
 		model := &parser.Model{Target: target, Kind: "scd2", UniqueKey: uk, SQL: "SELECT 1 AS id"}
 		result := &Result{Target: target}
 
-		_, err := runner.materializeSCD2(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "hash", "backfill", result, time.Now())
+		_, err := runner.materializeSCD2(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "hash", "backfill", result, time.Now())
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}
@@ -196,7 +196,7 @@ func TestRapid_MaterializePartition_ClosedSession(t *testing.T) {
 		model := &parser.Model{Target: target, Kind: "partition", UniqueKey: partCol, SQL: "SELECT 1 AS id"}
 		result := &Result{Target: target}
 
-		_, err := runner.materializePartition(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "hash", "backfill", result, time.Now())
+		_, err := runner.materializePartition(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "hash", "backfill", result, time.Now())
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}

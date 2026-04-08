@@ -58,13 +58,21 @@ func TestEmbeddedSQL_AllExecuteTemplatesValid(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE lake.staging.dummy (id INTEGER, name VARCHAR, amount INTEGER)")
 	mustExec(t, db, "INSERT INTO lake.staging.dummy VALUES (1, 'test', 100)")
 
-	// Define dummy arguments for each template
+	// Define dummy arguments for each template.
+	// commit.sql now takes 4 substitution slots:
+	//   1. main SQL
+	//   2. pre-commit checks (audit error() wrapper or empty)
+	//   3. model target (commit message)
+	//   4. extra info JSON
+	// partition_delete.sql adds a pre-commit-checks slot in the same
+	// position so partition incremental runs can fold in the audit
+	// transactional check identically to the generic commit.sql path.
 	templates := map[string][]any{
 		"table.sql":            {`lake.staging.dummy`, `(SELECT 1 AS id, 'x' AS name, 0 AS amount)`},
 		"append.sql":           {`lake.staging.dummy`, `(SELECT 2 AS id, 'y' AS name, 0 AS amount)`},
 		"merge.sql":            {`lake.staging.dummy`, `(SELECT 1 AS id, 'updated' AS name, 200 AS amount)`, `"id"`, `"id"`, `SET "name" = source."name", "amount" = source."amount"`},
-		"commit.sql":           {`SELECT 1`, `staging.dummy`, `{"model":"staging.dummy"}`},
-		"partition_delete.sql": {`lake.staging.dummy`, `"amount"`, `"amount"`, `(SELECT 1 AS id, 'z' AS name, 100 AS amount)`, `lake.staging.dummy`, `(SELECT 1 AS id, 'z' AS name, 100 AS amount)`, `staging.dummy`, `{"model":"staging.dummy"}`},
+		"commit.sql":           {`SELECT 1`, ``, `staging.dummy`, `{"model":"staging.dummy"}`},
+		"partition_delete.sql": {`lake.staging.dummy`, `"amount"`, `"amount"`, `(SELECT 1 AS id, 'z' AS name, 100 AS amount)`, `lake.staging.dummy`, `(SELECT 1 AS id, 'z' AS name, 100 AS amount)`, ``, `staging.dummy`, `{"model":"staging.dummy"}`},
 	}
 
 	executeFiles := listEmbedded(t, "execute")

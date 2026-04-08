@@ -111,26 +111,25 @@ func TestRun_AuditFailure_TriggersRollback(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
-	// Create a model with an audit that will always fail: row_count = 0
-	// First run: establishes the table (audits run post-INSERT)
+	// `row_count = 0` will always fail when we INSERT a row. With the
+	// transactional audit refactor, the failure surfaces as a DuckDB
+	// error() call inside the materialize BEGIN/COMMIT, which aborts
+	// the whole transaction atomically — no separate rollback() helper.
 	p.AddModel("staging/audited.sql", `-- @kind: table
 -- @audit: row_count = 0
 SELECT 1 AS id, 100 AS amount
 `)
 	result, err := runModelErr(t, p, "staging/audited.sql")
-	// The audit "row_count = 0" checks that the table has exactly 0 rows after insert
-	// Since we inserted 1 row, the audit should fail and trigger rollback
-	if err != nil {
-		if strings.Contains(err.Error(), "audit validation failed") {
-			// This is expected — audit failed, rollback was triggered
-			return
-		}
+	if err == nil {
+		t.Fatal("expected materialize error from failing audit")
 	}
-	// If audit didn't fail, the row_count check might have different semantics
-	if result != nil && len(result.Errors) > 0 {
-		return // Errors present — audit path was hit
+	// Error wraps the DuckDB error() output, which contains "audit failed:".
+	if !strings.Contains(err.Error(), "audit failed") {
+		t.Errorf("expected 'audit failed' in error, got: %v", err)
 	}
-	t.Log("audit row_count = 0 did not trigger failure (audit semantics may differ)")
+	if result == nil || len(result.Errors) == 0 {
+		t.Error("expected result.Errors to contain the audit failure message")
+	}
 }
 
 // --- Run with failing constraint ---
@@ -221,22 +220,26 @@ func TestRun_AuditFailure_RollbackError(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
-	// Use row_count < 0 audit which always fails
+	// `row_count < 0` is always false → audit row count will always be
+	// greater-than-or-equal-to zero, so the inverted `< 0` check fails
+	// for any inserted row. This exercises the in-transaction error()
+	// abort path: a row count of 1 trips the check, the SELECT error()
+	// fires inside BEGIN/COMMIT, the transaction rolls back, and the
+	// caller surfaces an error containing "audit failed".
 	p.AddModel("staging/audit_rollback.sql", `-- @kind: table
 -- @audit: row_count < 0
 SELECT 1 AS id
 `)
 	result, err := runModelErr(t, p, "staging/audit_rollback.sql")
-	if err != nil {
-		if strings.Contains(err.Error(), "audit validation failed") {
-			// Covers the audit error + rollback path (lines 444-464)
-			return
-		}
+	if err == nil {
+		t.Fatal("expected materialize error from failing audit")
 	}
-	if result != nil && len(result.Errors) > 0 {
-		return
+	if !strings.Contains(err.Error(), "audit failed") {
+		t.Errorf("expected 'audit failed' in error, got: %v", err)
 	}
-	t.Log("audit did not fail as expected")
+	if result == nil || len(result.Errors) == 0 {
+		t.Error("expected result.Errors to contain the audit failure message")
+	}
 }
 
 // --- Merge incremental with getTableColumns (covers merge non-backfill path) ---
@@ -583,22 +586,24 @@ func TestRun_Script_AuditFailure(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
+	// `row_count < 0` is always false → with one inserted row the
+	// audit fires and the materialize transaction aborts. The script
+	// path goes through script.go's runScript which uses the same
+	// audit-inside-transaction mechanism as the SQL path.
 	p.AddModel("staging/script_audit.star", `# @kind: table
 # @audit: row_count < 0
 save.row({"id": 1, "val": "test"})
 `)
 	result, err := runModelErr(t, p, "staging/script_audit.star")
-	if err != nil {
-		if strings.Contains(err.Error(), "audit validation failed") {
-			// Covers audit error + rollback path in runScript
-			return
-		}
-		t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected materialize error from failing audit")
 	}
-	if result != nil && len(result.Errors) > 0 {
-		return
+	if !strings.Contains(err.Error(), "audit failed") {
+		t.Errorf("expected 'audit failed' in error, got: %v", err)
 	}
-	t.Log("audit did not trigger failure")
+	if result == nil || len(result.Errors) == 0 {
+		t.Error("expected result.Errors to contain the audit failure")
+	}
 }
 
 // --- Starlark script with materialize error (covers script.go:226-229) ---

@@ -83,10 +83,20 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 }
 
 // materialize creates the target table from the temp table.
-// It runs the CREATE/INSERT and commit metadata in a single transaction.
-// If schemaChange is provided, it applies schema evolution (ALTER TABLE) before INSERT.
-// Optional extraPreSQL statements are prepended to the transaction (e.g. ack inserts).
-func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bool, schemaChange *backfill.SchemaChange, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
+// It runs the CREATE/INSERT, audits, and commit metadata in a single
+// transaction. If schemaChange is provided, schema evolution (ALTER
+// TABLE) is included in the same transaction so a failing audit rolls
+// it back together with the data write.
+//
+// auditSQL is the pre-rendered transactional audit check produced by
+// validation.AuditsToTransactionalSQL — empty string when the model
+// has no audits. The caller is responsible for handling parse errors
+// before calling materialize, so this function trusts auditSQL is
+// well-formed (or empty).
+//
+// Optional extraPreSQL statements are prepended to the transaction
+// (e.g. ack inserts for Starlark scripts).
+func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bool, schemaChange *backfill.SchemaChange, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
 	// Get row count from temp table first
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable)
 	countResult, err := r.sess.QueryValue(countSQL)
@@ -105,21 +115,27 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	}
 
 	// Apply schema evolution if needed (before any materialization).
-	// Must happen before SCD2/tracked/partition dispatch since their change
-	// detection compares temp table columns against the target table.
-	// Schema evolution SQL is built here but applied inside the data transaction
-	// for table/append/merge kinds (DuckLake requires ALTER + INSERT in same txn).
-	// For SCD2/tracked/partition, applied immediately since their change detection
-	// needs the updated schema before building comparison queries.
+	//
+	// For SCD2/tracked/partition the ALTER must be applied immediately so
+	// their change-detection queries (which compare temp-table columns
+	// against the target table) see the updated target schema before they
+	// build the diff SQL. Each of those code paths runs its own audit
+	// inside its own commit transaction, so the early-apply ALTER is
+	// not part of the audit-rollback envelope for those kinds.
+	//
+	// For table/append/merge the ALTER is folded into the materialize
+	// transaction (prepended to mainSQL below), so a failing audit also
+	// rolls back the schema change. DuckLake supports DDL inside an
+	// explicit transaction:
+	//   https://ducklake.select/docs/stable/duckdb/advanced_features/transactions
 	var schemaEvolutionSQL string
 	if schemaChange != nil && !isBackfill {
 		schemaEvolutionSQL = r.buildSchemaEvolutionSQL(model.Target, *schemaChange)
-		// SCD2/tracked/partition need schema applied before change detection
 		if model.Kind == "scd2" || model.Kind == "tracked" || model.Kind == "partition" {
 			if err := r.sess.Exec(schemaEvolutionSQL); err != nil {
 				return 0, fmt.Errorf("schema evolution: %w", err)
 			}
-			schemaEvolutionSQL = "" // already applied
+			schemaEvolutionSQL = "" // already applied; do not duplicate
 		}
 	}
 
@@ -204,7 +220,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// SCD2 handles its own transaction - return early
-		return r.materializeSCD2(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
+		return r.materializeSCD2(model, tmpTable, isBackfill, auditSQL, sqlHash, runType, result, startTime)
 
 	case "partition":
 		if model.UniqueKey == "" {
@@ -219,7 +235,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// Partition handles its own transaction - return early
-		return r.materializePartition(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
+		return r.materializePartition(model, tmpTable, isBackfill, auditSQL, sqlHash, runType, result, startTime)
 
 	case "tracked":
 		if model.UniqueKey == "" {
@@ -234,7 +250,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// Tracked handles its own transaction - return early
-		return r.materializeTracked(model, tmpTable, isBackfill, sqlHash, runType, result, startTime)
+		return r.materializeTracked(model, tmpTable, isBackfill, auditSQL, sqlHash, runType, result, startTime)
 
 	default:
 		return 0, fmt.Errorf("unknown kind: %s", model.Kind)
@@ -302,11 +318,18 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	extraInfo := string(jsonBytes)
 	r.trace(result, "meta.json_serialize", stepStart, "ok")
 
-	// Prepend extra SQL (e.g. ack inserts) and registry upsert to main SQL (within same transaction)
+	// Build the materialize transaction body. Order:
+	//   1. schema evolution (ALTER TABLE …)        ← inside the txn
+	//   2. extraPreSQL (e.g. Starlark ack inserts)
+	//   3. registry upsert
+	//   4. mainSQL (TRUNCATE/INSERT/MERGE)
+	// Audits get inserted between (4) and set_commit_message via the
+	// commit.sql template's pre-commit-checks slot, so a failing audit
+	// raises error() and rolls back everything from (1) through (4).
 	var preParts []string
-	// Schema evolution (ALTER TABLE) goes BEFORE the BEGIN in the final SQL string.
-	// ALTER is auto-commit DDL in DuckLake — it creates its own snapshot.
-	// Placing it before BEGIN ensures the data transaction sees the updated schema.
+	if schemaEvolutionSQL != "" {
+		preParts = append(preParts, schemaEvolutionSQL)
+	}
 	for _, extra := range extraPreSQL {
 		if extra != "" {
 			preParts = append(preParts, extra)
@@ -317,18 +340,11 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	preParts = append(preParts, registrySQL)
 	mainSQL = strings.Join(preParts, ";\n") + ";\n" + mainSQL
 
-	// Execute everything in a single transaction
-	// Schema evolution (ALTER) is prepended BEFORE BEGIN since it's auto-commit DDL
-	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
-	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(extraInfo))
-	if schemaEvolutionSQL != "" {
-		// Schema evolution must be applied separately and committed before data transaction.
-		// DuckLake ALTER is auto-commit DDL, but inlined data tables are keyed by the
-		// ALTER snapshot. Running them in the same Exec confuses the data file mapping.
-		if err := r.sess.Exec(schemaEvolutionSQL); err != nil {
-			return 0, fmt.Errorf("schema evolution: %w", err)
-		}
-	}
+	// Execute everything in a single transaction. The commit.sql template's
+	// pre-commit-checks slot folds in the audit error() wrapper so a failing
+	// audit aborts the whole BEGIN/COMMIT atomically.
+	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes.
+	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(extraInfo))
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {
@@ -498,7 +514,7 @@ func (r *Runner) reverseSchemaEvolution(target string, change backfill.SchemaCha
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
 // On subsequent runs, closes old versions and inserts new versions for changed/new rows.
-func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
 	uk := duckdb.QuoteIdentifier(model.UniqueKey)
 	ukRaw := model.UniqueKey
 
@@ -595,7 +611,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 
 		// Execute in transaction
 		// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
-		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, model.Target, escapeSQL(extraInfo))
+		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, auditSQL, model.Target, escapeSQL(extraInfo))
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -644,7 +660,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		mainSQL := fmt.Sprintf(
 			"TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT %s, %d::BIGINT AS valid_from_snapshot, CAST(NULL AS BIGINT) AS valid_to_snapshot, true AS is_current FROM %s",
 			model.Target, model.Target, colList, currSnapshot, tmpTable)
-		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -741,13 +757,16 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 
 	// Step 3: Close old versions (changed + deleted)
 	// Step 4: Insert new versions (new + changed)
-	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
+	// auditSQL is folded in just before set_commit_message so a failing
+	// audit aborts the SCD2 update atomically (same guarantee as the
+	// generic commit.sql template).
+	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes.
 	txnSQL := sql.MustFormat("execute/scd2_update.sql",
 		escapeSQL(model.Target), escapeSQL(model.Target),
 		model.Target, currSnapshot-1, uk, uk,
 		model.Target, currSnapshot-1, uk, uk,
 		model.Target, colList, colList, currSnapshot,
-		model.Target, escapeSQL(extraInfo))
+		auditSQL, model.Target, escapeSQL(extraInfo))
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {
@@ -771,7 +790,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 // Partition tables replace entire partitions (DELETE + INSERT) instead of row-by-row upserts.
 // On first run (isBackfill=true or table doesn't exist), creates the table.
 // On subsequent runs, deletes matching partitions and inserts new data.
-func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBackfill bool, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBackfill bool, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
 	// Split UniqueKey on comma for partition column list
 	var partitionColList []string
 	for _, col := range strings.Split(model.UniqueKey, ",") {
@@ -849,7 +868,7 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 		createSQL := sql.MustFormat("execute/table.sql", model.Target, tmpTable)
 
 		// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
-		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, model.Target, escapeSQL(extraInfo))
+		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, auditSQL, model.Target, escapeSQL(extraInfo))
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -868,7 +887,7 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain
 		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
 			model.Target, model.Target, tmpTable)
-		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(extraInfo))
+		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(extraInfo))
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -885,11 +904,13 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
 		escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
 
-	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
+	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes.
+	// auditSQL is folded into partition_delete.sql so a failing audit aborts
+	// the DELETE+INSERT atomically (same guarantee as commit.sql for the other kinds).
 	txnSQL := registrySQL + ";\n" + sql.MustFormat("execute/partition_delete.sql",
 		model.Target, partitionCols, partitionCols, tmpTable,
 		model.Target, tmpTable,
-		model.Target, escapeSQL(extraInfo))
+		auditSQL, model.Target, escapeSQL(extraInfo))
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {
@@ -907,7 +928,7 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 // Groups rows by unique_key and computes an md5 hash of all non-key columns per group.
 // On incremental runs, only groups with changed or new hashes are replaced (DELETE + INSERT).
 // The _content_hash column is added automatically, like SCD2's valid_from_snapshot.
-func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
 	uk := duckdb.QuoteIdentifier(model.UniqueKey)
 
 	// Ensure schema exists
@@ -1029,7 +1050,7 @@ FROM %s s JOIN group_hash g ON s.%s = g.%s`,
 		jsonBytes, _ := json.Marshal(info)
 
 		createSQL := sql.MustFormat("execute/table.sql", model.Target, "tracked_hashed")
-		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -1051,7 +1072,7 @@ FROM %s s JOIN group_hash g ON s.%s = g.%s`,
 
 		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM tracked_hashed",
 			model.Target, model.Target)
-		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -1101,7 +1122,7 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 		jsonBytes, _ := json.Marshal(info)
 		registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
 			escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
-		txnSQL := sql.MustFormat("execute/commit.sql", registrySQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := sql.MustFormat("execute/commit.sql", registrySQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 		stepStart = time.Now()
 		r.sess.Exec(txnSQL)
 		r.trace(result, "commit", stepStart, "ok")
@@ -1122,7 +1143,7 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 INSERT INTO %[1]s BY NAME SELECT * FROM tracked_hashed WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes WHERE _action = 'upsert')`,
 		model.Target, uk)
 
-	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, model.Target, escapeSQL(string(jsonBytes)))
+	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {

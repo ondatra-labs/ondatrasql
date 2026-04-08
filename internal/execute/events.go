@@ -351,7 +351,9 @@ func (r *Runner) materializeEvents(model *parser.Model, sqlHash, runType string,
 	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
 		escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
 
-	txnSQL := sqltpl.MustFormat("execute/commit.sql", registrySQL, model.Target, escapeSQL(extraInfo))
+	// Events models do not support audits today (the daemon flush has no
+	// row-level checks defined), so the pre-commit-checks slot is empty.
+	txnSQL := sqltpl.MustFormat("execute/commit.sql", registrySQL, "", model.Target, escapeSQL(extraInfo))
 
 	return result.RowsAffected, r.sess.Exec(txnSQL)
 }

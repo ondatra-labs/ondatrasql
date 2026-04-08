@@ -278,76 +278,69 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		}
 	}
 
-	// Materialize using same logic as SQL models (ack records in same transaction)
+	// Render audits as a transactional pre-commit check (same path as
+	// runner.go's SQL flow). Parse errors abort BEFORE materialize so a
+	// broken @audit directive doesn't waste a Badger ack cycle.
 	stepStart = time.Now()
-	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, scriptHash, result.RunType, result, start, extraPreSQL...)
-	if err != nil {
-		r.trace(result, "materialize", stepStart, "error")
-		if schemaChange != nil {
-			r.reverseSchemaEvolution(model.Target, *schemaChange)
+	auditSQL, auditParseErrors := r.buildAuditSQL(model, prevSnapshot)
+	r.trace(result, "audits.render", stepStart, "ok")
+	if len(auditParseErrors) > 0 {
+		for _, e := range auditParseErrors {
+			result.Errors = append(result.Errors, e.Error())
 		}
 		scriptResult.NackClaims()
 		r.cleanup(tmpTable)
-		return nil, fmt.Errorf("materialize: %w", err)
+		result.Duration = time.Since(start)
+		return result, fmt.Errorf("audit parse errors")
+	}
+
+	// Materialize using same logic as SQL models (ack records in same transaction).
+	// Audits run inside the same BEGIN/COMMIT, so a failing audit aborts
+	// the whole materialize atomically — no separate rollback() needed.
+	stepStart = time.Now()
+	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, scriptHash, result.RunType, result, start, extraPreSQL...)
+	if err != nil {
+		r.trace(result, "materialize", stepStart, "error")
+		// A failed audit raises error() inside the BEGIN/COMMIT, which
+		// aborts the transaction but leaves the session in an aborted
+		// state — explicit ROLLBACK clears it so the next model in the
+		// same batch can start its own transaction. Best-effort.
+		r.sess.Exec("ROLLBACK")
+
+		// Badger claim handling differs by failure cause:
+		//
+		//   * Audit failure → ACK the claims. The script's data was
+		//     valid output; only the materialize result was reverted
+		//     by the transaction abort. Re-running the script would
+		//     re-fetch fresh events from the source via the script's
+		//     incremental cursor logic, so we mark the consumed
+		//     batch as "done" to avoid double-processing on retry.
+		//
+		//   * Other materialize errors (DDL/DML bug, transient I/O,
+		//     constraint violation surfacing during INSERT) → NACK
+		//     the claims. The script output never reached the target
+		//     in any meaningful way, and the next run should retry
+		//     with the same buffered events.
+		//
+		// We discriminate on the error message because the audit
+		// failure path is the only one that goes through DuckDB's
+		// `error('audit failed: …')` scalar inside the transaction.
+		if strings.Contains(err.Error(), "audit failed") {
+			if ackErr := scriptResult.AckClaims(); ackErr != nil {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("ack after audit failure: %v", ackErr))
+			}
+		} else {
+			scriptResult.NackClaims()
+		}
+
+		result.Errors = append(result.Errors, err.Error())
+		r.cleanup(tmpTable)
+		result.Duration = time.Since(start)
+		return result, fmt.Errorf("materialize: %w", err)
 	}
 	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
-
-	// Run audits (batched - single query for all audits).
-	// In sandbox mode, redirect AT VERSION clauses to the prod catalog —
-	// see runner.go for the rationale.
-	stepStart = time.Now()
-	if len(model.Audits) > 0 {
-		historicalTable := model.Target
-		if r.sess.ProdAlias() != "" {
-			historicalTable = r.sess.ProdAlias() + "." + model.Target
-		}
-		batchSQL, parseErrors := validation.AuditsToBatchSQL(model.Audits, model.Target, historicalTable, prevSnapshot)
-
-		// Add any parse errors
-		for _, err := range parseErrors {
-			result.Errors = append(result.Errors, err.Error())
-		}
-
-		// Execute batched audit check if we have valid audits
-		if batchSQL != "" {
-			rows, err := r.sess.QueryRows(batchSQL)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("audit check error: %v", err))
-			} else {
-				// Each row is an error message from a failed audit
-				for _, row := range rows {
-					if row != "" {
-						result.Errors = append(result.Errors, row)
-					}
-				}
-			}
-		}
-
-		r.trace(result, "audits", stepStart, "ok")
-	}
-
-	// Rollback if audits failed — revert the target table. Ack Badger claims
-	// regardless: the script's data is consumed, only the materialized result
-	// is reverted. The incremental cursor resets with the rollback, so the
-	// next run re-fetches from the API and re-materializes.
-	if len(result.Errors) > 0 {
-		stepStart = time.Now()
-		if err := r.rollback(model.Target, prevSnapshot, schemaChange); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("rollback failed: %v", err))
-		}
-		r.trace(result, "rollback", stepStart, "error")
-
-		// Ack Badger claims — events are consumed, not re-queued.
-		// Script will re-fetch on next run via incremental cursor.
-		if ackErr := scriptResult.AckClaims(); ackErr != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("ack claims: %v", ackErr))
-		}
-
-		r.cleanup(tmpTable)
-		result.Duration = time.Since(start)
-		return result, fmt.Errorf("audit validation failed")
-	}
 
 	// Everything succeeded — ack Badger claims (remove from inflight).
 	// Then delete ack records — the crash window is closed.

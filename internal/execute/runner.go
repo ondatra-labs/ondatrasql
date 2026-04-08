@@ -519,76 +519,54 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return result, fmt.Errorf("constraint validation failed")
 	}
 
-	// Capture snapshot BEFORE materialize for audits/rollback
-	// Must be done before commit so we have the actual previous state
+	// Capture snapshot BEFORE materialize. Historical audits time-travel
+	// against this snapshot to compare current vs. previous values.
 	stepStart = time.Now()
 	prevSnapshot, _ := backfill.GetPreviousSnapshot(r.sess, model.Target)
 	r.trace(result, "prev_snapshot", stepStart, "ok")
 
-	// Execute based on kind (includes commit metadata in same transaction)
+	// Render audits as a transactional pre-commit check. The result is
+	// a SELECT error(...) wrapper that aborts the materialize transaction
+	// if any audit fails — so failing audits roll back the schema ALTER,
+	// the data write, and the commit metadata together (no zombie state
+	// where metadata says one thing and the physical table says another).
+	//
+	// Parse errors abort BEFORE materialize: there's no point trying to
+	// materialize a model whose audit directives are syntactically broken.
 	stepStart = time.Now()
-	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, sqlHash, result.RunType, result, start)
-	if err != nil {
-		r.trace(result, "materialize", stepStart, "error")
-		// Reverse schema evolution if it was applied before the failed materialization
-		if schemaChange != nil {
-			r.reverseSchemaEvolution(model.Target, *schemaChange)
+	auditSQL, auditParseErrors := r.buildAuditSQL(model, prevSnapshot)
+	r.trace(result, "audits.render", stepStart, "ok")
+	if len(auditParseErrors) > 0 {
+		for _, e := range auditParseErrors {
+			result.Errors = append(result.Errors, e.Error())
 		}
 		r.cleanup(tmpTable)
-		return nil, fmt.Errorf("materialize: %w", err)
+		result.Duration = time.Since(start)
+		return result, fmt.Errorf("audit parse errors")
+	}
+
+	// Execute based on kind (includes audits + commit metadata in same transaction)
+	stepStart = time.Now()
+	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, sqlHash, result.RunType, result, start)
+	if err != nil {
+		r.trace(result, "materialize", stepStart, "error")
+		// A failed audit raises error() inside the BEGIN/COMMIT, which
+		// aborts the transaction — but DuckDB leaves the session in an
+		// "aborted transaction" state. Without an explicit ROLLBACK the
+		// next model in the same batch will fail with "cannot start a
+		// transaction within a transaction". Best-effort: ignore any
+		// error from the ROLLBACK itself (the session might already be
+		// clean if the error came from a non-transactional path).
+		r.sess.Exec("ROLLBACK")
+		// No need to call rollback()/reverseSchemaEvolution — the
+		// transaction abort already restored the physical state.
+		result.Errors = append(result.Errors, err.Error())
+		r.cleanup(tmpTable)
+		result.Duration = time.Since(start)
+		return result, fmt.Errorf("materialize: %w", err)
 	}
 	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
-
-	// Run audits (batched - single query for all audits).
-	// Historical audits (row_count_change, distribution STABLE) need to
-	// time-travel against the previous snapshot. In sandbox mode that
-	// snapshot lives in the prod catalog (sandbox has no model history),
-	// so we redirect AT VERSION clauses to a prod-prefixed reference.
-	stepStart = time.Now()
-	if len(model.Audits) > 0 {
-		historicalTable := model.Target
-		if r.sess.ProdAlias() != "" {
-			historicalTable = r.sess.ProdAlias() + "." + model.Target
-		}
-		batchSQL, parseErrors := validation.AuditsToBatchSQL(model.Audits, model.Target, historicalTable, prevSnapshot)
-
-		// Add any parse errors
-		for _, err := range parseErrors {
-			result.Errors = append(result.Errors, err.Error())
-		}
-
-		// Execute batched audit check if we have valid audits
-		if batchSQL != "" {
-			rows, err := r.sess.QueryRows(batchSQL)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("audit check error: %v", err))
-			} else {
-				// Each row is an error message from a failed audit
-				for _, row := range rows {
-					if row != "" {
-						result.Errors = append(result.Errors, row)
-					}
-				}
-			}
-		}
-
-		r.trace(result, "audits", stepStart, "ok")
-	}
-
-	// If audits failed, rollback
-	if len(result.Errors) > 0 {
-		stepStart = time.Now()
-		if err := r.rollback(model.Target, prevSnapshot, schemaChange); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("rollback failed: %v", err))
-		}
-		r.trace(result, "rollback", stepStart, "error")
-		stepStart = time.Now()
-		r.cleanup(tmpTable)
-		r.trace(result, "cleanup", stepStart, "ok")
-		result.Duration = time.Since(start)
-		return result, fmt.Errorf("audit validation failed")
-	}
 
 	// Run warnings (soft validations, log only)
 	stepStart = time.Now()
@@ -620,6 +598,35 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 }
 
 // rollback reverts to a previous snapshot using TRUNCATE + INSERT with time travel.
+// buildAuditSQL renders the model's audits as a transactional pre-commit
+// check. The returned SQL, when executed inside a BEGIN/COMMIT, raises a
+// DuckDB error() (and aborts the surrounding transaction) the moment any
+// audit query produces an error row. Returns "" when the model has no
+// audits, in which case callers should pass an empty string into the
+// commit.sql template's pre-commit-checks slot.
+//
+// In sandbox mode, historical (time-travel) audit clauses must reference
+// the prod catalog explicitly because the sandbox catalog does not have
+// the model's snapshot history; we surface that here so audits keep
+// working in both modes without each materialize call site duplicating
+// the branch.
+//
+// Parse errors are returned to the caller so they can abort BEFORE
+// materialize runs — there's no value in trying to materialize a model
+// whose audit directives are syntactically broken.
+func (r *Runner) buildAuditSQL(model *parser.Model, prevSnapshot int64) (string, []error) {
+	if len(model.Audits) == 0 {
+		return "", nil
+	}
+	historicalTable := model.Target
+	if r.sess.ProdAlias() != "" {
+		historicalTable = r.sess.ProdAlias() + "." + model.Target
+	}
+	return validation.AuditsToTransactionalSQL(
+		model.Audits, model.Target, historicalTable, prevSnapshot,
+	)
+}
+
 // This preserves the DuckLake table_id and snapshot chain (unlike CREATE OR REPLACE
 // which creates a new table_id and breaks row lineage).
 // If schema evolution was applied, it is reversed first so the table schema matches

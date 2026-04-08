@@ -312,6 +312,50 @@ func splitSchemaTable(target string) (string, string) {
 	return "main", target
 }
 
+// AuditsToTransactionalSQL wraps the AuditsToBatchSQL output so that any
+// failing audit raises a DuckDB error() and aborts the surrounding
+// transaction. Used by materialize() to fold audits inside the same
+// BEGIN/COMMIT as the data write — a failing audit then rolls back the
+// ALTER, the INSERT, and the commit metadata together, eliminating the
+// "metadata ahead of physical state" divergence that the old
+// post-commit + rollback() pattern was prone to after a crash window.
+//
+// Returns "" if there are no audits (caller can skip the check entirely).
+// Parse errors are returned alongside the SQL so callers can surface them
+// the same way they did with AuditsToBatchSQL.
+//
+// Implementation note: each individual audit query already returns at
+// most one row containing the error message (or no rows on success), so
+// the wrapper just collects all messages with string_agg and calls
+// error() if any are present. error() is a scalar that throws on
+// evaluation; wrapping it in a SELECT means the throw fires only when
+// at least one audit produced a row, and the message contains every
+// failing audit's text.
+func AuditsToTransactionalSQL(directives []string, table, historicalTable string, prevSnapshot int64) (string, []error) {
+	batchSQL, parseErrors := AuditsToBatchSQL(directives, table, historicalTable, prevSnapshot)
+	if batchSQL == "" {
+		return "", parseErrors
+	}
+	// CTE form: aggregate all failing-audit messages once, then call
+	// error() only if string_agg produced a non-NULL value (i.e. at
+	// least one audit failed). Two notes:
+	//   1. The `AS r(audit_msg)` column-rename is needed because the
+	//      individual audit queries don't share a stable column name
+	//      across UNION ALL branches.
+	//   2. string_agg over zero matching rows returns NULL, so the
+	//      WHERE on the outer SELECT cleanly skips the error() call
+	//      when every audit passed.
+	wrapped := fmt.Sprintf(
+		"WITH audit_failures AS ("+
+			"SELECT string_agg(audit_msg, '; ') AS msg FROM (%s) AS r(audit_msg) "+
+			"WHERE audit_msg IS NOT NULL"+
+			") "+
+			"SELECT error('audit failed: ' || msg) FROM audit_failures WHERE msg IS NOT NULL",
+		batchSQL,
+	)
+	return wrapped, parseErrors
+}
+
 // AuditsToBatchSQL converts multiple audit directives to a single batched SQL query.
 // Returns a query that returns all audit violations in one round-trip.
 // Each row in the result contains an error message for a failed audit.

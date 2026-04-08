@@ -139,7 +139,9 @@ func (r *Runner) runView(model *parser.Model, result *Result, start time.Time) (
 	stepStart = time.Now()
 	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
 		escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
-	txnSQL := sql.MustFormat("execute/commit.sql", registrySQL, model.Target, escapeSQL(extraInfo))
+	// Views are pure DDL with no data write, so audits don't apply —
+	// the pre-commit-checks slot in commit.sql stays empty.
+	txnSQL := sql.MustFormat("execute/commit.sql", registrySQL, "", model.Target, escapeSQL(extraInfo))
 	if err := r.sess.Exec(txnSQL); err != nil {
 		r.trace(result, "commit", stepStart, "error")
 		return nil, fmt.Errorf("commit view metadata: %w", err)
