@@ -3,5 +3,5 @@ target: mart.agg
 kind: append
 run_type: incremental
 rows_affected: 0
-run_reason: unchanged
+run_reason: incremental run
 total_rows: 1

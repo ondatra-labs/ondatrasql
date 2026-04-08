@@ -480,95 +480,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 	}
 
-	// Schema evolution check for models that preserve their table across runs.
-	// At backfill: all non-view kinds (SQL changed, existing table may need schema update).
-	// At incremental: also check, since upstream SELECT * can gain/lose columns between runs.
-	needsSchemaEvolution := model.Kind != "view"
-	if needsSchemaEvolution {
-		// Sub-step: Capture new schema from temp table
-		stepStart = time.Now()
-		newSchema, schemaErr := backfill.CaptureSchema(r.sess, tmpTable)
-		r.trace(result, "schema.capture_new", stepStart, "ok")
-
-		if schemaErr == nil && len(newSchema) > 0 {
-			// Sub-step: Get previous schema from commit metadata
-			stepStart = time.Now()
-			prevSchema, _ := backfill.GetPreviousSchema(r.sess, model.Target)
-			r.trace(result, "schema.get_previous", stepStart, "ok")
-
-			// Filter out kind-specific columns from prevSchema before comparison.
-			// These columns are added by materialization logic, not the user SQL,
-			// so they won't appear in the temp table schema.
-			prevSchema = filterKindColumns(prevSchema, model.Kind)
-
-			if prevSchema != nil && len(prevSchema) > 0 {
-				// Sub-step: Classify schema change (uses SQL for type promotion checks)
-				stepStart = time.Now()
-				change := backfill.ClassifySchemaChange(prevSchema, newSchema, r.sess)
-				r.trace(result, "schema.classify", stepStart, "ok")
-
-				// Sub-step: Detect renames via lineage (only if there are drops+adds)
-				if change.Type == backfill.SchemaChangeDestructive && len(change.Dropped) > 0 && len(change.Added) > 0 {
-					stepStart = time.Now()
-					// Get previous lineage from commit metadata
-					if prevCommit, err := backfill.GetModelCommitInfo(r.sess, model.Target); err == nil && prevCommit != nil {
-						// Extract current lineage from model SQL
-						if newLineage, _, err := r.extractLineage(model.SQL); err == nil {
-							// Detect renames by comparing lineage sources
-							renames, addedCols, droppedCols := lineage.DetectRenames(prevCommit.ColumnLineage, newLineage)
-							if len(renames) > 0 {
-								// Convert lineage renames to backfill renames
-								for _, lr := range renames {
-									change.Renamed = append(change.Renamed, backfill.ColumnRename{
-										OldName: lr.OldName,
-										NewName: lr.NewName,
-										Source:  lr.Source,
-									})
-								}
-								// Update Added/Dropped to exclude renamed columns
-								change.Added = filterColumnsByName(change.Added, addedCols)
-								change.Dropped = filterColumnsByName(change.Dropped, droppedCols)
-								// Reclassify after detecting renames
-								if len(change.Dropped) == 0 {
-									change.Type = backfill.SchemaChangeAdditive
-								}
-							}
-						}
-					}
-					r.trace(result, "schema.detect_renames", stepStart, "ok")
-				}
-
-				if change.Type == backfill.SchemaChangeDestructive {
-					// Apply destructive changes via ALTER (preserves DuckLake snapshot chain).
-					// All ALTER operations are metadata-only — no file rewrites.
-					schemaChange = &change
-					needsBackfill = false
-					if model.Kind == "table" {
-						result.RunType = "full"
-					} else {
-						result.RunType = "incremental"
-					}
-					result.Warnings = append(result.Warnings,
-						fmt.Sprintf("schema evolution: dropped=%d, added=%d, type_changes=%d",
-							len(change.Dropped), len(change.Added), len(change.TypeChanged)))
-				} else if change.Type == backfill.SchemaChangeAdditive || change.Type == backfill.SchemaChangeTypeChange {
-					// Additive or promotable type changes - apply schema evolution instead of backfill
-					schemaChange = &change
-					needsBackfill = false
-					result.RunType = "incremental"
-					// Include rename count in warning
-					renameMsg := ""
-					if len(change.Renamed) > 0 {
-						renameMsg = fmt.Sprintf(", renames=%d", len(change.Renamed))
-					}
-					result.Warnings = append(result.Warnings,
-						fmt.Sprintf("schema evolution: added=%d columns, type_changes=%d%s",
-							len(change.Added), len(change.TypeChanged), renameMsg))
-				}
-				// SchemaChangeNone: keep the backfill decision from NeedsBackfill
-			}
-		}
-	}
+	// Schema evolution check — shared with script.go's runScript so the
+	// two execution paths can't drift on this critical correctness logic.
+	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, result)
 
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()
@@ -938,6 +852,118 @@ func (r *Runner) ensureUniqueKeyNotNull(tmpTable, uniqueKey string) error {
 		return nil
 	}
 	return fmt.Errorf("%s row(s) have NULL in unique_key column(s) [%s] — unique keys must not be NULL (fix the source data or add @constraint: %s NOT NULL)", result, uniqueKey, uniqueKey)
+}
+
+// detectSchemaEvolution captures the temp table's schema, compares it
+// against the previously-committed schema for the model, classifies the
+// change (additive / destructive / type-only / none), optionally detects
+// renames via lineage, and returns the resulting *SchemaChange plus the
+// (possibly-updated) needsBackfill decision.
+//
+// Shared by runner.go (SQL models) and script.go (Starlark/YAML script
+// models) so the two execution paths can't drift on this critical
+// correctness logic. Earlier, script.go inlined a much simpler version
+// that:
+//   - missed `tracked` kind entirely (and the kind-column filter for both
+//     scd2 and tracked, so SCD2 scripts always saw "destructive" because
+//     the prevSchema still had `is_current`/`valid_*` columns that the
+//     script-emitted temp table never has)
+//   - only ran on backfill (additive changes at incremental run were
+//     never detected)
+//   - had no rename detection
+//   - on destructive changes, just warned instead of applying ALTER
+//     (breaking the DuckLake snapshot chain)
+//
+// Views are exempt — they have no persisted schema to evolve.
+func (r *Runner) detectSchemaEvolution(
+	model *parser.Model,
+	tmpTable string,
+	needsBackfill bool,
+	result *Result,
+) (*backfill.SchemaChange, bool) {
+	if model.Kind == "view" {
+		return nil, needsBackfill
+	}
+
+	stepStart := time.Now()
+	newSchema, schemaErr := backfill.CaptureSchema(r.sess, tmpTable)
+	r.trace(result, "schema.capture_new", stepStart, "ok")
+	if schemaErr != nil || len(newSchema) == 0 {
+		return nil, needsBackfill
+	}
+
+	stepStart = time.Now()
+	prevSchema, _ := backfill.GetPreviousSchema(r.sess, model.Target)
+	r.trace(result, "schema.get_previous", stepStart, "ok")
+
+	// Filter out kind-specific columns from prevSchema before comparison.
+	// These are added by materialization (SCD2 adds is_current etc., tracked
+	// adds _content_hash) and never appear in the temp table.
+	prevSchema = filterKindColumns(prevSchema, model.Kind)
+
+	if len(prevSchema) == 0 {
+		return nil, needsBackfill
+	}
+
+	stepStart = time.Now()
+	change := backfill.ClassifySchemaChange(prevSchema, newSchema, r.sess)
+	r.trace(result, "schema.classify", stepStart, "ok")
+
+	// Detect renames via lineage (only when there are both drops and adds —
+	// the only configuration that could plausibly be a rename rather than a
+	// real schema change). Skip for script models since they don't have
+	// SQL-based lineage to compare against.
+	if change.Type == backfill.SchemaChangeDestructive &&
+		len(change.Dropped) > 0 && len(change.Added) > 0 &&
+		!model.IsScript {
+		stepStart = time.Now()
+		if prevCommit, err := backfill.GetModelCommitInfo(r.sess, model.Target); err == nil && prevCommit != nil {
+			if newLineage, _, err := r.extractLineage(model.SQL); err == nil {
+				renames, addedCols, droppedCols := lineage.DetectRenames(prevCommit.ColumnLineage, newLineage)
+				if len(renames) > 0 {
+					for _, lr := range renames {
+						change.Renamed = append(change.Renamed, backfill.ColumnRename{
+							OldName: lr.OldName,
+							NewName: lr.NewName,
+							Source:  lr.Source,
+						})
+					}
+					change.Added = filterColumnsByName(change.Added, addedCols)
+					change.Dropped = filterColumnsByName(change.Dropped, droppedCols)
+					if len(change.Dropped) == 0 {
+						change.Type = backfill.SchemaChangeAdditive
+					}
+				}
+			}
+		}
+		r.trace(result, "schema.detect_renames", stepStart, "ok")
+	}
+
+	switch change.Type {
+	case backfill.SchemaChangeDestructive:
+		// Apply destructive changes via ALTER (preserves DuckLake snapshot chain).
+		if model.Kind == "table" {
+			result.RunType = "full"
+		} else {
+			result.RunType = "incremental"
+		}
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("schema evolution: dropped=%d, added=%d, type_changes=%d",
+				len(change.Dropped), len(change.Added), len(change.TypeChanged)))
+		return &change, false
+	case backfill.SchemaChangeAdditive, backfill.SchemaChangeTypeChange:
+		result.RunType = "incremental"
+		renameMsg := ""
+		if len(change.Renamed) > 0 {
+			renameMsg = fmt.Sprintf(", renames=%d", len(change.Renamed))
+		}
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("schema evolution: added=%d columns, type_changes=%d%s",
+				len(change.Added), len(change.TypeChanged), renameMsg))
+		return &change, false
+	}
+	// SchemaChangeNone — keep the backfill decision from NeedsBackfill.
+	return nil, needsBackfill
 }
 
 // filterKindColumns removes kind-specific columns from a schema before comparison.

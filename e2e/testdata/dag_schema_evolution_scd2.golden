@@ -9,20 +9,20 @@ target: mart.history
 kind: scd2
 run_type: incremental
 rows_affected: 1
-run_reason: unchanged
+run_reason: incremental run
 === RUN 3: add column ===
 target: mart.history
 kind: scd2
 run_type: incremental
 rows_affected: 2
-run_reason: unchanged
+run_reason: incremental run
 warning: schema evolution: added=1 columns, type_changes=0
 === RUN 4: no changes ===
 target: mart.history
 kind: scd2
 run_type: incremental
 rows_affected: 0
-run_reason: unchanged
+run_reason: incremental run
 scd2_history:
   id,name,score,country,is_current
   1,Alice,150,SE,true

@@ -3,11 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   unit:
@@ -63,3 +64,131 @@ jobs:
           CGO_ENABLED: 1
           CC: gcc
         run: go test -p 1 -tags "integration e2e" ./...
+
+  # ----------------------------------------------------------------------
+  # Release jobs — only run on tag pushes (v*) and ONLY after every test
+  # job above has succeeded. Building binaries and publishing a release
+  # without green tests would ship broken software, which is exactly what
+  # happened with v0.10.0 when release.yml ran in parallel with ci.yml.
+  # ----------------------------------------------------------------------
+
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [unit, integration]
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cc: gcc
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+          - os: macos-14
+            goos: darwin
+            goarch: amd64
+            cc: cc
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cc: cc
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            cc: gcc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Build
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          go build -ldflags "-s -w -X main.version=${VERSION}" -o "ondatrasql${EXT}" ./cmd/ondatrasql
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ARCHIVE="ondatrasql_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+            7z a "${ARCHIVE}" ondatrasql.exe
+          else
+            ARCHIVE="ondatrasql_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+            tar czf "${ARCHIVE}" ondatrasql
+          fi
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ondatrasql-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need full history so git log can read the tag commit message.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz *.zip 2>/dev/null > checksums.txt
+
+      - name: Extract release notes from tag commit message
+        id: notes
+        shell: bash
+        run: |
+          # The release notes ARE the commit message of the tagged commit.
+          # Subject (first line) becomes the release title; body becomes the
+          # release body. This pins the workflow's notes to whatever was in
+          # the commit, removing the need to manually `gh release edit` after.
+          TAG_COMMIT=$(git rev-list -n 1 "${GITHUB_REF_NAME}")
+          SUBJECT=$(git log -1 --format=%s "${TAG_COMMIT}")
+          git log -1 --format=%b "${TAG_COMMIT}" > release_body.md
+
+          echo "title=${SUBJECT}" >> "$GITHUB_OUTPUT"
+          echo "Release title: ${SUBJECT}"
+          echo "Release body preview (first 20 lines):"
+          head -20 release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.notes.outputs.title }}
+          body_path: release_body.md
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/checksums.txt

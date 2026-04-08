@@ -32,7 +32,7 @@ target: staging.history
 kind: scd2
 run_type: incremental
 rows_affected: 3
-run_reason: unchanged
+run_reason: incremental run
 ---
 target: staging.latest
 kind: merge

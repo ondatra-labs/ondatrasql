@@ -9,5 +9,5 @@ target: raw.users
 kind: tracked
 run_type: incremental
 rows_affected: 1
-run_reason: unchanged
+run_reason: incremental run
 total_rows: 3

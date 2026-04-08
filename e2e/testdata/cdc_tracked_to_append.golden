@@ -14,18 +14,18 @@ target: raw.orders
 kind: tracked
 run_type: incremental
 rows_affected: 2
-run_reason: unchanged
+run_reason: incremental run
 target: mart.totals
 kind: append
 run_type: incremental
 rows_affected: 2
-run_reason: unchanged
+run_reason: incremental run
 --- run 3 (no changes) ---
 target: mart.totals
 kind: append
 run_type: incremental
 rows_affected: 0
-run_reason: unchanged
+run_reason: incremental run
 total_rows: 4
 data:
   customer,total

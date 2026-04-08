@@ -9,7 +9,7 @@ target: raw.data
 kind: tracked
 run_type: incremental
 rows_affected: 1
-run_reason: unchanged
+run_reason: incremental run
 row_count: 3
 bob_amount: 999
 alice_amount: 100

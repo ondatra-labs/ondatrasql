@@ -208,38 +208,13 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		}
 	}
 
-	// Schema evolution check (same as SQL models)
-	if needsBackfill && (model.Kind == "append" || model.Kind == "merge" || model.Kind == "scd2" || model.Kind == "partition") {
-		stepStart = time.Now()
-		newSchema, schemaErr := backfill.CaptureSchema(r.sess, tmpTable)
-		r.trace(result, "schema.capture_new", stepStart, "ok")
-
-		if schemaErr == nil && len(newSchema) > 0 {
-			stepStart = time.Now()
-			prevSchema, _ := backfill.GetPreviousSchema(r.sess, model.Target)
-			r.trace(result, "schema.get_previous", stepStart, "ok")
-
-			if prevSchema != nil && len(prevSchema) > 0 {
-				// Classify schema change (uses SQL for type promotion checks)
-				stepStart = time.Now()
-				change := backfill.ClassifySchemaChange(prevSchema, newSchema, r.sess)
-				r.trace(result, "schema.classify", stepStart, "ok")
-
-				if change.Type == backfill.SchemaChangeDestructive {
-					result.Warnings = append(result.Warnings,
-						fmt.Sprintf("schema change is destructive, forcing backfill: dropped=%d, type_changes=%d",
-							len(change.Dropped), len(change.TypeChanged)))
-				} else if change.Type == backfill.SchemaChangeAdditive || change.Type == backfill.SchemaChangeTypeChange {
-					schemaChange = &change
-					needsBackfill = false
-					result.RunType = "incremental"
-					result.Warnings = append(result.Warnings,
-						fmt.Sprintf("schema evolution: added=%d columns, type_changes=%d",
-							len(change.Added), len(change.TypeChanged)))
-				}
-			}
-		}
-	}
+	// Schema evolution check — shared with runner.go's SQL-model path so
+	// the two execution paths can't drift on this critical correctness logic.
+	// Earlier this was a hand-rolled check that missed `tracked` kind, only
+	// ran on backfill, lacked the kind-column filter (so SCD2 scripts always
+	// saw "destructive" because of is_current/valid_* columns), and didn't
+	// preserve the snapshot chain on destructive changes.
+	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, result)
 
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()
