@@ -155,7 +155,7 @@ kind: table
 run_type: incremental
 rows_affected: 3
 run_reason: sql changed
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + channel (VARCHAR)
 target: staging.orders_v
 kind: view
 run_type: skip
@@ -167,33 +167,33 @@ run_type: incremental
 rows_affected: 3
 run_reason: incremental run
 warning: upstream schema changed, skipping CDC
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_merge
 kind: merge
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
 warning: upstream schema changed, skipping CDC
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_scd2
 kind: scd2
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_partition
 kind: partition
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
 warning: upstream schema changed, skipping CDC
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_tracked
 kind: tracked
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + channel (VARCHAR)
 run4_raw: 3
 run4_append: 9
 run4_merge: 5
@@ -208,7 +208,7 @@ kind: table
 run_type: full
 rows_affected: 3
 run_reason: sql changed
-warning: schema evolution: dropped=1, added=0, type_changes=0
+warning: schema evolution: - channel
 target: staging.orders_v
 kind: view
 run_type: skip
@@ -220,33 +220,33 @@ run_type: incremental
 rows_affected: 3
 run_reason: incremental run
 warning: upstream schema changed, skipping CDC
-warning: schema evolution: dropped=1, added=0, type_changes=0
+warning: schema evolution: - channel
 target: mart.orders_merge
 kind: merge
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
 warning: upstream schema changed, skipping CDC
-warning: schema evolution: dropped=1, added=0, type_changes=0
+warning: schema evolution: - channel
 target: mart.orders_scd2
 kind: scd2
 run_type: incremental
 rows_affected: 0
 run_reason: incremental run
-warning: schema evolution: dropped=1, added=0, type_changes=0
+warning: schema evolution: - channel
 target: mart.orders_partition
 kind: partition
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
 warning: upstream schema changed, skipping CDC
-warning: schema evolution: dropped=1, added=0, type_changes=0
+warning: schema evolution: - channel
 target: mart.orders_tracked
 kind: tracked
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
-warning: schema evolution: dropped=1, added=0, type_changes=0
+warning: schema evolution: - channel
 run5_raw: 3
 run5_append: 12
 run5_merge: 5

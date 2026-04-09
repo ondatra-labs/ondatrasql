@@ -10,6 +10,6 @@ kind: table
 run_type: incremental
 rows_affected: 1
 run_reason: sql changed
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + age (INTEGER)
 columns: 3
 age: 30

@@ -16,7 +16,7 @@ kind: scd2
 run_type: incremental
 rows_affected: 2
 run_reason: incremental run
-warning: schema evolution: added=1 columns, type_changes=0
+warning: schema evolution: + country (VARCHAR)
 === RUN 4: no changes ===
 target: mart.history
 kind: scd2

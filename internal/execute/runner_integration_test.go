@@ -2027,12 +2027,12 @@ SELECT 2 AS id, CAST(200 AS BIGINT) AS amount
 	}
 	hasEvoWarning := false
 	for _, w := range r2.Warnings {
-		if strings.Contains(w, "schema evolution") && strings.Contains(w, "type_changes") {
+		if strings.Contains(w, "schema evolution") && (strings.Contains(w, "→") || strings.Contains(w, "type_changes")) {
 			hasEvoWarning = true
 		}
 	}
 	if !hasEvoWarning {
-		t.Errorf("expected schema evolution type_changes warning, got: %v", r2.Warnings)
+		t.Errorf("expected schema evolution type change warning, got: %v", r2.Warnings)
 	}
 }
 
