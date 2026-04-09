@@ -282,12 +282,12 @@ func TestApplySchemaEvolution_TypeChangeInvalid(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// Type change to incompatible type → ALTER TYPE fails
-	// DuckDB can't ALTER VARCHAR to INTEGER if there's data
+	// Type change to incompatible type → ALTER TYPE fails, but the
+	// DROP + ADD fallback succeeds. The column is recreated with the
+	// new type (empty); the subsequent TRUNCATE + INSERT repopulates it.
 	p := testutil.NewProject(t)
 
 	createTableWithSchema(t, p, "CREATE TABLE staging.type_fail (id INTEGER, name VARCHAR)")
-	// Insert data that can't be converted to INTEGER
 	if err := p.Sess.Exec("INSERT INTO staging.type_fail VALUES (1, 'not_a_number')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -300,11 +300,17 @@ func TestApplySchemaEvolution_TypeChangeInvalid(t *testing.T) {
 	}
 
 	err := runner.applySchemaEvolution("staging.type_fail", change)
-	if err == nil {
-		t.Fatal("expected error for incompatible type change")
+	if err != nil {
+		t.Fatalf("expected DROP+ADD fallback to succeed, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "alter column") {
-		t.Errorf("error = %v, expected 'alter column' error", err)
+	// Verify the column now has the new type
+	colType, err := p.Sess.QueryValue(
+		"SELECT data_type FROM information_schema.columns WHERE table_name = 'type_fail' AND column_name = 'name'")
+	if err != nil {
+		t.Fatalf("query column type: %v", err)
+	}
+	if colType != "INTEGER" {
+		t.Errorf("column type = %s, want INTEGER", colType)
 	}
 }
 
@@ -327,8 +333,8 @@ func TestApplySchemaEvolution_TypeChangeOnNonExistentColumn(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for type change on non-existent column")
 	}
-	if !strings.Contains(err.Error(), "alter column") {
-		t.Errorf("error = %v, expected 'alter column' error", err)
+	if !strings.Contains(err.Error(), "change column") && !strings.Contains(err.Error(), "missing_col") {
+		t.Errorf("error = %v, expected error mentioning the column", err)
 	}
 }
 
