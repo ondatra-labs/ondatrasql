@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,21 +87,18 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 		return err
 	}
 
-	// Check sandbox mode - auto-create if needed
+	// Check sandbox mode - allocate a unique per-pid sandbox directory.
 	var sandboxDir string
 	if sandboxMode {
-		sandboxDir = filepath.Join(cfg.ProjectDir, ".sandbox")
-		if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
-			// Auto-create sandbox
-			if err := createSandbox(cfg); err != nil {
-				return fmt.Errorf("create sandbox: %w", err)
-			}
+		var err error
+		sandboxDir, err = createSandbox(cfg)
+		if err != nil {
+			return fmt.Errorf("create sandbox: %w", err)
 		}
 		// Defer cleanup so the sandbox directory is removed on every exit
 		// path — including failures during InitSandbox or model execution.
-		// Without this, a failed run leaves a stale .sandbox/ behind that
-		// the next run would silently reuse instead of starting fresh.
-		// Defers are LIFO, so this runs AFTER the sess.Close() defer below.
+		// Without this, a failed run leaves a stale .sandbox/<pid>-<rand>
+		// subdir behind. Defers are LIFO, so this runs AFTER sess.Close().
 		defer os.RemoveAll(sandboxDir)
 	}
 
@@ -116,7 +114,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 
 	// Initialize session with DuckLake catalog
 	if sandboxMode {
-		sandboxCatalog := filepath.Join(cfg.ProjectDir, ".sandbox", "sandbox.sqlite")
+		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
 			return fmt.Errorf("init sandbox session: %w", err)
 		}
@@ -138,24 +136,34 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 
 	result, err := runner.Run(ctx, model)
 
-	// Show automatic diff and impact in sandbox mode (success path only).
-	// Cleanup is handled by the deferred RemoveAll above for both paths.
-	if sandboxMode && err == nil {
-		// Print result inside box
+	// Show automatic diff and impact in sandbox mode. v0.12.1 (Bug S7 fix):
+	// the box is rendered for both success and failure paths so the user
+	// always sees a complete, properly-closed box. Pre-fix the failure path
+	// fell through to printResult and left the box half-open after the
+	// SANDBOX MODE banner had already been printed.
+	if sandboxMode {
 		printSectionBorder("Result")
 		printEmptyLine()
-		if result != nil {
+		switch {
+		case err != nil:
+			printPaddedLine(fmt.Sprintf("[FAILED] %s", model.Target))
+			for _, line := range wrapErrorMessage(err.Error(), 60) {
+				printPaddedLine("  " + line)
+			}
+		case result != nil:
 			printPaddedLine(fmt.Sprintf("[OK] %s (%s, %s, %d rows, %v)",
 				result.Target, result.Kind, result.RunType,
 				result.RowsAffected, result.Duration.Round(1e6)))
+			showValidationStatus(model, result)
 		}
-
-		// Show validation status
-		showValidationStatus(model, result)
 		printEmptyLine()
 
-		showSandboxDiff(sess, model.Target, model.Kind)
-		showSandboxImpact(cfg, model.Target)
+		// Diff and impact only make sense on success — failed runs may have
+		// no sandbox table at all.
+		if err == nil {
+			showSandboxDiff(sess, model.Target, model.Kind)
+			showSandboxImpact(cfg, model.Target)
+		}
 
 		// Close box (cleanup is handled by deferred RemoveAll above)
 		printBottomBorder()
@@ -216,13 +224,23 @@ func printResult(result *execute.Result) {
 }
 
 // emitModelResultJSON emits a JSON line for --json mode after a model run.
+//
+// Status mapping (Bug S11 fix): "ok" was previously emitted for any run with
+// no errors, including skipped models. CI scripts that gate on `status: "ok"`
+// would then deploy changes whose audits/constraints/warnings were never
+// evaluated. Sandbox v0.12.1 forces non-skip in sandbox so this is mostly
+// theoretical there, but the rule still applies for prod skips: distinguish
+// "ran successfully and produced data" from "didn't run at all".
 func emitModelResultJSON(result *execute.Result, dagRunID string, sandbox bool) {
 	if result == nil {
 		return
 	}
 	status := "ok"
-	if len(result.Errors) > 0 {
+	switch {
+	case len(result.Errors) > 0:
 		status = "error"
+	case result.RunType == "skip":
+		status = "skip"
 	}
 	output.EmitJSON(output.ModelResult{
 		Model:        result.Target,
@@ -378,10 +396,49 @@ func showSandboxImpact(cfg *config.Config, target string) {
 	printEmptyLine()
 }
 
-// createSandbox creates the sandbox directory.
-// Prod is attached READ_ONLY, so no file copying is needed for any catalog type.
-func createSandbox(cfg *config.Config) error {
-	return os.MkdirAll(filepath.Join(cfg.ProjectDir, ".sandbox"), 0755)
+// wrapErrorMessage breaks a long error string into wrapped lines that fit
+// inside the sandbox box layout. Used by the sandbox failure rendering path
+// to keep the box close-borders aligned even when the underlying error
+// (often a multi-line DuckDB diagnostic) is wider than the box.
+func wrapErrorMessage(msg string, width int) []string {
+	// First flatten newlines in the error to spaces — DuckDB errors include
+	// hint lines we don't have room for inside the box.
+	flat := strings.ReplaceAll(msg, "\n", " ")
+	flat = strings.Join(strings.Fields(flat), " ")
+	if width <= 0 {
+		width = 60
+	}
+	var lines []string
+	for len(flat) > width {
+		// break at the last space before width
+		cut := strings.LastIndex(flat[:width], " ")
+		if cut <= 0 {
+			cut = width
+		}
+		lines = append(lines, flat[:cut])
+		flat = strings.TrimSpace(flat[cut:])
+	}
+	if flat != "" {
+		lines = append(lines, flat)
+	}
+	return lines
+}
+
+// createSandbox creates a unique per-invocation sandbox directory and
+// returns its absolute path. The directory is nested under .sandbox/ as
+// .sandbox/<pid>-<random> so that two parallel `ondatrasql sandbox` runs
+// against the same project don't collide on the same sqlite catalog file
+// (Bug S12 fix). Cleanup is the caller's responsibility — typically a
+// defer os.RemoveAll(...) on the returned path.
+func createSandbox(cfg *config.Config) (string, error) {
+	// 8 hex chars of randomness keeps collisions astronomically unlikely
+	// across multiple sandbox sessions per pid.
+	suffix := fmt.Sprintf("%d-%08x", os.Getpid(), rand.Uint32())
+	dir := filepath.Join(cfg.ProjectDir, ".sandbox", suffix)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // unique removes duplicates from a string slice.

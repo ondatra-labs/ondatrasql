@@ -1059,10 +1059,10 @@ func TestSession_InitSandbox_MissingProdCatalog(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when prod catalog path doesn't exist")
 	}
-	// v0.12.0: with the catalog-fork strategy, missing prod catalog now
-	// fails at the file-read step inside forkSqliteCatalog rather than at
-	// the duckdb ATTACH step. The wrapping is "fork prod catalog: read".
-	if !strings.Contains(err.Error(), "fork prod catalog") {
+	// v0.12.1 (Bug S15 fix): friendly actionable error replaces the low-level
+	// "fork prod catalog: read ..." chain when the prod catalog file doesn't
+	// exist. The new message tells the user to run `ondatrasql run` first.
+	if !strings.Contains(err.Error(), "Run `ondatrasql run`") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

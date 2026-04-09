@@ -1379,6 +1379,59 @@ SELECT id, name, country FROM raw.customers
 	assertGolden(t, "dag_scd2_data_change", snap)
 }
 
+// TestE2E_Sandbox_DirectiveOnlyChangeStillEvaluatesAudits is the regression
+// test for Bug S5 (sandbox skipped table-kind models when only directives
+// changed). Pre-v0.12.1, the runner used the SQL hash to decide whether to
+// skip a model, and the hash didn't include @audit/@constraint/@warning
+// values — so editing an audit threshold to a guaranteed-failing value
+// would still report [OK] skip with "Audits: 1 not evaluated".
+//
+// v0.12.1 forces RunType=skip → backfill in sandbox mode so the entire
+// validation pass always runs. The cost is small because sandbox is
+// ephemeral; the cost of false-pass is silent broken deploys.
+func TestE2E_Sandbox_DirectiveOnlyChangeStillEvaluatesAudits(t *testing.T) {
+	prod := testutil.NewProject(t)
+	prod.AddModel("staging/checked.sql", `-- @kind: table
+-- @audit: row_count >= 1
+SELECT 1 AS id, 100 AS amount
+`)
+	runModel(t, prod, "staging/checked.sql")
+
+	// Sandbox: change ONLY the audit threshold to a guaranteed-failing value.
+	// SQL body unchanged. Pre-v0.12.1 this would have been silently skipped.
+	sbox := testutil.NewSandboxProject(t, prod)
+	sbox.AddModel("staging/checked.sql", `-- @kind: table
+-- @audit: row_count >= 999999
+SELECT 1 AS id, 100 AS amount
+`)
+
+	result, err := runModelErr(t, sbox, "staging/checked.sql")
+	if err == nil {
+		t.Fatal("expected audit failure, got nil — Bug S5 regression")
+	}
+	if result == nil || len(result.Errors) == 0 {
+		t.Fatal("expected errors in result — Bug S5 regression")
+	}
+
+	// run_type should NOT be "skip" — it should be "backfill" with the
+	// sandbox-forced re-run reason.
+	if result.RunType == "skip" {
+		t.Errorf("run_type = %q, want backfill (Bug S5 regression: sandbox should never skip)", result.RunType)
+	}
+
+	// Error should mention the audit failure, not "model skipped".
+	foundAuditErr := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "row_count >= 999999") {
+			foundAuditErr = true
+			break
+		}
+	}
+	if !foundAuditErr {
+		t.Errorf("errors = %v, want one mentioning the failing audit", result.Errors)
+	}
+}
+
 // TestE2E_SandboxDAG_AppendIncrementalPreservesHistory is the regression test
 // for Bug S13 (append+incremental loses history in sandbox). Pre-v0.12.0,
 // when the source table was rebuilt in sandbox, the runner forced a full

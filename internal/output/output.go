@@ -23,13 +23,23 @@ var (
 	JSONEnabled bool
 )
 
-// Init configures output mode. When jsonFlag is true,
-// human output goes to stderr and JSON lines go to stdout.
+// Init configures output mode. When jsonFlag is true, human output goes to
+// stderr and JSON lines go to stdout. When jsonFlag is false, JSONEnabled is
+// reset (so a previous --json invocation in the same process doesn't leak)
+// but Human is left alone — tests that have swapped Human to a buffer
+// expect it to survive the call.
 func Init(jsonFlag bool) {
+	JSONEnabled = jsonFlag
 	if jsonFlag {
-		JSONEnabled = true
 		Human = os.Stderr
 	}
+}
+
+// Reset returns Human and JSONEnabled to their pristine defaults. Intended
+// for test setup; production code should use Init.
+func Reset() {
+	JSONEnabled = false
+	Human = os.Stdout
 }
 
 // ModelResult is the JSON structure emitted after each model run.

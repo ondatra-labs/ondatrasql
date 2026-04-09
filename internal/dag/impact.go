@@ -93,7 +93,14 @@ func analyzeModelImpact(sess *duckdb.Session, changedModel, downstreamModel stri
 	}
 
 	if len(impact.AffectedColumns) > 0 {
-		impact.Reason = formatReason(impact.AffectedColumns, changedModel)
+		// Bug S8 fix: the reason should describe which columns of the
+		// CHANGED MODEL are read by the downstream — i.e. SourceColumns
+		// (input columns from changedModel), not AffectedColumns (output
+		// columns of the downstream model). Pre-fix this said "uses
+		// total_revenue from staging.X" where total_revenue was the output
+		// alias of mart.X — confusing because total_revenue doesn't exist
+		// in staging.X.
+		impact.Reason = formatReason(impact.SourceColumns, changedModel)
 		return impact, nil
 	}
 
@@ -104,12 +111,24 @@ func analyzeModelImpact(sess *duckdb.Session, changedModel, downstreamModel stri
 	return impact, nil
 }
 
-// formatReason creates a human-readable reason string.
-func formatReason(affectedColumns []string, changedModel string) string {
-	if len(affectedColumns) == 1 {
-		return "uses column " + affectedColumns[0] + " from " + changedModel
+// formatReason creates a human-readable reason string. The columns argument
+// must be the INPUT column names from the changed (upstream) model — these
+// are what the downstream actually reads.
+func formatReason(sourceColumns []string, changedModel string) string {
+	// Deduplicate while preserving order — multiple downstream output cols
+	// can pull from the same source column.
+	seen := make(map[string]bool, len(sourceColumns))
+	var unique []string
+	for _, c := range sourceColumns {
+		if !seen[c] {
+			seen[c] = true
+			unique = append(unique, c)
+		}
 	}
-	return "uses " + strings.Join(affectedColumns, ", ") + " from " + changedModel
+	if len(unique) == 1 {
+		return "reads column " + unique[0] + " from " + changedModel
+	}
+	return "reads " + strings.Join(unique, ", ") + " from " + changedModel
 }
 
 // AnalyzeTransitiveImpact analyzes how a transitive model is affected through an intermediate model.

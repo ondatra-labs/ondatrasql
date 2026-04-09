@@ -15,8 +15,13 @@ func TestFormatReason(t *testing.T) {
 		model    string
 		expected string
 	}{
-		{[]string{"id"}, "raw.orders", "uses column id from raw.orders"},
-		{[]string{"id", "amount"}, "raw.orders", "uses id, amount from raw.orders"},
+		// v0.12.1 (Bug S8 fix): wording changed from "uses" to "reads" and the
+		// argument is now SourceColumns (input columns from the upstream),
+		// not AffectedColumns (output columns of the downstream).
+		{[]string{"id"}, "raw.orders", "reads column id from raw.orders"},
+		{[]string{"id", "amount"}, "raw.orders", "reads id, amount from raw.orders"},
+		// New: deduplication when multiple downstream output cols share an input
+		{[]string{"id", "id", "amount"}, "raw.orders", "reads id, amount from raw.orders"},
 	}
 
 	for _, tt := range tests {

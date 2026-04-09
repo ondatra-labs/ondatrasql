@@ -32,19 +32,16 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		return nil
 	}
 
-	// Auto-create sandbox if needed
+	// Allocate a unique per-pid sandbox directory.
 	var sandboxDir string
 	if sandboxMode {
-		sandboxDir = filepath.Join(cfg.ProjectDir, ".sandbox")
-		if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
-			if err := createSandbox(cfg); err != nil {
-				return fmt.Errorf("create sandbox: %w", err)
-			}
+		var err error
+		sandboxDir, err = createSandbox(cfg)
+		if err != nil {
+			return fmt.Errorf("create sandbox: %w", err)
 		}
 		// Defer cleanup so the sandbox directory is removed on every exit
 		// path — including failures during InitSandbox or model execution.
-		// Without this, a failed run leaves a stale .sandbox/ behind that
-		// the next run would silently reuse instead of starting fresh.
 		// Defers are LIFO, so this runs AFTER the sess.Close() defer below.
 		defer os.RemoveAll(sandboxDir)
 	}
@@ -78,7 +75,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 
 	// Initialize session with catalog (after DAG is built)
 	if sandboxMode {
-		sandboxCatalog := filepath.Join(cfg.ProjectDir, ".sandbox", "sandbox.sqlite")
+		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
 			return fmt.Errorf("init sandbox session: %w", err)
 		}

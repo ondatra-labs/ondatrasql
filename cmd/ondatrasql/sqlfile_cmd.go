@@ -45,15 +45,15 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 				"execute on prod)", cmdName)
 	}
 
-	// Auto-create sandbox if needed
+	// Allocate a unique per-pid sandbox directory.
 	var sandboxDir string
 	if sandboxMode {
-		sandboxDir = filepath.Join(cfg.ProjectDir, ".sandbox")
-		if _, err := os.Stat(sandboxDir); os.IsNotExist(err) {
-			if err := createSandbox(cfg); err != nil {
-				return fmt.Errorf("create sandbox: %w", err)
-			}
+		var err error
+		sandboxDir, err = createSandbox(cfg)
+		if err != nil {
+			return fmt.Errorf("create sandbox: %w", err)
 		}
+		defer os.RemoveAll(sandboxDir)
 	}
 
 	// Create session
@@ -65,7 +65,7 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 
 	// Initialize with catalog
 	if sandboxMode {
-		sandboxCatalog := filepath.Join(cfg.ProjectDir, ".sandbox", "sandbox.sqlite")
+		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
 			return fmt.Errorf("init sandbox session: %w", err)
 		}

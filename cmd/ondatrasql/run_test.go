@@ -399,10 +399,12 @@ SELECT 1 AS id`)
 		t.Errorf("expected model in sandbox output, got: %s", got)
 	}
 
-	// The sandbox directory must be cleaned up on the success path too —
+	// The per-pid sandbox subdir must be cleaned up on the success path —
 	// pin it here so the deferred-cleanup refactor isn't silently reverted.
-	if _, err := os.Stat(filepath.Join(p.Dir, ".sandbox")); !os.IsNotExist(err) {
-		t.Errorf(".sandbox dir should not exist after successful sandbox run, got err=%v", err)
+	// (v0.12.1+ uses .sandbox/<pid>-<rand> for per-invocation isolation;
+	// the parent .sandbox/ may or may not exist after cleanup.)
+	if entries, _ := filepath.Glob(filepath.Join(p.Dir, ".sandbox", "*")); len(entries) > 0 {
+		t.Errorf(".sandbox/<sub> should not exist after successful sandbox run, got entries: %v", entries)
 	}
 }
 
@@ -436,24 +438,17 @@ SELECT 1 AS id, 100 AS amount`)
 		_ = run([]string{"sandbox", "staging.sbox_fail"})
 	})
 
-	if _, err := os.Stat(filepath.Join(p.Dir, ".sandbox")); !os.IsNotExist(err) {
-		t.Errorf(".sandbox dir must be removed after failed sandbox run (got err=%v) — see model.go cleanup-leak fix", err)
+	if entries, _ := filepath.Glob(filepath.Join(p.Dir, ".sandbox", "*")); len(entries) > 0 {
+		t.Errorf(".sandbox/<sub> must be removed after failed sandbox run, got entries: %v — see model.go cleanup-leak fix", entries)
 	}
 }
 
-// TestRun_Sandbox_DAG_InitSandboxFailure_CleansUpDir is the DAG-mode regression
-// test for cmd/ondatrasql/dag.go. The bug class is the same as model.go but
-// the trigger is different: in dag.go, model failures flow through the RunDAG
-// callback (no early return), so the original cleanup block at the end of the
-// `if sandboxMode` branch was actually reached on model failures. The genuine
-// leak path is when InitSandbox itself fails — the function returns at line 77
-// without ever reaching the cleanup, leaving the .sandbox directory behind.
-//
-// To trigger that path deterministically, we pre-seed `.sandbox/sandbox.sqlite`
-// with a non-SQLite blob so the createSandbox auto-step is skipped (dir exists)
-// and DuckLake's ATTACH inside InitSandbox fails on the corrupt file. The fix
-// (deferred RemoveAll right after createSandbox) must still wipe the directory
-// even though InitSandbox returned early.
+// TestRun_Sandbox_DAG_InitSandboxFailure_CleansUpDir is the DAG-mode
+// regression test for cmd/ondatrasql/dag.go cleanup-leak bug. With sandbox
+// v2's catalog-fork architecture, the failure trigger is "prod catalog file
+// missing" — `forkSqliteCatalog` fails at the read step and InitSandbox
+// returns early. The deferred cleanup must still wipe the per-pid sandbox
+// subdir that `createSandbox` allocated.
 func TestRun_Sandbox_DAG_InitSandboxFailure_CleansUpDir(t *testing.T) {
 	p := testutil.NewProject(t)
 	oldWd, _ := os.Getwd()
@@ -463,14 +458,12 @@ func TestRun_Sandbox_DAG_InitSandboxFailure_CleansUpDir(t *testing.T) {
 	p.AddModel("staging/dag_ok.sql", `-- @kind: table
 SELECT 1 AS id`)
 
-	// Pre-seed a corrupt .sandbox so createSandbox is skipped (dir exists)
-	// and ATTACH inside InitSandbox fails on the bogus catalog file.
-	sandboxDir := filepath.Join(p.Dir, ".sandbox")
-	if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
-		t.Fatalf("seed sandbox dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(sandboxDir, "sandbox.sqlite"), []byte("not a sqlite file"), 0o644); err != nil {
-		t.Fatalf("seed corrupt sqlite: %v", err)
+	// Delete the prod catalog file so forkSqliteCatalog fails inside
+	// InitSandbox. (testutil.NewProject creates and initialises one;
+	// we remove it here to simulate "user ran sandbox before run".)
+	prodCatalog := filepath.Join(p.Dir, "ducklake.sqlite")
+	if err := os.Remove(prodCatalog); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove prod catalog: %v", err)
 	}
 
 	_ = captureOutput(t, func() {
@@ -479,8 +472,9 @@ SELECT 1 AS id`)
 		_ = run([]string{"sandbox"})
 	})
 
-	if _, err := os.Stat(sandboxDir); !os.IsNotExist(err) {
-		t.Errorf(".sandbox dir must be removed even when InitSandbox fails (got err=%v) — see dag.go cleanup-leak fix", err)
+	// No per-pid subdir should remain under .sandbox/
+	if entries, _ := filepath.Glob(filepath.Join(p.Dir, ".sandbox", "*")); len(entries) > 0 {
+		t.Errorf(".sandbox/<sub> must be removed even when InitSandbox fails, got entries: %v", entries)
 	}
 }
 

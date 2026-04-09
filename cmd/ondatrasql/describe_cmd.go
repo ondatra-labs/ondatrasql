@@ -519,17 +519,31 @@ func printModelBox(info *ModelInfo) {
 	printBottomBorder()
 }
 
-// Helper functions for box drawing
+// Helper functions for box drawing.
+//
+// All box helpers are no-ops in --json mode (output.JSONEnabled). This keeps
+// JSON consumers from getting box-drawing characters mixed into their stdout
+// stream — Bug S10. The JSON line emission paths run independently and
+// produce machine-readable output only.
 
 func printTopBorder() {
+	if output.JSONEnabled {
+		return
+	}
 	output.Println(topLeft + strings.Repeat(horizontal, boxWidth) + topRight)
 }
 
 func printBottomBorder() {
+	if output.JSONEnabled {
+		return
+	}
 	output.Println(bottomLeft + strings.Repeat(horizontal, boxWidth) + bottomRight)
 }
 
 func printSectionBorder(title string) {
+	if output.JSONEnabled {
+		return
+	}
 	if title == "" {
 		output.Println(leftT + strings.Repeat(horizontal, boxWidth) + rightT)
 	} else {
@@ -550,6 +564,9 @@ func displayWidth(s string) int {
 }
 
 func printDualSectionBorder(left, right string) {
+	if output.JSONEnabled {
+		return
+	}
 	// Total inner width is boxWidth, minus 1 for middle separator = 63
 	// Split: left=31, right=32
 	leftHalf := (boxWidth - 1) / 2  // 31
@@ -568,6 +585,9 @@ func printDualSectionBorder(left, right string) {
 }
 
 func printCenteredLine(text string) {
+	if output.JSONEnabled {
+		return
+	}
 	textWidth := displayWidth(text)
 	padding := (boxWidth - textWidth) / 2
 	if padding < 0 {
@@ -581,10 +601,16 @@ func printCenteredLine(text string) {
 }
 
 func printEmptyLine() {
+	if output.JSONEnabled {
+		return
+	}
 	output.Println(vertical + strings.Repeat(" ", boxWidth) + vertical)
 }
 
 func printPaddedLine(text string) {
+	if output.JSONEnabled {
+		return
+	}
 	textWidth := displayWidth(text)
 	if textWidth > boxWidth-4 {
 		// Truncate by runes but recalculate width

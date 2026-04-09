@@ -944,9 +944,22 @@ func backendFromDuckLakePath(path string) string {
 // forkSqliteCatalog implements sandbox v2 fork for sqlite-backed DuckLake.
 // It copies the prod sqlite catalog file to sandboxCatalog and returns the
 // DuckLake connection string for the new sandbox catalog. Cleanup is the
-// caller's responsibility (usually os.RemoveAll on .sandbox/).
+// caller's responsibility (usually os.RemoveAll on .sandbox/<sub>).
+//
+// Bug S15 fix: when prod catalog doesn't exist (typical for a freshly-init'd
+// project before the user has run any model), produce a friendly actionable
+// error rather than the low-level "Failed to load DuckLake table data" error
+// chain that DuckDB would produce on ATTACH of a missing file.
 func (s *Session) forkSqliteCatalog(prodConnStr, sandboxCatalog string) (string, error) {
 	prodCatalogPath := strings.TrimPrefix(prodConnStr, "ducklake:sqlite:")
+
+	if _, err := os.Stat(prodCatalogPath); os.IsNotExist(err) {
+		return "", fmt.Errorf(
+			"sandbox needs an existing prod catalog to fork from, but %s does not exist yet. "+
+				"Run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` "+
+				"can validate changes against it.", prodCatalogPath)
+	}
+
 	if err := os.MkdirAll(filepath.Dir(sandboxCatalog), 0o755); err != nil {
 		return "", fmt.Errorf("fork prod catalog: ensure dir: %w", err)
 	}

@@ -23,6 +23,64 @@ func quoteTarget(target string) string {
 	return duckdb.QuoteIdentifier(target)
 }
 
+// schemasDiffer compares the column lists of `target` between the sandbox
+// catalog and the prod catalog and returns true if they differ in any way
+// (added, removed, renamed, or type-changed columns). Filtering excludes
+// kind-specific metadata columns like _content_hash and SCD2 valid_from/to
+// so the diff reflects user-meaningful schema changes only.
+//
+// Bug S6 fix: showDagSandboxSummary used to compare only row counts, so a
+// pure schema change (column added with identical row count) was reported
+// as "unchanged".
+func schemasDiffer(sess *duckdb.Session, target string) (bool, error) {
+	parts := strings.SplitN(target, ".", 2)
+	if len(parts) != 2 {
+		return false, fmt.Errorf("invalid target %q (expected schema.table)", target)
+	}
+	schema, table := parts[0], parts[1]
+
+	colsForCatalog := func(catalog string) (map[string]string, error) {
+		q := fmt.Sprintf(`
+			SELECT column_name, data_type
+			FROM information_schema.columns
+			WHERE table_catalog = '%s'
+			  AND table_schema = '%s'
+			  AND table_name = '%s'
+			  AND column_name NOT IN ('_content_hash', 'valid_from_snapshot', 'valid_to_snapshot', 'is_current')
+			ORDER BY ordinal_position`,
+			duckdb.EscapeSQL(catalog), duckdb.EscapeSQL(schema), duckdb.EscapeSQL(table))
+		rows, err := sess.QueryRowsMap(q)
+		if err != nil {
+			return nil, err
+		}
+		cols := make(map[string]string, len(rows))
+		for _, r := range rows {
+			cols[r["column_name"]] = r["data_type"]
+		}
+		return cols, nil
+	}
+
+	sandboxCols, err := colsForCatalog(sess.CatalogAlias())
+	if err != nil {
+		return false, fmt.Errorf("query sandbox columns: %w", err)
+	}
+	prodCols, err := colsForCatalog(sess.ProdAlias())
+	if err != nil {
+		return false, fmt.Errorf("query prod columns: %w", err)
+	}
+
+	if len(sandboxCols) != len(prodCols) {
+		return true, nil
+	}
+	for name, sandboxType := range sandboxCols {
+		prodType, ok := prodCols[name]
+		if !ok || prodType != sandboxType {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // tableExistsIn checks via information_schema whether a schema.table exists
 // in the given catalog. Returns (exists, error). The caller MUST handle the
 // error explicitly — collapsing it to a bool would just move the silent
@@ -139,7 +197,18 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 		fmt.Sscanf(prodCount, "%d", &prod)
 		fmt.Sscanf(sandboxCount, "%d", &sandbox)
 
-		if prod != sandbox {
+		// v0.12.1 (Bug S6 fix): in addition to the row-count and row-content
+		// check, compare schemas. A column add/drop/rename without a row-count
+		// change used to be reported as "unchanged" — exactly what users care
+		// about validating in sandbox.
+		schemaDiffers, schemaErr := schemasDiffer(sess, m.Target)
+		if schemaErr != nil {
+			printPaddedLine(fmt.Sprintf("  [WARN] %s: schema check error: %s", m.Target, truncate(schemaErr.Error(), 40)))
+			warnings++
+			continue
+		}
+
+		if prod != sandbox || schemaDiffers {
 			changed++
 			changedModels = append(changedModels, m.Target)
 		} else {
