@@ -188,6 +188,45 @@ func TestParseCatalogSQL(t *testing.T) {
 	}
 }
 
+// TestParseCatalogSQL_EnvVarExpansion is the regression test for Bug S18
+// (see docs/SANDBOX_BUGS_FOUND.md). Pre-v0.12.2 the parser ran the regex on
+// the raw file content and saw literal ${VAR} tokens, which the path-resolve
+// logic then joined with projectDir into nonsense like /tmp/p/${VAR}.
+// Sandbox mode would then fail because forkSqliteCatalog can't read a file
+// whose name still contains a literal env-var token. Prod happened to work
+// because session.go runs os.ExpandEnv() at SQL execution time on the
+// original file content. The fix is to expand env vars at parse time too.
+func TestParseCatalogSQL_EnvVarExpansion(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ONDATRA_TEST_CATALOG", "/var/data/lake.sqlite")
+	t.Setenv("ONDATRA_TEST_DATA", "/var/data/files")
+
+	// catalog.sql references env vars for both the catalog path and the
+	// DATA_PATH option — both must end up resolved in the parsed config.
+	content := "ATTACH 'ducklake:sqlite:${ONDATRA_TEST_CATALOG}' AS lake " +
+		"(DATA_PATH '${ONDATRA_TEST_DATA}');\n"
+	if err := os.WriteFile(filepath.Join(configDir, "catalog.sql"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := parseCatalogSQL(configDir, tmpDir)
+
+	if info.Path != "/var/data/lake.sqlite" {
+		t.Errorf("Path = %q, want %q (env var should be expanded)", info.Path, "/var/data/lake.sqlite")
+	}
+	if info.DataPath != "/var/data/files" {
+		t.Errorf("DataPath = %q, want %q (env var should be expanded)", info.DataPath, "/var/data/files")
+	}
+	if info.ConnStr != "ducklake:sqlite:/var/data/lake.sqlite" {
+		t.Errorf("ConnStr = %q, want %q", info.ConnStr, "ducklake:sqlite:/var/data/lake.sqlite")
+	}
+}
+
 func TestParseCatalogSQL_MissingFile(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

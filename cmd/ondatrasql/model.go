@@ -6,11 +6,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -430,15 +434,77 @@ func wrapErrorMessage(msg string, width int) []string {
 // against the same project don't collide on the same sqlite catalog file
 // (Bug S12 fix). Cleanup is the caller's responsibility — typically a
 // defer os.RemoveAll(...) on the returned path.
+//
+// Bug S17 fix: before creating the new subdir, scan .sandbox/ for stale
+// subdirs left behind by SIGKILL'd or crashed sessions and delete them.
+// A subdir is stale if its <pid> prefix refers to a process that no longer
+// exists. Pid reuse is mitigated by also requiring an mtime older than
+// 1 minute (no live process is going to start, run sandbox, and crash all
+// inside one minute, AND have its pid number reassigned that fast).
 func createSandbox(cfg *config.Config) (string, error) {
+	parent := filepath.Join(cfg.ProjectDir, ".sandbox")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	reapStaleSandboxDirs(parent)
+
 	// 8 hex chars of randomness keeps collisions astronomically unlikely
 	// across multiple sandbox sessions per pid.
 	suffix := fmt.Sprintf("%d-%08x", os.Getpid(), rand.Uint32())
-	dir := filepath.Join(cfg.ProjectDir, ".sandbox", suffix)
+	dir := filepath.Join(parent, suffix)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	return dir, nil
+}
+
+// reapStaleSandboxDirs is best-effort cleanup of leftover .sandbox/<sub>
+// directories whose creating process is gone. Called by createSandbox at the
+// start of every sandbox session, so the system self-heals as long as users
+// run sandbox at all. Errors are silently ignored — this is opportunistic.
+func reapStaleSandboxDirs(parent string) {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	const minStaleAge = time.Minute
+	now := time.Now()
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Subdir name format: <pid>-<random8hex>
+		dash := strings.IndexByte(entry.Name(), '-')
+		if dash <= 0 {
+			continue
+		}
+		pid, parseErr := strconv.Atoi(entry.Name()[:dash])
+		if parseErr != nil || pid <= 0 {
+			continue
+		}
+		// Skip recently-created subdirs to avoid racing with another in-flight
+		// sandbox session (or with our own — the new dir we create below).
+		info, infoErr := entry.Info()
+		if infoErr != nil || now.Sub(info.ModTime()) < minStaleAge {
+			continue
+		}
+		// Probe the pid: signal 0 doesn't deliver anything, just checks if
+		// pid exists and we have permission. The Go runtime wraps the dead
+		// pid as os.ErrProcessDone (Go 1.16+); raw ESRCH from kill(2) shows
+		// up the same way. EPERM ("permission denied") means the pid IS
+		// alive but is owned by another user — we keep its dir as a safety.
+		proc, findErr := os.FindProcess(pid)
+		if findErr != nil {
+			continue
+		}
+		signalErr := proc.Signal(syscall.Signal(0))
+		if signalErr == nil {
+			continue // pid alive, owned by us → not stale
+		}
+		if errors.Is(signalErr, os.ErrProcessDone) || errors.Is(signalErr, syscall.ESRCH) {
+			_ = os.RemoveAll(filepath.Join(parent, entry.Name()))
+		}
+	}
 }
 
 // unique removes duplicates from a string slice.

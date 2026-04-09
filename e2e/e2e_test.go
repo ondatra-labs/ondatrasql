@@ -1432,6 +1432,39 @@ SELECT 1 AS id, 100 AS amount
 	}
 }
 
+// TestE2E_Sandbox_DirectiveOnlyChange_ColumnTag covers the @column slice of
+// Bug S5: ColumnTags drives applyColumnMasking which mutates the actual data
+// output, so an edit changing a column tag (e.g. swapping a mask macro name)
+// must trigger sandbox re-evaluation. v0.12.2 added ColumnTags to the
+// hasDirectives check after a user spotted the gap during review.
+func TestE2E_Sandbox_DirectiveOnlyChange_ColumnTag(t *testing.T) {
+	prod := testutil.NewProject(t)
+	prod.AddModel("staging/tagged.sql", `-- @kind: table
+-- @column: name = display name | PII
+SELECT 1 AS id, 'Alice' AS name
+`)
+	runModel(t, prod, "staging/tagged.sql")
+
+	// Sandbox: edit ONLY the column tag (PII → PHI). SQL body and column
+	// description unchanged. Pre-fix the runner saw an unchanged hash and
+	// skipped without re-evaluating the model.
+	sbox := testutil.NewSandboxProject(t, prod)
+	sbox.AddModel("staging/tagged.sql", `-- @kind: table
+-- @column: name = display name | PHI
+SELECT 1 AS id, 'Alice' AS name
+`)
+
+	result, err := runModelErr(t, sbox, "staging/tagged.sql")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must NOT skip — that was the pre-v0.12.2 behavior.
+	if result.RunType == "skip" {
+		t.Errorf("run_type = %q, want backfill (Bug S5 column-tag regression)", result.RunType)
+	}
+}
+
 // TestE2E_SandboxDAG_AppendIncrementalPreservesHistory is the regression test
 // for Bug S13 (append+incremental loses history in sandbox). Pre-v0.12.0,
 // when the source table was rebuilt in sandbox, the runner forced a full

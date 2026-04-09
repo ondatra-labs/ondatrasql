@@ -49,6 +49,15 @@ type Session struct {
 	// caller's `os.RemoveAll(.sandbox/)` handles those).
 	sandboxPostgresDropDB     string // sandbox database name to DROP
 	sandboxPostgresAdminConnStr string // connection string to the admin database
+
+	// Bug S16: sandbox shares the prod data path so it can read inherited
+	// parquet files via DuckLake's per-catalog file references. The cost is
+	// that sandbox writes new parquet files into that shared directory which
+	// neither prod nor sandbox knows to clean up afterwards. We capture both
+	// catalogs' data-file manifests at Close and delete the diff (sandbox-only
+	// files) before tearing down. This requires knowing the absolute data
+	// path so we can resolve the relative paths the catalog stores.
+	sandboxDataPath string // absolute prod/sandbox shared data path
 }
 
 // NewSession creates a new embedded DuckDB session.
@@ -603,6 +612,13 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 // sandbox database is detached and dropped (via a direct lib/pq admin
 // connection) before the duckdb session itself is released. Drop failures
 // are returned but the duckdb close still runs.
+//
+// Bug S16 cleanup: in sandbox mode, before tearing down the connection,
+// captureSandboxOrphans queries both catalogs' data-file manifests to find
+// parquet files that exist in the sandbox catalog but not in prod's. Those
+// files are deleted from disk (best-effort) after the duckdb session closes.
+// This avoids the linear disk-leak that would otherwise accumulate at every
+// sandbox session.
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -611,6 +627,13 @@ func (s *Session) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	// Capture sandbox-only parquet files BEFORE detaching/dropping anything,
+	// while the duckdb session and both catalogs are still attached.
+	var orphanFiles []string
+	if s.prodAlias != "" && s.conn != nil {
+		orphanFiles = s.captureSandboxOrphansLocked()
+	}
 
 	// Detach the sandbox catalog from the duckdb session BEFORE closing s.conn,
 	// using s.conn directly because s.db.Exec would block waiting for the conn
@@ -640,7 +663,76 @@ func (s *Session) Close() error {
 			return err
 		}
 	}
+
+	// Delete orphan parquet files from disk after the duckdb connection is
+	// fully released. Best-effort; individual delete failures are silent.
+	for _, p := range orphanFiles {
+		_ = os.Remove(p)
+	}
+
 	return dropErr
+}
+
+// captureSandboxOrphansLocked queries the sandbox and prod data-file
+// manifests via the DuckLake metadata shadow databases and returns absolute
+// paths of parquet files that the sandbox catalog references but prod does
+// not. Caller holds s.mu and must call this BEFORE detaching/closing.
+//
+// On any error the function returns nil — orphan cleanup is best-effort and
+// must never block the main close path.
+func (s *Session) captureSandboxOrphansLocked() []string {
+	if s.sandboxDataPath == "" {
+		return nil
+	}
+	prodPaths, err := s.queryDataFilePathsLocked(s.prodAlias)
+	if err != nil {
+		return nil
+	}
+	sandboxPaths, err := s.queryDataFilePathsLocked("sandbox")
+	if err != nil {
+		return nil
+	}
+	prodSet := make(map[string]bool, len(prodPaths))
+	for _, p := range prodPaths {
+		prodSet[p] = true
+	}
+	var orphans []string
+	for _, p := range sandboxPaths {
+		if !prodSet[p] {
+			orphans = append(orphans, filepath.Join(s.sandboxDataPath, p))
+		}
+	}
+	return orphans
+}
+
+// queryDataFilePathsLocked returns the *relative* file paths under the
+// shared data directory for parquet files registered in a DuckLake catalog.
+// DuckLake stores `ducklake_data_file.path` as just a filename, so we join
+// with `ducklake_table.table_name` and `ducklake_schema.schema_name` to
+// reconstruct the full relative path "<schema>/<table>/<filename>".
+//
+// Caller holds s.mu.
+func (s *Session) queryDataFilePathsLocked(alias string) ([]string, error) {
+	q := fmt.Sprintf(`
+		SELECT sch.schema_name || '/' || tbl.table_name || '/' || df.path AS rel_path
+		FROM __ducklake_metadata_%s.ducklake_data_file df
+		JOIN __ducklake_metadata_%s.ducklake_table tbl USING (table_id)
+		JOIN __ducklake_metadata_%s.ducklake_schema sch USING (schema_id)`,
+		alias, alias, alias)
+	rows, err := s.conn.QueryContext(context.Background(), q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // dropPostgresSandboxDatabaseAfterCloseLocked drops the sandbox postgres
@@ -1261,6 +1353,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 	// Store aliases for later use
 	s.catalogAlias = "sandbox"
 	s.prodAlias = prodAlias
+	s.sandboxDataPath = prodDataPath
 	sqlfiles.SetCatalogAlias("sandbox")
 
 	// Disable data inlining on sandbox catalog (workaround for DuckLake ALTER + inlined data bug).

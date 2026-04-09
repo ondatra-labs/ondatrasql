@@ -214,18 +214,26 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	result.RunType = decision.RunType
 	result.RunReason = decision.Reason
 
-	// v0.12.1+ sandbox override (Bug S5): if a model has audits, constraints,
-	// or warnings, never short-circuit to "skip" in sandbox mode. The model
-	// SQL hash isn't sensitive to directive-only changes (audit thresholds,
-	// constraint values), so a user editing only an audit threshold to a
-	// guaranteed-failing value would otherwise see [OK] skip with the audits
-	// silently un-evaluated.
+	// v0.12.1+ sandbox override (Bug S5): if a model has any validation- or
+	// transformation-relevant directive, never short-circuit to "skip" in
+	// sandbox mode. The model SQL hash isn't sensitive to directive-only
+	// changes (audit thresholds, constraint values, mask macro names), so a
+	// user editing only such a value would otherwise see [OK] skip with the
+	// directives silently un-evaluated.
 	//
-	// Models without any directives can still skip in sandbox — there's
+	// What counts as "directive present" for the purposes of this override:
+	//   - Audits, Constraints, Warnings: pure validation, must always run
+	//   - ColumnTags: drives applyColumnMasking which mutates the data
+	//     (mask, hash, redact macros), so an edit changes the output
+	//
+	// Models without any of these can still skip in sandbox — there's
 	// nothing to validate beyond the data, which is already inherited from
 	// the prod fork.
 	if r.sess.ProdAlias() != "" && result.RunType == "skip" {
-		hasDirectives := len(model.Audits) > 0 || len(model.Constraints) > 0 || len(model.Warnings) > 0
+		hasDirectives := len(model.Audits) > 0 ||
+			len(model.Constraints) > 0 ||
+			len(model.Warnings) > 0 ||
+			len(model.ColumnTags) > 0
 		if hasDirectives {
 			result.RunType = "backfill"
 			result.RunReason = "sandbox: forced re-run for directive validation"

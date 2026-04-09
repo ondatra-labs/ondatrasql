@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
@@ -440,6 +441,100 @@ SELECT 1 AS id, 100 AS amount`)
 
 	if entries, _ := filepath.Glob(filepath.Join(p.Dir, ".sandbox", "*")); len(entries) > 0 {
 		t.Errorf(".sandbox/<sub> must be removed after failed sandbox run, got entries: %v — see model.go cleanup-leak fix", entries)
+	}
+}
+
+// TestRun_Sandbox_NoParquetLeak is the regression test for Bug S16.
+// Pre-v0.12.2 each sandbox session wrote ~2 new parquet files into prod's
+// shared data directory (the registry-update file and the model-output
+// file) and never cleaned them up. The fix is in Session.Close: query both
+// catalogs' data-file manifests, compute the diff, and delete sandbox-only
+// files from disk before tearing down.
+func TestRun_Sandbox_NoParquetLeak(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	p.AddModel("staging/leak.sql", `-- @kind: table
+-- @audit: row_count >= 1
+SELECT 1 AS id`)
+
+	// Materialize prod once.
+	if err := run([]string{"run", "staging.leak"}); err != nil {
+		t.Fatalf("prod run: %v", err)
+	}
+
+	dataPath := filepath.Join(p.Dir, "ducklake.sqlite.files")
+	countParquet := func() int {
+		var n int
+		_ = filepath.WalkDir(dataPath, func(_ string, d os.DirEntry, _ error) error {
+			if d != nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".parquet") {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+	before := countParquet()
+
+	// Run sandbox 5 times. Pre-v0.12.2 each run added 2 orphan parquet files.
+	for i := 0; i < 5; i++ {
+		_ = captureOutput(t, func() {
+			_ = run([]string{"sandbox", "staging.leak"})
+		})
+	}
+
+	after := countParquet()
+	if after != before {
+		t.Errorf("parquet count grew from %d to %d after 5 sandbox runs (Bug S16 regression)",
+			before, after)
+	}
+}
+
+// TestRun_Sandbox_ReapsStaleSubdirs is the regression test for Bug S17.
+// Pre-v0.12.2 the .sandbox/<pid>-<rand> directory left behind by a SIGKILL'd
+// or crashed sandbox session was never cleaned up by subsequent normal
+// sandbox runs — disk leak that accumulates indefinitely. v0.12.2 adds a
+// best-effort reap step to createSandbox: scan .sandbox/, find subdirs
+// whose pid is dead AND whose mtime is older than 1 minute, delete them.
+//
+// We simulate the stale state by pre-creating .sandbox/<dead-pid>-<rand>
+// with an old mtime, then running a normal sandbox command, and asserting
+// the stale dir is gone.
+func TestRun_Sandbox_ReapsStaleSubdirs(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	p.AddModel("staging/x.sql", `-- @kind: table
+SELECT 1 AS id`)
+
+	// Pre-seed a stale subdir using pid 1 (init/systemd — always exists,
+	// so to make it look stale we use a definitely-dead pid). Pid 999999
+	// is virtually guaranteed not to exist on a typical Linux system.
+	staleParent := filepath.Join(p.Dir, ".sandbox")
+	if err := os.MkdirAll(staleParent, 0o755); err != nil {
+		t.Fatalf("seed parent: %v", err)
+	}
+	staleDir := filepath.Join(staleParent, "999999-deadbeef")
+	if err := os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatalf("seed stale dir: %v", err)
+	}
+	// Backdate so reapStaleSandboxDirs's age check accepts it as stale.
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(staleDir, oldTime, oldTime); err != nil {
+		t.Fatalf("backdate stale dir: %v", err)
+	}
+
+	_ = captureOutput(t, func() {
+		_ = run([]string{"sandbox", "staging.x"})
+	})
+
+	// The stale subdir must have been reaped during createSandbox.
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Errorf("stale .sandbox/999999-deadbeef should have been reaped, got err=%v", err)
 	}
 }
 

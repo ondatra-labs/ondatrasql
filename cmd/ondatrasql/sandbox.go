@@ -116,9 +116,15 @@ func printSandboxResult(result *execute.Result, target string, err error) {
 		return
 	}
 
+	// Bug S19 fix: distinguish "ran successfully" from "skipped" so users
+	// don't read [OK] (0s) for a downstream model that was skipped because
+	// its upstream failed and think it succeeded.
 	status := "OK"
-	if len(result.Errors) > 0 {
+	switch {
+	case len(result.Errors) > 0:
 		status = "FAIL"
+	case result.RunType == "skip":
+		status = "SKIP"
 	}
 
 	// Compact format: [OK] staging.customers (123ms)

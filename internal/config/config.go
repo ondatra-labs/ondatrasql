@@ -138,7 +138,14 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 		return defaults
 	}
 
-	lines := strings.Split(string(content), "\n")
+	// Bug S18: expand environment variables before parsing. Otherwise the
+	// regex captures literal ${VAR} tokens, the path-resolution logic joins
+	// them with projectDir to produce nonsense like /tmp/p27/${MY_CATALOG},
+	// and sandbox mode (which uses the parsed path directly) fails. Prod
+	// happens to work because session.go expands env vars at SQL execution
+	// time on the original file content, but the parsed config struct never
+	// sees the resolved values without this.
+	lines := strings.Split(os.ExpandEnv(string(content)), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "--") {
