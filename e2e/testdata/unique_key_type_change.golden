@@ -1,0 +1,21 @@
+--- run 1: INTEGER key ---
+target: staging.scd
+kind: scd2
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+--- run 2: VARCHAR key (forces backfill) ---
+target: staging.scd
+kind: scd2
+run_type: backfill
+rows_affected: 1
+run_reason: unique_key type changed
+warning: schema evolution: unique_key column "id" type changed from INTEGER to VARCHAR, forcing backfill
+id_type: VARCHAR
+val: v2
+--- run 3: incremental (no type mismatch) ---
+target: staging.scd
+kind: scd2
+run_type: incremental
+rows_affected: 0
+run_reason: incremental run

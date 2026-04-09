@@ -1,0 +1,15 @@
+--- run 1: 3 columns ---
+target: staging.dropped
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+--- run 2: drop name+age, add status ---
+target: staging.dropped
+kind: table
+run_type: full
+rows_affected: 1
+run_reason: sql changed
+warning: schema evolution: + status (VARCHAR); - name, age
+columns: id,status
+status: active

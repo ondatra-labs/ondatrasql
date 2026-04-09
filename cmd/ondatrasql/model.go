@@ -461,10 +461,8 @@ func showSandboxImpact(cfg *config.Config, target string) {
 // to keep the box close-borders aligned even when the underlying error
 // (often a multi-line DuckDB diagnostic) is wider than the box.
 func wrapErrorMessage(msg string, width int) []string {
-	// First flatten newlines in the error to spaces — DuckDB errors include
-	// hint lines we don't have room for inside the box.
-	flat := strings.ReplaceAll(msg, "\n", " ")
-	flat = strings.Join(strings.Fields(flat), " ")
+	// Normalize all whitespace (including newlines) to single spaces.
+	flat := strings.Join(strings.Fields(msg), " ")
 	if width <= 0 {
 		width = 60
 	}

@@ -1,0 +1,23 @@
+--- run 1: initial ---
+target: staging.typed
+kind: table
+run_type: backfill
+rows_affected: 1
+run_reason: first run
+--- run 2: INTEGER → DOUBLE ---
+target: staging.typed
+kind: table
+run_type: incremental
+rows_affected: 1
+run_reason: sql changed
+warning: schema evolution: val: INTEGER → DOUBLE
+val_type: VARCHAR
+--- run 3: DOUBLE → VARCHAR ---
+target: staging.typed
+kind: table
+run_type: full
+rows_affected: 1
+run_reason: sql changed
+warning: schema evolution: val: DOUBLE → VARCHAR
+val_type: VARCHAR
+val: hello

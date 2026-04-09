@@ -181,13 +181,8 @@ func run(args []string) error {
 		return runAuth(ctx, cfg, args[1])
 
 	default:
-		// Whitelist: command names may only contain ASCII letters, digits,
-		// underscores, and hyphens. This prevents path traversal and any
-		// other injection via the sql/<cmd>.sql file lookup below.
-		for _, r := range cmd {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
-				return fmt.Errorf("invalid command: %q", cmd)
-			}
+		if !isValidCommandName(cmd) {
+			return fmt.Errorf("invalid command: %q", cmd)
 		}
 		// Check if there's a sql/<cmd>.sql file to execute
 		sqlFile := filepath.Join(cfg.ProjectDir, "sql", cmd+".sql")
@@ -197,6 +192,18 @@ func run(args []string) error {
 		}
 		return fmt.Errorf("unknown command: %s (run 'ondatrasql' for help)", cmd)
 	}
+}
+
+// isValidCommandName checks that a command name contains only safe ASCII
+// characters (letters, digits, underscores, hyphens). Prevents path traversal
+// and injection via the sql/<cmd>.sql file lookup.
+func isValidCommandName(cmd string) bool {
+	for _, r := range cmd {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func printHelp() {

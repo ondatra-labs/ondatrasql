@@ -263,6 +263,118 @@ SELECT 1 AS id, 'Alice' AS name, 30 AS age
 	assertGolden(t, "schema_evolution", snap)
 }
 
+func TestE2E_SchemaEvolution_TypeChange(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Run 1: INTEGER column
+	p.AddModel("staging/typed.sql", `-- @kind: table
+SELECT 1 AS id, CAST(100 AS INTEGER) AS val
+`)
+	result1 := runModel(t, p, "staging/typed.sql")
+
+	// Run 2: type change INTEGER → DOUBLE
+	p.AddModel("staging/typed.sql", `-- @kind: table
+SELECT 1 AS id, CAST(3.14 AS DOUBLE) AS val
+`)
+	result2 := runModel(t, p, "staging/typed.sql")
+
+	// Run 3: destructive type change DOUBLE → VARCHAR
+	p.AddModel("staging/typed.sql", `-- @kind: table
+SELECT 1 AS id, 'hello' AS val
+`)
+	result3 := runModel(t, p, "staging/typed.sql")
+
+	snap := newSnapshot()
+	snap.addLine("--- run 1: initial ---")
+	snap.addResult(result1)
+	snap.addLine("--- run 2: INTEGER → DOUBLE ---")
+	snap.addResult(result2)
+	snap.addQuery(p.Sess, "val_type", "SELECT data_type FROM information_schema.columns WHERE table_name = 'typed' AND column_name = 'val'")
+	snap.addLine("--- run 3: DOUBLE → VARCHAR ---")
+	snap.addResult(result3)
+	snap.addQuery(p.Sess, "val_type", "SELECT data_type FROM information_schema.columns WHERE table_name = 'typed' AND column_name = 'val'")
+	snap.addQuery(p.Sess, "val", "SELECT val FROM staging.typed")
+	assertGolden(t, "schema_evolution_type_change", snap)
+}
+
+func TestE2E_SchemaEvolution_ColumnDrop(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Run 1: 3 columns
+	p.AddModel("staging/dropped.sql", `-- @kind: table
+SELECT 1 AS id, 'Alice' AS name, 30 AS age
+`)
+	result1 := runModel(t, p, "staging/dropped.sql")
+
+	// Run 2: drop 2 columns, add 1
+	p.AddModel("staging/dropped.sql", `-- @kind: table
+SELECT 1 AS id, 'active' AS status
+`)
+	result2 := runModel(t, p, "staging/dropped.sql")
+
+	snap := newSnapshot()
+	snap.addLine("--- run 1: 3 columns ---")
+	snap.addResult(result1)
+	snap.addLine("--- run 2: drop name+age, add status ---")
+	snap.addResult(result2)
+	snap.addQuery(p.Sess, "columns", "SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_name = 'dropped'")
+	snap.addQuery(p.Sess, "status", "SELECT status FROM staging.dropped")
+	assertGolden(t, "schema_evolution_column_drop", snap)
+}
+
+func TestE2E_UniqueKeyTypeChange(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Run 1: SCD2 with INTEGER key
+	p.AddModel("staging/scd.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT 1 AS id, 'v1' AS val
+`)
+	result1 := runModel(t, p, "staging/scd.sql")
+
+	// Run 2: change key type INTEGER → VARCHAR (P6 fix: forces backfill)
+	p.AddModel("staging/scd.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT '1' AS id, 'v2' AS val
+`)
+	result2 := runModel(t, p, "staging/scd.sql")
+
+	// Run 3: incremental should work (no type mismatch)
+	result3 := runModel(t, p, "staging/scd.sql")
+
+	snap := newSnapshot()
+	snap.addLine("--- run 1: INTEGER key ---")
+	snap.addResult(result1)
+	snap.addLine("--- run 2: VARCHAR key (forces backfill) ---")
+	snap.addResult(result2)
+	snap.addQuery(p.Sess, "id_type", "SELECT data_type FROM information_schema.columns WHERE table_name = 'scd' AND column_name = 'id'")
+	snap.addQuery(p.Sess, "val", "SELECT val FROM staging.scd WHERE is_current")
+	snap.addLine("--- run 3: incremental (no type mismatch) ---")
+	snap.addResult(result3)
+	assertGolden(t, "unique_key_type_change", snap)
+}
+
+func TestE2E_AuditNullHandling(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Model with all-NULL values and aggregate audits — should fail
+	p.AddModel("staging/nulls.sql", `-- @kind: table
+-- @audit: mean(val) >= 0
+-- @audit: freshness(ts, 24h)
+SELECT 1 AS id, NULL::INTEGER AS val, NULL::TIMESTAMP AS ts
+`)
+	_, err := runModelErr(t, p, "staging/nulls.sql")
+
+	snap := newSnapshot()
+	snap.addLine(fmt.Sprintf("audit_failed: %v", err != nil))
+	if err != nil {
+		snap.addLine(fmt.Sprintf("mentions_null: %v", strings.Contains(err.Error(), "NULL")))
+		snap.addLine(fmt.Sprintf("mentions_mean: %v", strings.Contains(err.Error(), "mean")))
+		snap.addLine(fmt.Sprintf("mentions_freshness: %v", strings.Contains(err.Error(), "freshness")))
+	}
+	assertGolden(t, "audit_null_handling", snap)
+}
+
 // --- Sandbox cross-schema tests ---
 // These tests verify that all model kinds work correctly in sandbox mode
 // when reading from upstream tables in a different schema (cross-schema refs).
