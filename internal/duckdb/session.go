@@ -1137,6 +1137,21 @@ func (s *Session) forkPostgresCatalog(prodConnStr string) (string, error) {
 	}
 	defer adminDB.Close()
 
+	// Bug S30 fix: check that the prod database actually exists before
+	// attempting CREATE DATABASE TEMPLATE. Without this, a freshly-init'd
+	// project (or a typo in dbname) produces a cryptic postgres error
+	// instead of the friendly actionable message that S15 added for sqlite.
+	var exists bool
+	if err := adminDB.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", prodDB).Scan(&exists); err != nil {
+		return "", fmt.Errorf("fork prod catalog: check prod database: %w", err)
+	}
+	if !exists {
+		return "", fmt.Errorf(
+			"sandbox needs an existing prod catalog to fork from, but postgres database %q does not exist yet. "+
+				"Run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` can validate changes against it",
+			prodDB)
+	}
+
 	// Terminate any other connections to the source database. CREATE DATABASE
 	// TEMPLATE refuses to run if anyone else has the source open, and the
 	// duckdb postgres extension caches connections that may linger past the

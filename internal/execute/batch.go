@@ -29,7 +29,7 @@ type RunTypeDecisions map[string]*RunTypeDecision
 //
 // The query builds a CTE with model info (target, current_hash, kind) and joins
 // with DuckDB macros to compute decisions in one pass.
-func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model) (RunTypeDecisions, error) {
+func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, configHash ...string) (RunTypeDecisions, error) {
 	if len(models) == 0 {
 		return make(RunTypeDecisions), nil
 	}
@@ -39,6 +39,11 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model) (RunT
 		target      string
 		currentHash string
 		kind        string
+	}
+
+	cfgHash := ""
+	if len(configHash) > 0 {
+		cfgHash = configHash[0]
 	}
 
 	var infos []modelInfo
@@ -51,6 +56,7 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model) (RunT
 				PartitionedBy:      m.PartitionedBy,
 				Incremental:        m.Incremental,
 				IncrementalInitial: m.IncrementalInitial,
+				ConfigHash:         cfgHash,
 			}),
 			kind: m.Kind,
 		})
@@ -109,7 +115,11 @@ func (d RunTypeDecisions) GetDecision(target string) *RunTypeDecision {
 
 // ComputeSingleRunType computes run_type for a single model using the same SQL logic as batch.
 // This provides consistency between single model runs and run_all.
-func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model) (*RunTypeDecision, error) {
+func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model, configHash ...string) (*RunTypeDecision, error) {
+	cfgHash := ""
+	if len(configHash) > 0 {
+		cfgHash = configHash[0]
+	}
 	// Use the same SQL template with a single VALUE row
 	target := strings.ReplaceAll(model.Target, "'", "''")
 	hash := strings.ReplaceAll(backfill.ModelHash(model.SQL, backfill.ModelDirectives{
@@ -118,6 +128,7 @@ func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model) (*RunTypeDe
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
+		ConfigHash:         cfgHash,
 	}), "'", "''")
 	kind := strings.ReplaceAll(model.Kind, "'", "''")
 	valueRow := fmt.Sprintf("('%s','%s','%s')", target, hash, kind)

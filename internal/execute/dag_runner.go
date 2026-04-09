@@ -6,7 +6,9 @@ package execute
 
 import (
 	"context"
+	"path/filepath"
 
+	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -42,7 +44,8 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	callback DAGCallback,
 ) (map[string]*Result, map[string]error) {
 
-	decisions, _ := ComputeRunTypeDecisions(sess, sorted)
+	cfgHash := backfill.ConfigHash(filepath.Join(projectDir, "config"))
+	decisions, _ := ComputeRunTypeDecisions(sess, sorted, cfgHash)
 
 	results := make(map[string]*Result, len(sorted))
 	errors := make(map[string]error, len(sorted))

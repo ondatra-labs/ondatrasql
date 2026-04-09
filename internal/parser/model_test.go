@@ -1616,3 +1616,63 @@ func TestParseModel_EmptySQLBody_EventsExempt(t *testing.T) {
 		t.Errorf("events model should not be rejected by empty-SQL check: %v", err)
 	}
 }
+
+// TestValidateModel_ViewRejectsColumnTags is the regression test for Bug S22.
+// A @column directive with only a tag (no description) populated ColumnTags
+// but not ColumnDescriptions, bypassing the view validation check that only
+// inspected ColumnDescriptions. The fix checks both.
+func TestValidateModel_ViewRejectsColumnTags(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	modelsDir := filepath.Join(tmpDir, "models", "staging")
+	os.MkdirAll(modelsDir, 0755)
+
+	tests := []struct {
+		name      string
+		file      string
+		content   string
+		wantError bool
+	}{
+		{
+			"tag-only rejected",
+			"tagonly.sql",
+			"-- @kind: view\n-- @column: ssn = | mask_ssn\nSELECT 1 AS ssn\n",
+			true,
+		},
+		{
+			"desc-only rejected",
+			"desconly.sql",
+			"-- @kind: view\n-- @column: ssn = Social security number\nSELECT 1 AS ssn\n",
+			true,
+		},
+		{
+			"desc-and-tag rejected",
+			"descandtag.sql",
+			"-- @kind: view\n-- @column: ssn = SSN | mask_ssn\nSELECT 1 AS ssn\n",
+			true,
+		},
+		{
+			"no column accepted",
+			"nocolumn.sql",
+			"-- @kind: view\nSELECT 1 AS ssn\n",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(modelsDir, tt.file)
+			os.WriteFile(path, []byte(tt.content), 0644)
+			_, err := ParseModel(path, tmpDir)
+			if tt.wantError && err == nil {
+				t.Errorf("expected error for %q, got nil", tt.name)
+			}
+			if !tt.wantError && err != nil {
+				t.Errorf("unexpected error for %q: %v", tt.name, err)
+			}
+			if tt.wantError && err != nil && !strings.Contains(err.Error(), "@column is not supported for views") {
+				t.Errorf("wrong error for %q: %v", tt.name, err)
+			}
+		})
+	}
+}

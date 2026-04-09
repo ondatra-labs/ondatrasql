@@ -150,7 +150,7 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 	// Step 5: Commit metadata
 	if totalRows > 0 {
 		stepStart = time.Now()
-		sqlHash := backfill.ModelHash(model.SQL, backfill.ModelDirectives{Kind: model.Kind})
+		sqlHash := backfill.ModelHash(model.SQL, backfill.ModelDirectives{Kind: model.Kind, ConfigHash: r.configHash})
 		_, err := r.materializeEvents(model, sqlHash, result.RunType, result, start)
 		if err != nil {
 			r.trace(result, "commit", stepStart, "error")

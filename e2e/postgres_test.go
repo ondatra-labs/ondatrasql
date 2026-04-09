@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,6 +239,80 @@ func TestPostgres_Sandbox(t *testing.T) {
 	}
 	if addedName != "Charlie" {
 		t.Errorf("added name = %s, want Charlie", addedName)
+	}
+}
+
+// TestPostgres_SandboxMissingProdDB is the regression test for Bug S30.
+// Before the fix, sandbox against a non-existent postgres database produced
+// a cryptic pq error. After the fix, it produces the same friendly message
+// as the sqlite path (Bug S15): "sandbox needs an existing prod catalog..."
+func TestPostgres_SandboxMissingProdDB(t *testing.T) {
+	ctx := context.Background()
+
+	pgContainer, err := postgres.Run(ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("unrelated"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(30*time.Second),
+		),
+	)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(func() { pgContainer.Terminate(ctx) })
+
+	host, err := pgContainer.Host(ctx)
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	port, err := pgContainer.MappedPort(ctx, "5432")
+	if err != nil {
+		t.Fatalf("get port: %v", err)
+	}
+
+	// Point at a database that does NOT exist on this server
+	connStr := fmt.Sprintf("ducklake:postgres:dbname=nonexistent_db host=%s port=%s user=test password=test sslmode=disable", host, port.Port())
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(filepath.Join(dir, "models", "staging"), 0o755)
+
+	dataPath := filepath.Join(dir, "data")
+	catalogSQL := fmt.Sprintf("ATTACH '%s' AS lake (DATA_PATH '%s');\n", connStr, dataPath)
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"), []byte(catalogSQL), 0o644)
+
+	sess, err := duckdb.NewSession(":memory:")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	defer sess.Close()
+
+	if err := sess.Exec("INSTALL postgres"); err != nil {
+		t.Fatalf("install postgres: %v", err)
+	}
+	if err := sess.Exec("LOAD postgres"); err != nil {
+		t.Fatalf("load postgres: %v", err)
+	}
+
+	sandboxCatalog := filepath.Join(dir, ".sandbox", "sandbox.sqlite")
+	os.MkdirAll(filepath.Join(dir, ".sandbox"), 0o755)
+
+	err = sess.InitSandbox(configDir, connStr, dataPath, sandboxCatalog, "lake")
+	if err == nil {
+		t.Fatal("expected error for missing prod database, got nil")
+	}
+
+	// Must contain the friendly message, not a raw pq error
+	if !strings.Contains(err.Error(), "sandbox needs an existing prod catalog") {
+		t.Errorf("expected friendly S30 error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nonexistent_db") {
+		t.Errorf("error should name the missing database, got: %v", err)
 	}
 }
 

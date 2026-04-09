@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,6 +50,7 @@ type Runner struct {
 	mode             Mode
 	dagRunID         string
 	projectDir       string               // Project root directory (for Starlark load())
+	configHash       string               // SHA256 of config/*.sql files (Bug S21: macros/variables bust hash)
 	gitInfo          gitInfo              // Cached Git metadata
 	runTypeDecisions RunTypeDecisions     // Pre-computed run_type decisions (batch optimization)
 	astCache         map[string]string    // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
@@ -96,8 +98,10 @@ func (r *Runner) SetClaimLimit(limit int) {
 }
 
 // SetProjectDir sets the project root directory for Starlark load() support.
+// Also computes the config hash for Bug S21 (macros/variables change detection).
 func (r *Runner) SetProjectDir(dir string) {
 	r.projectDir = dir
+	r.configHash = backfill.ConfigHash(filepath.Join(dir, "config"))
 }
 
 // getAST returns the AST JSON for a SQL query, using cache if available.
@@ -188,6 +192,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
+		ConfigHash:         r.configHash,
 	})
 	r.trace(result, "hash_sql", stepStart, "ok")
 
@@ -203,7 +208,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// SINGLE: Compute using same SQL logic as batch
 		stepStart = time.Now()
 		var err error
-		decision, err = ComputeSingleRunType(r.sess, model)
+		decision, err = ComputeSingleRunType(r.sess, model, r.configHash)
 		r.trace(result, "run_type.compute", stepStart, "ok")
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("run_type check: %v", err))

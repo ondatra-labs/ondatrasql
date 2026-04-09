@@ -22,7 +22,7 @@ import (
 func (r *Runner) runView(model *parser.Model, result *Result, start time.Time) (*Result, error) {
 	// Compute SQL hash
 	stepStart := time.Now()
-	sqlHash := backfill.ModelHash(model.SQL, backfill.ModelDirectives{Kind: model.Kind})
+	sqlHash := backfill.ModelHash(model.SQL, backfill.ModelDirectives{Kind: model.Kind, ConfigHash: r.configHash})
 	r.trace(result, "hash_sql", stepStart, "ok")
 
 	// Check if view needs updating (compare hash with previous commit)

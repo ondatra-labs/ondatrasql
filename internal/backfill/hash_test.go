@@ -4,7 +4,11 @@
 
 package backfill
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestHash(t *testing.T) {
 	t.Parallel()
@@ -186,6 +190,92 @@ func TestHash_OnlyComments(t *testing.T) {
 	if h1 != h2 {
 		t.Errorf("comment-only SQL should hash to same value")
 	}
+}
+
+func TestModelHash_ConfigHash(t *testing.T) {
+	t.Parallel()
+	sql := "SELECT mask_ssn(ssn) FROM users"
+	d := ModelDirectives{Kind: "table"}
+
+	t.Run("empty config hash preserves backward compat", func(t *testing.T) {
+		t.Parallel()
+		h1 := ModelHash(sql, d)
+		d2 := d
+		d2.ConfigHash = ""
+		h2 := ModelHash(sql, d2)
+		if h1 != h2 {
+			t.Error("empty ConfigHash should produce same hash as no ConfigHash")
+		}
+	})
+
+	t.Run("config change busts hash", func(t *testing.T) {
+		t.Parallel()
+		d1 := d
+		d1.ConfigHash = "aaa"
+		d2 := d
+		d2.ConfigHash = "bbb"
+		h1 := ModelHash(sql, d1)
+		h2 := ModelHash(sql, d2)
+		if h1 == h2 {
+			t.Error("different ConfigHash should produce different model hash")
+		}
+	})
+}
+
+func TestConfigHash(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing dir returns empty", func(t *testing.T) {
+		t.Parallel()
+		h := ConfigHash("/nonexistent/path")
+		if h != "" {
+			t.Errorf("missing dir should return empty, got %q", h)
+		}
+	})
+
+	t.Run("empty dir returns empty", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		h := ConfigHash(dir)
+		if h != "" {
+			t.Errorf("empty dir should return empty, got %q", h)
+		}
+	})
+
+	t.Run("same content same hash", func(t *testing.T) {
+		t.Parallel()
+		dir1 := t.TempDir()
+		dir2 := t.TempDir()
+		os.WriteFile(filepath.Join(dir1, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
+		os.WriteFile(filepath.Join(dir2, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
+		if ConfigHash(dir1) != ConfigHash(dir2) {
+			t.Error("same content should produce same hash")
+		}
+	})
+
+	t.Run("different content different hash", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
+		h1 := ConfigHash(dir)
+		os.WriteFile(filepath.Join(dir, "macros.sql"), []byte("CREATE MACRO m() AS 2;"), 0o644)
+		h2 := ConfigHash(dir)
+		if h1 == h2 {
+			t.Error("different content should produce different hash")
+		}
+	})
+
+	t.Run("ignores non-sql files", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
+		h1 := ConfigHash(dir)
+		os.WriteFile(filepath.Join(dir, "README.md"), []byte("ignore me"), 0o644)
+		h2 := ConfigHash(dir)
+		if h1 != h2 {
+			t.Error("non-sql files should not affect hash")
+		}
+	})
 }
 
 func TestNormalize_EdgeCases(t *testing.T) {

@@ -8,6 +8,9 @@ package backfill
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -29,11 +32,13 @@ type ModelDirectives struct {
 	PartitionedBy      []string
 	Incremental        string
 	IncrementalInitial string
+	ConfigHash         string // SHA256 of config/*.sql files (macros, variables, etc.)
 }
 
 // ModelHash calculates a hash that includes both the code body and semantic
-// directives. Changing @kind, @unique_key, @partitioned_by, @incremental, or
-// @incremental_initial triggers a backfill because the hash changes.
+// directives. Changing @kind, @unique_key, @partitioned_by, @incremental,
+// @incremental_initial, or config/*.sql file content triggers a backfill
+// because the hash changes.
 func ModelHash(sql string, d ModelDirectives) string {
 	normalized := normalize(sql)
 
@@ -51,6 +56,10 @@ func ModelHash(sql string, d ModelDirectives) string {
 	b.WriteString(d.Incremental)
 	b.WriteString("\x00incremental_initial=")
 	b.WriteString(d.IncrementalInitial)
+	if d.ConfigHash != "" {
+		b.WriteString("\x00config=")
+		b.WriteString(d.ConfigHash)
+	}
 
 	h := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(h[:])
@@ -87,4 +96,39 @@ func normalize(sql string) string {
 	}
 
 	return strings.ToLower(normalized)
+}
+
+// ConfigHash computes a SHA256 hash over all .sql files in the config
+// directory. Changes to macros.sql, variables.sql, secrets.sql, sources.sql,
+// or any other config SQL file will change the hash and trigger re-runs for
+// every model (Bug S21 fix). Files are sorted by name for determinism.
+// Returns "" if the directory doesn't exist or contains no .sql files.
+func ConfigHash(configDir string) string {
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+
+	h := sha256.New()
+	for _, name := range names {
+		content, err := os.ReadFile(filepath.Join(configDir, name))
+		if err != nil {
+			continue
+		}
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		h.Write(content)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

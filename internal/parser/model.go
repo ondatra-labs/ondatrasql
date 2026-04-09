@@ -447,7 +447,7 @@ func validateModel(m *Model) error {
 		if len(m.SortedBy) > 0 {
 			return fmt.Errorf("@sorted_by is not supported for views (no materialized data to sort)")
 		}
-		if len(m.ColumnDescriptions) > 0 {
+		if len(m.ColumnDescriptions) > 0 || len(m.ColumnTags) > 0 {
 			return fmt.Errorf("@column is not supported for views (DuckLake does not support column comments on views)")
 		}
 	}
