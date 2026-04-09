@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.12.2"
+var version = "0.12.4"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
