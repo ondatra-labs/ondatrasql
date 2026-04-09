@@ -443,12 +443,23 @@ func (r *Runner) applySchemaEvolution(target string, change backfill.SchemaChang
 		}
 	}
 
-	// Apply type promotions
+	// Apply type changes. Try ALTER SET DATA TYPE first (works for promotable
+	// changes like INTEGER → BIGINT). If DuckLake rejects it (non-promotable
+	// like INTEGER → VARCHAR or INTEGER → DOUBLE), fall back to DROP + ADD
+	// which always works. The column moves to the end of the schema, but
+	// INSERT BY NAME matches by name not position so this is harmless.
 	for _, tc := range change.TypeChanged {
 		qc := duckdb.QuoteIdentifier(tc.Column)
 		alterSQL := sql.MustFormat("schema/alter_column_type.sql", target, qc, tc.NewType)
 		if err := r.sess.Exec(alterSQL); err != nil {
-			return fmt.Errorf("alter column %s type: %w", tc.Column, err)
+			dropSQL := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc)
+			if dropErr := r.sess.Exec(dropSQL); dropErr != nil {
+				return fmt.Errorf("change column %s type from %s to %s: ALTER failed (%w), DROP fallback also failed: %w", tc.Column, tc.OldType, tc.NewType, err, dropErr)
+			}
+			addSQL := sql.MustFormat("schema/alter_add_column.sql", target, qc, tc.NewType)
+			if addErr := r.sess.Exec(addSQL); addErr != nil {
+				return fmt.Errorf("change column %s type from %s to %s: ALTER failed (%w), ADD fallback also failed: %w", tc.Column, tc.OldType, tc.NewType, err, addErr)
+			}
 		}
 	}
 
@@ -473,9 +484,15 @@ func (r *Runner) buildSchemaEvolutionSQL(target string, change backfill.SchemaCh
 		qc := duckdb.QuoteIdentifier(col.Name)
 		stmts = append(stmts, sql.MustFormat("schema/alter_add_column.sql", target, qc, col.Type))
 	}
+	// Type changes: always use DROP + ADD instead of ALTER SET DATA TYPE.
+	// DuckLake's ALTER TYPE rules are stricter than OndatraSQL's promotability
+	// check (e.g. INTEGER → DOUBLE is considered promotable by our macro but
+	// rejected by DuckLake). DROP + ADD always works. The column moves to the
+	// end of the schema, but INSERT BY NAME matches by name not position.
 	for _, tc := range change.TypeChanged {
 		qc := duckdb.QuoteIdentifier(tc.Column)
-		stmts = append(stmts, sql.MustFormat("schema/alter_column_type.sql", target, qc, tc.NewType))
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc))
+		stmts = append(stmts, sql.MustFormat("schema/alter_add_column.sql", target, qc, tc.NewType))
 	}
 
 	return strings.Join(stmts, ";\n")
