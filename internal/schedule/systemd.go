@@ -66,7 +66,7 @@ Description=OndatraSQL run — %s
 [Service]
 Type=oneshot
 WorkingDirectory=%s
-ExecStart=%s run
+ExecStart="%s" run
 StandardOutput=journal
 StandardError=journal
 `, projectName, projectDir, binaryPath)

@@ -603,8 +603,10 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 		return printJSON(cols, rawData)
 	case "csv":
 		return printCSV(cols, strData)
-	default:
+	case "markdown", "md":
 		return printMarkdown(cols, strData)
+	default:
+		return fmt.Errorf("unknown format %q: supported formats are csv, json, markdown", format)
 	}
 }
 
@@ -1152,12 +1154,10 @@ func (s *Session) forkPostgresCatalog(prodConnStr string) (string, error) {
 			prodDB)
 	}
 
-	// Terminate any other connections to the source database. CREATE DATABASE
-	// TEMPLATE refuses to run if anyone else has the source open, and the
-	// duckdb postgres extension caches connections that may linger past the
-	// previous session's Close. We're in a sandbox flow — by design the
-	// caller is preparing to fork prod for local validation, so disconnecting
-	// stragglers is acceptable.
+	// Terminate other connections to the source database. CREATE DATABASE
+	// TEMPLATE requires exclusive access — it refuses to run if anyone else
+	// has the source open. We count active connections first so the caller
+	// can warn the user (via SandboxPgActiveConnections), then terminate.
 	terminateSQL := `
 		SELECT pg_terminate_backend(pid)
 		FROM pg_stat_activity
@@ -1183,6 +1183,45 @@ func (s *Session) forkPostgresCatalog(prodConnStr string) (string, error) {
 	}
 	sandboxParams["dbname"] = sandboxDB
 	return "ducklake:postgres:" + buildPostgresConnString(sandboxParams), nil
+}
+
+// SandboxPgActiveConnections returns the number of other sessions connected to
+// the prod postgres database. Used by the CLI layer to warn before sandbox fork
+// terminates those connections. Returns 0 if the backend is not postgres or if
+// the check fails.
+func SandboxPgActiveConnections(prodConnStr string) int {
+	if !strings.HasPrefix(prodConnStr, "ducklake:postgres:") {
+		return 0
+	}
+	rawConn := strings.TrimPrefix(prodConnStr, "ducklake:postgres:")
+	params, err := parsePostgresConnString(rawConn)
+	if err != nil {
+		return 0
+	}
+	prodDB := params["dbname"]
+	adminParams := make(map[string]string, len(params))
+	for k, v := range params {
+		adminParams[k] = v
+	}
+	adminParams["dbname"] = "postgres"
+	if _, ok := adminParams["sslmode"]; !ok {
+		adminParams["sslmode"] = "disable"
+	}
+	adminDB, err := sql.Open("postgres", buildPostgresConnString(adminParams))
+	if err != nil {
+		return 0
+	}
+	defer adminDB.Close()
+
+	var count int
+	err = adminDB.QueryRow(
+		"SELECT COUNT(*) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+		prodDB,
+	).Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
 }
 
 // parsePostgresConnString parses a libpq-style key=value space-separated

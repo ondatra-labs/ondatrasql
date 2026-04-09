@@ -49,7 +49,7 @@ func TestSystemdRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("service file missing: %v", err)
 	}
-	if !strings.Contains(string(serviceData), "ExecStart=/usr/bin/true run") {
+	if !strings.Contains(string(serviceData), `ExecStart="/usr/bin/true" run`) {
 		t.Errorf("service missing ExecStart:\n%s", serviceData)
 	}
 	if !strings.Contains(string(serviceData), "WorkingDirectory="+tmpDir) {

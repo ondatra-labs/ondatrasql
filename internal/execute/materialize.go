@@ -425,16 +425,11 @@ func (r *Runner) applySchemaEvolution(target string, change backfill.SchemaChang
 		}
 	}
 
-	// Drop removed columns
-	for _, col := range change.Dropped {
-		qc := duckdb.QuoteIdentifier(col.Name)
-		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc)
-		if err := r.sess.Exec(dropSQL); err != nil {
-			return fmt.Errorf("drop column %s: %w", col.Name, err)
-		}
-	}
-
-	// Apply additive changes (new columns)
+	// Add new columns BEFORE dropping old ones. DuckDB rejects DROP on the
+	// last remaining column ("Cannot drop column: table only has one column
+	// remaining"). Adding first ensures the table always has at least one
+	// column when drops execute. INSERT BY NAME matches by name not position,
+	// so the temporary extra columns are harmless.
 	for _, col := range change.Added {
 		qc := duckdb.QuoteIdentifier(col.Name)
 		alterSQL := sql.MustFormat("schema/alter_add_column.sql", target, qc, col.Type)
@@ -443,11 +438,22 @@ func (r *Runner) applySchemaEvolution(target string, change backfill.SchemaChang
 		}
 	}
 
+	// Drop removed columns (safe now — new columns were added first)
+	for _, col := range change.Dropped {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc)
+		if err := r.sess.Exec(dropSQL); err != nil {
+			return fmt.Errorf("drop column %s: %w", col.Name, err)
+		}
+	}
+
 	// Apply type changes. Try ALTER SET DATA TYPE first (works for promotable
-	// changes like INTEGER → BIGINT). If DuckLake rejects it (non-promotable
-	// like INTEGER → VARCHAR or INTEGER → DOUBLE), fall back to DROP + ADD
-	// which always works. The column moves to the end of the schema, but
-	// INSERT BY NAME matches by name not position so this is harmless.
+	// changes like INTEGER → BIGINT). If DuckLake rejects it, fall back to
+	// DROP + ADD which always works. DuckLake's ALTER TYPE rules are stricter
+	// than our ondatra_is_type_promotable macro — for example INTEGER → DOUBLE
+	// is considered promotable by the macro but rejected by DuckLake. The
+	// fallback handles all such edge cases. The column moves to the end of
+	// the schema, but INSERT BY NAME matches by name not position.
 	for _, tc := range change.TypeChanged {
 		qc := duckdb.QuoteIdentifier(tc.Column)
 		alterSQL := sql.MustFormat("schema/alter_column_type.sql", target, qc, tc.NewType)
@@ -476,13 +482,14 @@ func (r *Runner) buildSchemaEvolutionSQL(target string, change backfill.SchemaCh
 		newName := duckdb.QuoteIdentifier(rename.NewName)
 		stmts = append(stmts, sql.MustFormat("schema/alter_rename_column.sql", target, oldName, newName))
 	}
-	for _, col := range change.Dropped {
-		qc := duckdb.QuoteIdentifier(col.Name)
-		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc))
-	}
+	// Add before drop — prevents "Cannot drop column: table only has one column remaining"
 	for _, col := range change.Added {
 		qc := duckdb.QuoteIdentifier(col.Name)
 		stmts = append(stmts, sql.MustFormat("schema/alter_add_column.sql", target, qc, col.Type))
+	}
+	for _, col := range change.Dropped {
+		qc := duckdb.QuoteIdentifier(col.Name)
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc))
 	}
 	// Type changes: always use DROP + ADD instead of ALTER SET DATA TYPE.
 	// DuckLake's ALTER TYPE rules are stricter than OndatraSQL's promotability

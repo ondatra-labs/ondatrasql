@@ -455,42 +455,10 @@ func TestRapid_AuditsBatch_UnionAll(t *testing.T) {
 	})
 }
 
-// Property: history-aware audits with prevSnapshot=0 produce pass-through SQL.
-func TestRapid_AuditsBatch_HistoryAwareNoSnapshot(t *testing.T) {
-	t.Parallel()
-	rapid.Check(t, func(t *rapid.T) {
-		pct := rapid.IntRange(1, 99).Draw(t, "pct")
-		directive := fmt.Sprintf("row_count_change < %d%%", pct)
-
-		sql, err := AuditToSQL(directive, "test_table", "", 0)
-		if err != nil {
-			t.Fatalf("AuditToSQL: %v", err)
-		}
-		// With prevSnapshot=0, should be pass-through
-		if sql != "SELECT 1 WHERE 0" {
-			t.Fatalf("expected pass-through, got: %s", sql)
-		}
-	})
-}
-
-// Property: history-aware audits with prevSnapshot>0 reference the snapshot.
-func TestRapid_AuditsBatch_HistoryAwareWithSnapshot(t *testing.T) {
-	t.Parallel()
-	rapid.Check(t, func(t *rapid.T) {
-		pct := rapid.IntRange(1, 99).Draw(t, "pct")
-		snap := int64(rapid.IntRange(1, 10000).Draw(t, "snapshot"))
-		directive := fmt.Sprintf("row_count_change < %d%%", pct)
-
-		sql, err := AuditToSQL(directive, "test_table", "", snap)
-		if err != nil {
-			t.Fatalf("AuditToSQL: %v", err)
-		}
-		// Should reference the snapshot version
-		if !strings.Contains(sql, fmt.Sprintf("VERSION => %d", snap)) {
-			t.Fatalf("expected VERSION => %d in SQL: %s", snap, sql)
-		}
-	})
-}
+// TestRapid_AuditsBatch_HistoryAwareNoSnapshot and
+// TestRapid_AuditsBatch_HistoryAwareWithSnapshot removed (P3) —
+// row_count_change and distribution STABLE removed because AT (VERSION => N)
+// returns uncommitted data inside DuckLake transactions.
 
 // Property: invalid audits in batch are collected as errors.
 func TestRapid_AuditsBatch_MixedValidInvalid(t *testing.T) {

@@ -75,6 +75,17 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 
 	// Initialize session with catalog (after DAG is built)
 	if sandboxMode {
+		if n := duckdb.SandboxPgActiveConnections(cfg.Catalog.ConnStr); n > 0 {
+			fmt.Fprintf(os.Stderr, "warning: sandbox will terminate %d active connection(s) to postgres catalog %q\n", n, cfg.Catalog.Alias)
+			if !output.JSONEnabled {
+				fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
+				var answer string
+				fmt.Scanln(&answer)
+				if answer != "y" && answer != "Y" {
+					return fmt.Errorf("sandbox cancelled by user")
+				}
+			}
+		}
 		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
 			return fmt.Errorf("init sandbox session: %w", err)

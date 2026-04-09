@@ -89,41 +89,9 @@ func TestIntegration_Audit_RowCountAllOps(t *testing.T) {
 	}
 }
 
-func TestIntegration_Audit_RowCountChange(t *testing.T) {
-	prefix, cleanup := setupDuckLake(t, "lake_rcc")
-	defer cleanup()
-	table := prefix + ".rcc"
-
-	if err := shared.Exec(fmt.Sprintf("CREATE TABLE %s(id INTEGER)", table)); err != nil {
-		t.Fatal(err)
-	}
-	if err := shared.Exec(fmt.Sprintf("INSERT INTO %s VALUES (1), (2), (3)", table)); err != nil {
-		t.Fatal(err)
-	}
-	// Snapshot after initial insert
-	v1, err := shared.QueryValue("SELECT MAX(snapshot_id) FROM ducklake_snapshots('lake_rcc')")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Add one row (33% change) — within 50% threshold → pass
-	if err := shared.Exec(fmt.Sprintf("INSERT INTO %s VALUES (4)", table)); err != nil {
-		t.Fatal(err)
-	}
-	rows := execAudit(t, "row_count_change < 50%%", table, mustInt64(v1))
-	if len(rows) != 0 {
-		t.Errorf("pass: expected 0 rows, got %v", rows)
-	}
-
-	// Delete most rows (large change) → fail
-	if err := shared.Exec(fmt.Sprintf("DELETE FROM %s WHERE id > 1", table)); err != nil {
-		t.Fatal(err)
-	}
-	rows = execAudit(t, "row_count_change < 50%%", table, mustInt64(v1))
-	if len(rows) == 0 {
-		t.Error("fail: expected error for >50% row count change")
-	}
-}
+// TestIntegration_Audit_RowCountChange removed (P3) —
+// row_count_change removed because AT (VERSION => N) returns uncommitted
+// data inside DuckLake transactions, making the comparison always pass.
 
 func TestIntegration_Audit_Freshness(t *testing.T) {
 	t.Parallel()
@@ -425,42 +393,7 @@ func TestIntegration_Audit_Golden(t *testing.T) {
 	}
 }
 
-func TestIntegration_Audit_DistributionStable(t *testing.T) {
-	prefix, cleanup := setupDuckLake(t, "lake_dist")
-	defer cleanup()
-	table := prefix + ".dist"
-
-	if err := shared.Exec(fmt.Sprintf("CREATE TABLE %s(cat VARCHAR)", table)); err != nil {
-		t.Fatal(err)
-	}
-	// 50/50 distribution
-	if err := shared.Exec(fmt.Sprintf("INSERT INTO %s VALUES ('a'),('a'),('a'),('a'),('a'),('b'),('b'),('b'),('b'),('b')", table)); err != nil {
-		t.Fatal(err)
-	}
-	v1, err := shared.QueryValue("SELECT MAX(snapshot_id) FROM ducklake_snapshots('lake_dist')")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Same distribution after small change → pass (within 10% default threshold)
-	if err := shared.Exec(fmt.Sprintf("INSERT INTO %s VALUES ('a'),('b')", table)); err != nil {
-		t.Fatal(err)
-	}
-	rows := execAudit(t, "distribution(cat) STABLE", table, mustInt64(v1))
-	if len(rows) != 0 {
-		t.Errorf("pass: expected 0 rows, got %v", rows)
-	}
-
-	// Drastically skew distribution → fail
-	if err := shared.Exec(fmt.Sprintf("DELETE FROM %s WHERE cat = 'b'", table)); err != nil {
-		t.Fatal(err)
-	}
-	// Insert many 'a' to make it ~100% 'a'
-	if err := shared.Exec(fmt.Sprintf("INSERT INTO %s SELECT 'a' FROM generate_series(1, 20)", table)); err != nil {
-		t.Fatal(err)
-	}
-	rows = execAudit(t, "distribution(cat) STABLE", table, mustInt64(v1))
-	if len(rows) == 0 {
-		t.Error("fail: expected error for unstable distribution")
-	}
-}
+// TestIntegration_Audit_DistributionStable removed (P3) —
+// distribution STABLE removed because AT (VERSION => N) returns uncommitted
+// data inside DuckLake transactions, making the comparison always pass.
+// See audit.go for details. Revisit as a @warning directive in the future.

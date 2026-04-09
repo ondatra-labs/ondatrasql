@@ -755,13 +755,11 @@ func (r *Runner) runWarnings(model *parser.Model, table string, prevSnapshot int
 	for _, warning := range model.Warnings {
 		var queries []string
 
-		// Try audit pattern (post-INSERT, history-aware)
+		// Try audit pattern first (aggregate checks like row_count, mean, etc.)
 		if sql, err := validation.AuditToSQL(warning, table, historicalTable, prevSnapshot); err == nil {
 			queries = append(queries, sql)
-		}
-
-		// Try constraint pattern (row-level checks)
-		if sql, err := validation.ConstraintToSQL(warning, table); err == nil {
+		} else if sql, err := validation.ConstraintToSQL(warning, table); err == nil {
+			// Fall back to constraint pattern (row-level checks like col NOT NULL)
 			queries = append(queries, sql)
 		}
 
@@ -957,6 +955,34 @@ func (r *Runner) detectSchemaEvolution(
 			}
 		}
 		r.trace(result, "schema.detect_renames", stepStart, "ok")
+	}
+
+	// If the unique_key column has a type change, force backfill. Type changes
+	// use DROP+ADD which NULLs existing rows, breaking incremental detection
+	// (e.g. SCD2 JOIN on id compares '1' = NULL → no match → silent data loss).
+	// We apply the schema evolution (type change) IMMEDIATELY here, then return
+	// backfill with nil change — the subsequent TRUNCATE+INSERT populates the
+	// column with the correct type. Without the early ALTER, the target column
+	// retains its old type and future incremental runs fail with type mismatches.
+	if model.UniqueKey != "" && len(change.TypeChanged) > 0 {
+		ukCols := make(map[string]bool)
+		for _, part := range strings.Split(model.UniqueKey, ",") {
+			ukCols[strings.TrimSpace(part)] = true
+		}
+		for _, tc := range change.TypeChanged {
+			if ukCols[tc.Column] {
+				result.RunType = "backfill"
+				result.RunReason = "unique_key type changed"
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("schema evolution: unique_key column %q type changed from %s to %s, forcing backfill",
+						tc.Column, tc.OldType, tc.NewType))
+				// Apply all schema changes now (ADD before DROP, type changes via DROP+ADD)
+				if err := r.applySchemaEvolution(model.Target, change); err != nil {
+					return nil, true // ALTER failed — backfill will handle via TRUNCATE+INSERT
+				}
+				return nil, true
+			}
+		}
 	}
 
 	switch change.Type {

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -18,7 +17,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.12.4"
+var version = "0.13.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -176,9 +175,13 @@ func run(args []string) error {
 		return runAuth(ctx, cfg, args[1])
 
 	default:
-		// Reject path traversal in command name
-		if strings.Contains(cmd, "/") || strings.Contains(cmd, "\\") || strings.Contains(cmd, "..") {
-			return fmt.Errorf("invalid command: %q", cmd)
+		// Whitelist: command names may only contain ASCII letters, digits,
+		// underscores, and hyphens. This prevents path traversal and any
+		// other injection via the sql/<cmd>.sql file lookup below.
+		for _, r := range cmd {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+				return fmt.Errorf("invalid command: %q", cmd)
+			}
 		}
 		// Check if there's a sql/<cmd>.sql file to execute
 		sqlFile := filepath.Join(cfg.ProjectDir, "sql", cmd+".sql")

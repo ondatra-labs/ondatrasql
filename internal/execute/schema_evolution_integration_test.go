@@ -333,7 +333,7 @@ func TestApplySchemaEvolution_TypeChangeOnNonExistentColumn(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for type change on non-existent column")
 	}
-	if !strings.Contains(err.Error(), "change column") && !strings.Contains(err.Error(), "missing_col") {
+	if !strings.Contains(err.Error(), "change column") || !strings.Contains(err.Error(), "missing_col") {
 		t.Errorf("error = %v, expected error mentioning the column", err)
 	}
 }

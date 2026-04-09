@@ -67,26 +67,10 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 					op, n, t, t, invOp, n)
 			},
 		},
-		// row_count_change < N%
-		{
-			regexp.MustCompile(`(?i)^row_count_change\s*<\s*(\d+)%%?$`),
-			func(m []string, t, h string, prev int64) string {
-				pct := m[1]
-				if prev == 0 {
-					return "SELECT 1 WHERE 0" // No previous snapshot, pass
-				}
-				// `t` = current data (sandbox in sandbox mode); `h` =
-				// historical reference (catalog-prefixed in sandbox so the
-				// AT VERSION clause finds prod's snapshot).
-				return fmt.Sprintf(
-					`SELECT printf('row_count_change failed: changed %%.1f%%%% (threshold: <%%s%%%%)',
-						ABS((SELECT COUNT(*) FROM %s) - (SELECT COUNT(*) FROM %s AT (VERSION => %d))) * 100.0
-						/ NULLIF((SELECT COUNT(*) FROM %s AT (VERSION => %d)), 0), '%s')
-					WHERE ABS((SELECT COUNT(*) FROM %s) - (SELECT COUNT(*) FROM %s AT (VERSION => %d))) * 100.0
-						/ NULLIF((SELECT COUNT(*) FROM %s AT (VERSION => %d)), 0) >= %s`,
-					t, h, prev, h, prev, pct, t, h, prev, h, prev, pct)
-			},
-		},
+		// row_count_change < N% — removed (P3): same AT VERSION issue as
+		// distribution STABLE. DuckLake returns uncommitted data for AT
+		// (VERSION => N) inside transactions, so the comparison always sees
+		// identical counts and silently passes.
 		// freshness(col, 24h)
 		{
 			regexp.MustCompile(`(?i)^freshness\((\w+),\s*(\d+)([hd])\)$`),
@@ -100,9 +84,10 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 				}
 				return fmt.Sprintf(
 					`SELECT printf('freshness failed: %%s max value is %%s (threshold: %%s %%s)', '%s',
-						(SELECT MAX(%s)::TIMESTAMP::VARCHAR FROM %s), '%s', '%s')
-					WHERE (SELECT MAX(%s)::TIMESTAMP FROM %s) < NOW() - INTERVAL '%s'`,
-					col, col, t, n, unitName, col, t, interval)
+						COALESCE((SELECT MAX(%s)::TIMESTAMP::VARCHAR FROM %s), 'NULL (no non-null values)'), '%s', '%s')
+					WHERE (SELECT MAX(%s)::TIMESTAMP FROM %s) IS NULL
+					   OR (SELECT MAX(%s)::TIMESTAMP FROM %s) < NOW() - INTERVAL '%s'`,
+					col, col, t, n, unitName, col, t, col, t, interval)
 			},
 		},
 		// mean(col) BETWEEN x AND y
@@ -111,10 +96,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 			func(m []string, t string, _ string, _ int64) string {
 				col, low, high := m[1], m[2], m[3]
 				return fmt.Sprintf(
-					`SELECT printf('mean(%%s) BETWEEN failed: actual mean is %%.4f (expected [%%s, %%s])', '%s',
-						(SELECT AVG(%s) FROM %s), '%s', '%s')
-					WHERE (SELECT AVG(%s) FROM %s) < %s OR (SELECT AVG(%s) FROM %s) > %s`,
-					col, col, t, low, high, col, t, low, col, t, high)
+					`SELECT printf('mean(%%s) BETWEEN failed: actual mean is %%s (expected [%%s, %%s])', '%s',
+						COALESCE((SELECT AVG(%s) FROM %s)::VARCHAR, 'NULL (all values NULL)'), '%s', '%s')
+					WHERE (SELECT AVG(%s) FROM %s) IS NULL
+					   OR (SELECT AVG(%s) FROM %s) < %s OR (SELECT AVG(%s) FROM %s) > %s`,
+					col, col, t, low, high, col, t, col, t, low, col, t, high)
 			},
 		},
 		// mean(col) >= x (and other comparisons)
@@ -124,9 +110,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
-					`SELECT printf('mean(%%s) %%s %%s failed: actual mean is %%.4f', '%s', '%s', '%s', (SELECT AVG(%s) FROM %s))
-					WHERE (SELECT AVG(%s) FROM %s) %s %s`,
-					col, op, val, col, t, col, t, invOp, val)
+					`SELECT printf('mean(%%s) %%s %%s failed: actual mean is %%s', '%s', '%s', '%s',
+						COALESCE((SELECT AVG(%s) FROM %s)::VARCHAR, 'NULL (all values NULL)'))
+					WHERE (SELECT AVG(%s) FROM %s) IS NULL
+					   OR (SELECT AVG(%s) FROM %s) %s %s`,
+					col, op, val, col, t, col, t, col, t, invOp, val)
 			},
 		},
 		// stddev(col) < X
@@ -135,9 +123,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 			func(m []string, t string, _ string, _ int64) string {
 				col, val := m[1], m[2]
 				return fmt.Sprintf(
-					`SELECT printf('stddev(%%s) < %%s failed: actual stddev is %%.4f', '%s', '%s', (SELECT STDDEV(%s) FROM %s))
-					WHERE (SELECT STDDEV(%s) FROM %s) >= %s`,
-					col, val, col, t, col, t, val)
+					`SELECT printf('stddev(%%s) < %%s failed: actual stddev is %%s', '%s', '%s',
+						COALESCE((SELECT STDDEV(%s) FROM %s)::VARCHAR, 'NULL (all values NULL)'))
+					WHERE (SELECT STDDEV(%s) FROM %s) IS NULL
+					   OR (SELECT STDDEV(%s) FROM %s) >= %s`,
+					col, val, col, t, col, t, col, t, val)
 			},
 		},
 		// min(col) >= X
@@ -147,9 +137,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
-					`SELECT printf('min(%%s) %%s %%s failed: actual min is %%s', '%s', '%s', '%s', (SELECT MIN(%s)::VARCHAR FROM %s))
-					WHERE (SELECT MIN(%s) FROM %s) %s %s`,
-					col, op, val, col, t, col, t, invOp, val)
+					`SELECT printf('min(%%s) %%s %%s failed: actual min is %%s', '%s', '%s', '%s',
+						COALESCE((SELECT MIN(%s) FROM %s)::VARCHAR, 'NULL (all values NULL)'))
+					WHERE (SELECT MIN(%s) FROM %s) IS NULL
+					   OR (SELECT MIN(%s) FROM %s) %s %s`,
+					col, op, val, col, t, col, t, col, t, invOp, val)
 			},
 		},
 		// max(col) <= X
@@ -159,9 +151,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
-					`SELECT printf('max(%%s) %%s %%s failed: actual max is %%s', '%s', '%s', '%s', (SELECT MAX(%s)::VARCHAR FROM %s))
-					WHERE (SELECT MAX(%s) FROM %s) %s %s`,
-					col, op, val, col, t, col, t, invOp, val)
+					`SELECT printf('max(%%s) %%s %%s failed: actual max is %%s', '%s', '%s', '%s',
+						COALESCE((SELECT MAX(%s) FROM %s)::VARCHAR, 'NULL (all values NULL)'))
+					WHERE (SELECT MAX(%s) FROM %s) IS NULL
+					   OR (SELECT MAX(%s) FROM %s) %s %s`,
+					col, op, val, col, t, col, t, col, t, invOp, val)
 			},
 		},
 		// sum(col) < X
@@ -171,9 +165,11 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 				col, op, val := m[1], m[2], m[3]
 				invOp := invertOp(op)
 				return fmt.Sprintf(
-					`SELECT printf('sum(%%s) %%s %%s failed: actual sum is %%s', '%s', '%s', '%s', (SELECT SUM(%s)::VARCHAR FROM %s))
-					WHERE (SELECT SUM(%s) FROM %s) %s %s`,
-					col, op, val, col, t, col, t, invOp, val)
+					`SELECT printf('sum(%%s) %%s %%s failed: actual sum is %%s', '%s', '%s', '%s',
+						COALESCE((SELECT SUM(%s) FROM %s)::VARCHAR, 'NULL (all values NULL)'))
+					WHERE (SELECT SUM(%s) FROM %s) IS NULL
+					   OR (SELECT SUM(%s) FROM %s) %s %s`,
+					col, op, val, col, t, col, t, col, t, invOp, val)
 			},
 		},
 		// zscore(col) < N
@@ -182,10 +178,15 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 			func(m []string, t string, _ string, _ int64) string {
 				col, n := m[1], m[2]
 				return fmt.Sprintf(
-					`SELECT printf('zscore(%%s) < %%s failed: found outlier with zscore %%.2f', '%s', '%s',
-						ABS((%s - (SELECT AVG(%s) FROM %s)) / NULLIF((SELECT STDDEV(%s) FROM %s), 0)))
-					FROM %s WHERE ABS((%s - (SELECT AVG(%s) FROM %s)) / NULLIF((SELECT STDDEV(%s) FROM %s), 0)) >= %s LIMIT 1`,
-					col, n, col, col, t, col, t, t, col, col, t, col, t, n)
+					`SELECT printf('zscore(%%s) < %%s failed: %%s', '%s', '%s',
+						CASE WHEN (SELECT AVG(%s) FROM %s) IS NULL THEN 'all values are NULL'
+						ELSE 'found outlier with zscore ' || COALESCE((
+							SELECT MAX(ABS((%s - (SELECT AVG(%s) FROM %s)) / NULLIF((SELECT STDDEV(%s) FROM %s), 0)))
+							FROM %s
+						)::VARCHAR, 'NULL') END)
+					WHERE (SELECT AVG(%s) FROM %s) IS NULL
+					   OR EXISTS(SELECT 1 FROM %s WHERE ABS((%s - (SELECT AVG(%s) FROM %s)) / NULLIF((SELECT STDDEV(%s) FROM %s), 0)) >= %s)`,
+					col, n, col, t, col, col, t, col, t, t, col, t, t, col, col, t, col, t, n)
 			},
 		},
 		// percentile(col, 0.95) < X
@@ -196,9 +197,10 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 				invOp := invertOp(op)
 				return fmt.Sprintf(
 					`SELECT printf('percentile(%%s, %%s) %%s %%s failed: actual is %%s', '%s', '%s', '%s', '%s',
-						(SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY %s) FROM %s)::VARCHAR)
-					WHERE (SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY %s) FROM %s) %s %s`,
-					col, pct, op, val, pct, col, t, pct, col, t, invOp, val)
+						COALESCE((SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY %s) FROM %s)::VARCHAR, 'NULL (all values NULL)'))
+					WHERE (SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY %s) FROM %s) IS NULL
+					   OR (SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY %s) FROM %s) %s %s`,
+					col, pct, op, val, pct, col, t, pct, col, t, pct, col, t, invOp, val)
 			},
 		},
 		// reconcile_count(other_table)
@@ -266,29 +268,10 @@ func AuditToSQL(directive, table, historicalTable string, prevSnapshot int64) (s
 					t, path, path, t, path, t, path, path, t)
 			},
 		},
-		// distribution(col) STABLE
-		{
-			regexp.MustCompile(`(?i)^distribution\((\w+)\)\s+STABLE(?:\(([0-9.]+)\))?$`),
-			func(m []string, t, h string, prev int64) string {
-				col := m[1]
-				threshold := "0.1"
-				if len(m) > 2 && m[2] != "" {
-					threshold = m[2]
-				}
-				if prev == 0 {
-					return "SELECT 1 WHERE 0" // No previous snapshot, pass
-				}
-				// `t` = current data; `h` = historical reference for AT VERSION.
-				return fmt.Sprintf(
-					`WITH curr AS (SELECT %s, COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS pct FROM %s GROUP BY %s),
-					prev AS (SELECT %s, COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS pct FROM %s AT (VERSION => %d) GROUP BY %s)
-					SELECT printf('distribution(%%s) STABLE failed: value %%s changed by %%.1f%%%% (threshold: %%s)', '%s',
-						c.%s::VARCHAR, ABS(COALESCE(c.pct, 0) - COALESCE(p.pct, 0)) * 100, '%s')
-					FROM curr c LEFT JOIN prev p ON c.%s = p.%s
-					WHERE ABS(COALESCE(c.pct, 0) - COALESCE(p.pct, 0)) > %s LIMIT 1`,
-					col, t, col, col, h, prev, col, col, col, threshold, col, col, threshold)
-			},
-		},
+		// distribution(col) STABLE — removed (P3): DuckLake's AT (VERSION => N)
+		// returns uncommitted data inside transactions, so the comparison always
+		// sees identical data on both sides and silently passes. Revisit as a
+		// @warning directive that runs outside the atomic transaction.
 	}
 
 	// All patterns use (?i) for case-insensitive keyword matching.

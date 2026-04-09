@@ -30,25 +30,7 @@ func TestAuditToSQL(t *testing.T) {
 				"< 1", // inverted >=
 			},
 		},
-		{
-			name:         "row_count_change",
-			directive:    "row_count_change < 10%",
-			table:        "staging.orders",
-			prevSnapshot: 42,
-			wantParts: []string{
-				"SELECT printf('row_count_change failed:",
-				"FROM staging.orders",
-				"AT (VERSION => 42)",
-				">= 10",
-			},
-		},
-		{
-			name:         "row_count_change no prev",
-			directive:    "row_count_change < 10%",
-			table:        "staging.orders",
-			prevSnapshot: 0,
-			wantParts:    []string{"SELECT 1 WHERE 0"},
-		},
+		// row_count_change removed (P3) — AT VERSION broken inside DuckLake transactions
 		// Freshness
 		{
 			name:      "freshness hours",
@@ -146,7 +128,7 @@ func TestAuditToSQL(t *testing.T) {
 				"STDDEV(amount) FROM staging.orders",
 				"AVG(amount) FROM staging.orders",
 				">= 3",
-				"LIMIT 1",
+				"IS NULL",
 			},
 		},
 		{
@@ -225,31 +207,7 @@ func TestAuditToSQL(t *testing.T) {
 			},
 		},
 		// Distribution
-		{
-			name:         "distribution STABLE",
-			directive:    "distribution(status) STABLE",
-			table:        "staging.orders",
-			prevSnapshot: 42,
-			wantParts: []string{
-				"SELECT printf('distribution(",
-				"FROM staging.orders GROUP BY status",
-				"AT (VERSION => 42)",
-				"> 0.1", // default threshold
-				"LIMIT 1",
-			},
-		},
-		{
-			name:         "distribution STABLE with threshold",
-			directive:    "distribution(category) STABLE(0.05)",
-			table:        "staging.orders",
-			prevSnapshot: 42,
-			wantParts: []string{
-				"FROM staging.orders GROUP BY category",
-				"AT (VERSION => 42)",
-				"> 0.05",
-				"LIMIT 1",
-			},
-		},
+		// distribution STABLE removed (P3) — AT VERSION broken inside DuckLake transactions
 		// Error cases
 		{
 			name:       "empty directive",
@@ -358,54 +316,14 @@ func TestAuditToSQL_FreshnessDays(t *testing.T) {
 //   - row_count_change < N%
 //   - distribution(col) STABLE
 
-func TestAuditToSQL_RowCountChange_HistoricalTable(t *testing.T) {
-	t.Parallel()
-	sql, err := AuditToSQL("row_count_change < 50%", "raw.t", "lake.raw.t", 42)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Current data must come from the unprefixed (sandbox-local) name
-	if !strings.Contains(sql, "FROM raw.t)") {
-		t.Errorf("expected current side to read from raw.t, got: %s", sql)
-	}
-	// Historical comparison must use the prod-prefixed name
-	if !strings.Contains(sql, "FROM lake.raw.t AT (VERSION => 42)") {
-		t.Errorf("expected historical side to use lake.raw.t AT VERSION, got: %s", sql)
-	}
-	// Sanity: the unprefixed name must NOT appear in any AT VERSION clause
-	if strings.Contains(sql, "raw.t AT (VERSION =>") && !strings.Contains(sql, "lake.raw.t AT (VERSION =>") {
-		t.Errorf("AT VERSION used unprefixed name (would fail in sandbox), got: %s", sql)
-	}
-}
+// TestAuditToSQL_RowCountChange_HistoricalTable removed (P3) —
+// row_count_change removed because AT VERSION is broken inside DuckLake transactions.
 
-func TestAuditToSQL_DistributionStable_HistoricalTable(t *testing.T) {
-	t.Parallel()
-	sql, err := AuditToSQL("distribution(category) STABLE", "raw.t", "lake.raw.t", 42)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// `curr` reads current data from raw.t (no prefix)
-	if !strings.Contains(sql, "FROM raw.t GROUP BY category") {
-		t.Errorf("expected curr to read from raw.t, got: %s", sql)
-	}
-	// `prev` time-travels via prod-prefixed reference
-	if !strings.Contains(sql, "FROM lake.raw.t AT (VERSION => 42)") {
-		t.Errorf("expected prev to use lake.raw.t AT VERSION, got: %s", sql)
-	}
-}
+// TestAuditToSQL_DistributionStable_HistoricalTable removed (P3) —
+// distribution STABLE removed because AT VERSION is broken inside DuckLake transactions.
 
-func TestAuditToSQL_HistoricalTableDefaultsToTable(t *testing.T) {
-	t.Parallel()
-	// When historicalTable is empty (prod runs), AT VERSION clauses must
-	// fall back to the unprefixed `table` argument.
-	sql, err := AuditToSQL("row_count_change < 50%", "raw.t", "", 42)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(sql, "FROM raw.t AT (VERSION => 42)") {
-		t.Errorf("expected unprefixed AT VERSION when historicalTable is empty, got: %s", sql)
-	}
-}
+// TestAuditToSQL_HistoricalTableDefaultsToTable removed (P3) —
+// used row_count_change which is removed.
 
 // --- Regression: historical audits skip on first run (Bug 33 + 35) ---
 //
@@ -416,35 +334,11 @@ func TestAuditToSQL_HistoricalTableDefaultsToTable(t *testing.T) {
 // GetPreviousSnapshot when the model has never been committed, and the
 // audit patterns short-circuit `prev == 0` to a no-op `SELECT 1 WHERE 0`.
 
-func TestAuditToSQL_RowCountChange_FirstRunSkips(t *testing.T) {
-	t.Parallel()
-	sql, err := AuditToSQL("row_count_change < 50%", "raw.t", "", 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// First run = prev snapshot 0 = audit must be a no-op.
-	if sql != "SELECT 1 WHERE 0" {
-		t.Errorf("expected no-op SQL on first run (prev=0), got: %s", sql)
-	}
-	// Crucially: must NOT contain `AT (VERSION => 0)` which would error out.
-	if strings.Contains(sql, "AT (VERSION") {
-		t.Errorf("first-run audit must not time-travel, got: %s", sql)
-	}
-}
+// TestAuditToSQL_RowCountChange_FirstRunSkips removed (P3) —
+// row_count_change removed because AT VERSION is broken inside DuckLake transactions.
 
-func TestAuditToSQL_DistributionStable_FirstRunSkips(t *testing.T) {
-	t.Parallel()
-	sql, err := AuditToSQL("distribution(category) STABLE", "raw.t", "", 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sql != "SELECT 1 WHERE 0" {
-		t.Errorf("expected no-op SQL on first run (prev=0), got: %s", sql)
-	}
-	if strings.Contains(sql, "AT (VERSION") {
-		t.Errorf("first-run audit must not time-travel, got: %s", sql)
-	}
-}
+// TestAuditToSQL_DistributionStable_FirstRunSkips removed (P3) —
+// distribution STABLE removed because AT VERSION is broken inside DuckLake transactions.
 
 // --- Regression: column_exists / column_type via DESCRIBE (Bug 30) ---
 //
@@ -539,16 +433,7 @@ func TestAuditToSQL_PercentileFraction_InRange(t *testing.T) {
 	}
 }
 
-func TestAuditToSQL_DistributionStableNoPrev(t *testing.T) {
-	t.Parallel()
-	sql, err := AuditToSQL("distribution(status) STABLE", "staging.orders", "", 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sql != "SELECT 1 WHERE 0" {
-		t.Errorf("should return exact skip SQL, got: %s", sql)
-	}
-}
+// TestAuditToSQL_DistributionStableNoPrev removed (P3) — distribution STABLE removed.
 
 func TestAuditToSQL_UsesTableParam(t *testing.T) {
 	t.Parallel()

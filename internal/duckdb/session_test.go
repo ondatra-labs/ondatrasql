@@ -446,17 +446,12 @@ func TestSession_QueryPrint_Default(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	out := captureStdout(t, func() {
-		if err := shared.QueryPrint("SELECT 1 AS id", "box"); err != nil {
-			t.Errorf("QueryPrint box (default): %v", err)
-		}
-	})
-	// "box" falls through to markdown in the current implementation
-	if !strings.Contains(out, "id") {
-		t.Errorf("box output missing 'id' header, got:\n%s", out)
-	}
-	if !strings.Contains(out, "1") {
-		t.Errorf("box output missing '1' value, got:\n%s", out)
+	// "box" is not a valid format — should return an error
+	err := shared.QueryPrint("SELECT 1 AS id", "box")
+	if err == nil {
+		t.Error("expected error for unknown format 'box'")
+	} else if !strings.Contains(err.Error(), "unknown format") {
+		t.Errorf("expected 'unknown format' error, got: %v", err)
 	}
 }
 
@@ -731,17 +726,12 @@ func TestSession_QueryPrint_Table(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	out := captureStdout(t, func() {
-		if err := shared.QueryPrint("SELECT 1 AS id", "table"); err != nil {
-			t.Errorf("QueryPrint table: %v", err)
-		}
-	})
-	// "table" falls through to markdown
-	if !strings.Contains(out, "| id") {
-		t.Errorf("table output missing '| id': got:\n%s", out)
-	}
-	if !strings.Contains(out, "| 1") {
-		t.Errorf("table output missing '| 1': got:\n%s", out)
+	// "table" is not a valid format — should return an error
+	err := shared.QueryPrint("SELECT 1 AS id", "table")
+	if err == nil {
+		t.Error("expected error for unknown format 'table'")
+	} else if !strings.Contains(err.Error(), "unknown format") {
+		t.Errorf("expected 'unknown format' error, got: %v", err)
 	}
 }
 
