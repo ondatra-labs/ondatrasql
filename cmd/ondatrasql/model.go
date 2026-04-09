@@ -163,13 +163,20 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 		switch {
 		case err != nil:
 			printPaddedLine(fmt.Sprintf("[FAILED] %s", model.Target))
-			for _, line := range wrapErrorMessage(err.Error(), 60) {
+			for _, line := range wrapErrorMessage(cleanErrorMessage(err.Error()), 60) {
 				printPaddedLine("  " + line)
 			}
 		case result != nil:
-			printPaddedLine(fmt.Sprintf("[OK] %s (%s, %s, %d rows, %v)",
+			reason := ""
+			if result.RunReason != "" {
+				reason = " — " + result.RunReason
+			}
+			printPaddedLine(fmt.Sprintf("[OK] %s (%s, %s, %d rows, %v%s)",
 				result.Target, result.Kind, result.RunType,
-				result.RowsAffected, result.Duration.Round(1e6)))
+				result.RowsAffected, result.Duration.Round(1e6), reason))
+			for _, w := range result.Warnings {
+				printPaddedLine(fmt.Sprintf("  WARN: %s", truncateStr(w, 54)))
+			}
 			showValidationStatus(model, result)
 		}
 		printEmptyLine()
@@ -232,11 +239,42 @@ func printResult(result *execute.Result) {
 		result.RowsAffected, result.Duration.Round(1e6), reason)
 
 	for _, err := range result.Errors {
-		output.Fprintf("  ERROR: %s\n", err)
+		output.Fprintf("  ERROR: %s\n", cleanErrorMessage(err))
 	}
 	for _, warn := range result.Warnings {
 		output.Fprintf("  WARN: %s\n", warn)
 	}
+}
+
+// cleanErrorMessage strips DuckDB internal error prefixes for cleaner CLI output.
+// "Invalid Input Error: audit failed: ..." → "audit failed: ..."
+// "materialize: Invalid Input Error: ..." → "..."
+func cleanErrorMessage(msg string) string {
+	// Strip internal wrapper prefixes for cleaner human output
+	for _, prefix := range []string{
+		"materialize: ",
+		"create temp table: ",
+		"schema evolution: ",
+	} {
+		msg = strings.TrimPrefix(msg, prefix)
+	}
+	// Strip DuckDB error type prefixes
+	for _, prefix := range []string{
+		"Invalid Input Error: ",
+		"Catalog Error: ",
+		"Binder Error: ",
+		"TransactionContext Error: ",
+	} {
+		msg = strings.TrimPrefix(msg, prefix)
+	}
+	// Strip SQL line/caret noise (LINE N: ... \n ^)
+	if idx := strings.Index(msg, "\n\nLINE "); idx > 0 {
+		msg = msg[:idx]
+	}
+	if idx := strings.Index(msg, "\nLINE "); idx > 0 {
+		msg = msg[:idx]
+	}
+	return msg
 }
 
 // emitModelResultJSON emits a JSON line for --json mode after a model run.
@@ -258,6 +296,12 @@ func emitModelResultJSON(result *execute.Result, dagRunID string, sandbox bool) 
 	case result.RunType == "skip":
 		status = "skip"
 	}
+	// Clean error messages for JSON too (strip DuckDB internal prefixes)
+	var cleanErrors []string
+	for _, e := range result.Errors {
+		cleanErrors = append(cleanErrors, cleanErrorMessage(e))
+	}
+
 	output.EmitJSON(output.ModelResult{
 		Model:        result.Target,
 		Kind:         result.Kind,
@@ -266,7 +310,7 @@ func emitModelResultJSON(result *execute.Result, dagRunID string, sandbox bool) 
 		RowsAffected: result.RowsAffected,
 		DurationMs:   result.Duration.Milliseconds(),
 		Status:       status,
-		Errors:       result.Errors,
+		Errors:       cleanErrors,
 		Warnings:     result.Warnings,
 		DagRunID:     dagRunID,
 		Sandbox:      sandbox,

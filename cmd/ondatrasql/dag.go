@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
@@ -118,7 +119,9 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 
 	// Execute DAG using shared logic
 	failedTargets := make(map[string]string)
-	var failed int
+	var failed, skipped int
+	var totalRows int64
+	dagStart := time.Now()
 
 	execute.RunDAG(ctx, sess, sortedModels, dependents, dagRunID,
 		gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL,
@@ -127,14 +130,22 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		func(model *parser.Model, result *execute.Result, err error) bool {
 			if sandboxMode {
 				printSandboxResult(result, model.Target, err)
-			} else {
+			} else if result != nil {
 				printResult(result)
+			} else if err != nil {
+				output.Fprintf("[FAILED] %s\n  ERROR: %s\n", model.Target, cleanErrorMessage(err.Error()))
 			}
 			emitModelResultJSON(result, dagRunID, sandboxMode)
 
 			if err != nil {
 				failed++
 				failedTargets[model.Target] = err.Error()
+			}
+			if result != nil {
+				totalRows += result.RowsAffected
+				if result.RunType == "skip" {
+					skipped++
+				}
 			}
 
 			// Check context cancellation
@@ -146,6 +157,13 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 			}
 		},
 	)
+
+	// Print compact summary for non-sandbox runs
+	if !sandboxMode && !output.JSONEnabled {
+		ran := len(sortedModels) - skipped - failed
+		output.Fprintf("\nDone: %d ran, %d skipped, %d failed (%d rows, %v)\n",
+			ran, skipped, failed, totalRows, time.Since(dagStart).Round(time.Millisecond))
+	}
 
 	// Print summary
 	if sandboxMode {

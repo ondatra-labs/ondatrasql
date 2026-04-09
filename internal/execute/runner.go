@@ -375,18 +375,18 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				var cdcErr error
 				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
-					result.Warnings = append(result.Warnings, fmt.Sprintf("AST CDC failed, using full query: %v", cdcErr))
+					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
 					execSQL = model.SQL // safe fallback
+				} else {
+					r.trace(result, "cdc.applied:"+strings.Join(cdcTables, ","), stepStart, "ok")
 				}
 			}
 		} else {
-			// No upstream changes. v0.12.0+: with the catalog-fork sandbox the
-			// target always exists (inherited from prod), so we never need the
-			// old empty-sandbox skip path. Apply empty CDC and continue.
+			// No upstream changes — sources unchanged since last run
 			var emptyErr error
 			execSQL, emptyErr = r.applyEmptySmartCDC(astJSON, cdcTables)
 			if emptyErr != nil {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("AST empty CDC failed, using full query: %v", emptyErr))
+				result.Warnings = append(result.Warnings, fmt.Sprintf("CDC empty failed, using full query: %v", emptyErr))
 				execSQL = model.SQL
 			}
 		}
@@ -458,7 +458,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// Fall back to full query without CDC.
 		if isIncremental && execSQL != model.SQL {
 			r.trace(result, "create_temp", stepStart, "retry")
-			result.Warnings = append(result.Warnings, "CDC query failed, using full query")
+			result.Warnings = append(result.Warnings, fmt.Sprintf("CDC query failed (%v), retrying with full query", err))
 			execSQL = model.SQL
 			needsBackfill = true
 			createSQL = fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, execSQL)
@@ -784,6 +784,40 @@ func (r *Runner) runWarnings(model *parser.Model, table string, prevSnapshot int
 	}
 }
 
+// formatSchemaEvolution builds a human-readable description of schema changes
+// with specific column names instead of just counts.
+func formatSchemaEvolution(change backfill.SchemaChange) string {
+	var parts []string
+	if len(change.Renamed) > 0 {
+		for _, r := range change.Renamed {
+			parts = append(parts, fmt.Sprintf("renamed %s → %s", r.OldName, r.NewName))
+		}
+	}
+	if len(change.Added) > 0 {
+		var names []string
+		for _, c := range change.Added {
+			names = append(names, fmt.Sprintf("%s (%s)", c.Name, c.Type))
+		}
+		parts = append(parts, fmt.Sprintf("+ %s", strings.Join(names, ", ")))
+	}
+	if len(change.Dropped) > 0 {
+		var names []string
+		for _, c := range change.Dropped {
+			names = append(names, c.Name)
+		}
+		parts = append(parts, fmt.Sprintf("- %s", strings.Join(names, ", ")))
+	}
+	if len(change.TypeChanged) > 0 {
+		for _, tc := range change.TypeChanged {
+			parts = append(parts, fmt.Sprintf("%s: %s → %s", tc.Column, tc.OldType, tc.NewType))
+		}
+	}
+	if len(parts) == 0 {
+		return "schema evolution: no changes"
+	}
+	return "schema evolution: " + strings.Join(parts, "; ")
+}
+
 // escapeSQL escapes single quotes for safe SQL string interpolation.
 func escapeSQL(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
@@ -993,19 +1027,11 @@ func (r *Runner) detectSchemaEvolution(
 		} else {
 			result.RunType = "incremental"
 		}
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("schema evolution: dropped=%d, added=%d, type_changes=%d",
-				len(change.Dropped), len(change.Added), len(change.TypeChanged)))
+		result.Warnings = append(result.Warnings, formatSchemaEvolution(change))
 		return &change, false
 	case backfill.SchemaChangeAdditive, backfill.SchemaChangeTypeChange:
 		result.RunType = "incremental"
-		renameMsg := ""
-		if len(change.Renamed) > 0 {
-			renameMsg = fmt.Sprintf(", renames=%d", len(change.Renamed))
-		}
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("schema evolution: added=%d columns, type_changes=%d%s",
-				len(change.Added), len(change.TypeChanged), renameMsg))
+		result.Warnings = append(result.Warnings, formatSchemaEvolution(change))
 		return &change, false
 	}
 	// SchemaChangeNone — keep the backfill decision from NeedsBackfill.

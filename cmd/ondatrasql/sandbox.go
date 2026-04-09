@@ -127,11 +127,16 @@ func printSandboxResult(result *execute.Result, target string, err error) {
 		status = "SKIP"
 	}
 
-	// Compact format: [OK] staging.customers (123ms)
-	printPaddedLine(fmt.Sprintf("[%s] %s (%s)", status, result.Target, result.Duration.Round(1e6)))
+	// Compact format: [OK] staging.customers (table, backfill, 3 rows, 123ms)
+	printPaddedLine(fmt.Sprintf("[%s] %s (%s, %s, %d rows, %s)",
+		status, result.Target, result.Kind, result.RunType,
+		result.RowsAffected, result.Duration.Round(1e6)))
 
 	if len(result.Errors) > 0 {
 		printPaddedLine(fmt.Sprintf("       %s", truncate(result.Errors[0], 50)))
+	}
+	for _, w := range result.Warnings {
+		printPaddedLine(fmt.Sprintf("  WARN: %s", truncate(w, 50)))
 	}
 }
 

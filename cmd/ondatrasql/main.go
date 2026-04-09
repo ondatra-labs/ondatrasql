@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -21,7 +22,12 @@ var version = "0.13.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		msg := err.Error()
+		// Strip internal wrapper prefixes for cleaner stderr output
+		for _, prefix := range []string{"materialize: ", "create temp table: "} {
+			msg = strings.TrimPrefix(msg, prefix)
+		}
+		fmt.Fprintf(os.Stderr, "error: %s\n", msg)
 		os.Exit(1)
 	}
 }
