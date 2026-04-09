@@ -772,7 +772,15 @@ func TestRapid_YAML_ConfigPreserved(t *testing.T) {
 	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		source := genSourceName().Draw(rt, "source")
-		key := rapid.StringMatching(`^[a-z][a-z0-9_]{1,8}$`).Draw(rt, "key")
+		// Filter out Starlark reserved keywords — the parser correctly
+		// rejects them, but this test asserts successful round-trip.
+		var key string
+		for {
+			key = rapid.StringMatching(`^[a-z][a-z0-9_]{1,8}$`).Draw(rt, "key")
+			if !starlarkKeywords[key] {
+				break
+			}
+		}
 		val := rapid.StringMatching(`^[a-zA-Z0-9]{1,20}$`).Draw(rt, "val")
 
 		dir := t.TempDir()
