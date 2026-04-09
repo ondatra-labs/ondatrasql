@@ -203,8 +203,13 @@ func TestParseCatalogSQL_EnvVarExpansion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("ONDATRA_TEST_CATALOG", "/var/data/lake.sqlite")
-	t.Setenv("ONDATRA_TEST_DATA", "/var/data/files")
+	// Use platform-absolute paths so the parser doesn't join them with
+	// projectDir. On Windows /var/data/... is not absolute and would be
+	// turned into C:\...\tmp\...\var\data\... — masking the env-var check.
+	wantPath := filepath.Join(tmpDir, "lake.sqlite")
+	wantData := filepath.Join(tmpDir, "files")
+	t.Setenv("ONDATRA_TEST_CATALOG", wantPath)
+	t.Setenv("ONDATRA_TEST_DATA", wantData)
 
 	// catalog.sql references env vars for both the catalog path and the
 	// DATA_PATH option — both must end up resolved in the parsed config.
@@ -216,14 +221,14 @@ func TestParseCatalogSQL_EnvVarExpansion(t *testing.T) {
 
 	info := parseCatalogSQL(configDir, tmpDir)
 
-	if info.Path != "/var/data/lake.sqlite" {
-		t.Errorf("Path = %q, want %q (env var should be expanded)", info.Path, "/var/data/lake.sqlite")
+	if info.Path != wantPath {
+		t.Errorf("Path = %q, want %q (env var should be expanded)", info.Path, wantPath)
 	}
-	if info.DataPath != "/var/data/files" {
-		t.Errorf("DataPath = %q, want %q (env var should be expanded)", info.DataPath, "/var/data/files")
+	if info.DataPath != wantData {
+		t.Errorf("DataPath = %q, want %q (env var should be expanded)", info.DataPath, wantData)
 	}
-	if info.ConnStr != "ducklake:sqlite:/var/data/lake.sqlite" {
-		t.Errorf("ConnStr = %q, want %q", info.ConnStr, "ducklake:sqlite:/var/data/lake.sqlite")
+	if info.ConnStr != "ducklake:sqlite:"+wantPath {
+		t.Errorf("ConnStr = %q, want %q", info.ConnStr, "ducklake:sqlite:"+wantPath)
 	}
 }
 

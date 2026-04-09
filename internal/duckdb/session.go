@@ -974,6 +974,28 @@ func (s *Session) validateCatalogBackend() error {
 		attached = append(attached, dbRow{name: r["database_name"], typ: r["type"], path: r["path"]})
 	}
 
+	// Bug S20: catalog.sql with multiple ATTACH statements creates an
+	// inconsistent state. config.parseCatalogSQL returns on the first
+	// match (so cfg.Catalog points at ATTACH #1) but session.go selects
+	// the first ducklake from duckdb_databases() ORDER BY database_oid
+	// (which can be a different one depending on parse order). Sandbox
+	// then forks the catalog cfg points at while the runner USEs the
+	// other one — sandbox sees a fork of an empty catalog.
+	//
+	// Reject up-front. Single-catalog setups are the supported design;
+	// multi-catalog needs would require a different config shape.
+	if len(attached) > 1 {
+		var names []string
+		for _, db := range attached {
+			names = append(names, db.name)
+		}
+		return fmt.Errorf(
+			"catalog.sql attached %d catalogs (%s), but OndatraSQL requires exactly one DuckLake ATTACH. "+
+				"Multiple ATTACHes create an inconsistent state where the runner and sandbox forker disagree about which catalog is primary. "+
+				"Pick one and remove the others.",
+			len(attached), strings.Join(names, ", "))
+	}
+
 	// Reject if any attached non-DuckLake catalog is present.
 	for _, db := range attached {
 		if db.typ != "ducklake" {

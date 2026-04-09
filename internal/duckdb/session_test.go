@@ -926,6 +926,45 @@ func TestSession_InitWithCatalog_InvalidCatalogSQL(t *testing.T) {
 	}
 }
 
+// TestSession_InitWithCatalog_RejectsMultipleAttach is the regression test
+// for Bug S20. catalog.sql with two DuckLake ATTACH statements creates an
+// inconsistent state where config.parseCatalogSQL picks one (the first match)
+// and session.go picks another (via duckdb_databases() ORDER BY database_oid).
+// Sandbox would then fork the wrong catalog and see prod as empty. v0.12.2
+// validates this up-front in validateCatalogBackend.
+func TestSession_InitWithCatalog_RejectsMultipleAttach(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config")
+	if err := os.MkdirAll(configPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	catalogSQL := "ATTACH 'ducklake:sqlite:" + filepath.Join(dir, "lake.sqlite") + "' AS lake (DATA_PATH '" + filepath.Join(dir, "lake.files") + "');\n" +
+		"ATTACH 'ducklake:sqlite:" + filepath.Join(dir, "lake2.sqlite") + "' AS lake2 (DATA_PATH '" + filepath.Join(dir, "lake2.files") + "');\n"
+	if err := os.WriteFile(filepath.Join(configPath, "catalog.sql"), []byte(catalogSQL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = s.InitWithCatalog(configPath)
+	if err == nil {
+		t.Fatal("expected error for multi-attach, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly one DuckLake ATTACH") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "lake") || !strings.Contains(err.Error(), "lake2") {
+		t.Errorf("error should name both catalogs, got: %v", err)
+	}
+}
+
 func TestSession_InitWithCatalog_NoCatalogAttached(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
