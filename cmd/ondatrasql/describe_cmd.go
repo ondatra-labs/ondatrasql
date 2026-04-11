@@ -41,7 +41,6 @@ type ModelInfo struct {
 	Schema          string
 	Materialization string
 	SourceFile      string
-	IsScript        bool
 	ScriptType      parser.ScriptType
 
 	// Statistics
@@ -192,7 +191,6 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 		sourceFilePath := filepath.Join(cfg.ProjectDir, info.SourceFile)
 		if model, parseErr := parser.ParseModel(sourceFilePath, cfg.ProjectDir); parseErr == nil {
 			info.Definition = model.SQL
-			info.IsScript = model.IsScript
 			info.ScriptType = model.ScriptType
 			info.Constraints = model.Constraints
 			info.Audits = model.Audits

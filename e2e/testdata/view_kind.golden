@@ -1,7 +1,0 @@
-target: staging.cleaned
-kind: view
-run_type: create
-rows_affected: 0
-run_reason: first run
-view_count: 2
-view_comment: Cleaned source data

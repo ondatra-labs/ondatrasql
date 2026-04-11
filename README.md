@@ -42,19 +42,11 @@ It runs on a single machine, requires no services, and works in minutes.
 
 ## Install
 
-**Linux / macOS:**
-
 ```bash
 curl -fsSL https://ondatra.sh/install.sh | sh
 ```
 
-**Windows:**
-
-```powershell
-irm https://ondatra.sh/install.ps1 | iex
-```
-
-**From source:** `go install github.com/ondatra-labs/ondatrasql/cmd/ondatrasql@latest` (Go 1.25+ and gcc/clang).
+Works on Linux, macOS, and Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
 
 ## Quick Start
 

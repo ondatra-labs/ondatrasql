@@ -2233,62 +2233,6 @@ SELECT 1 AS id, json_serialize_sql('{"name": "Bob"}') AS data
 	assertGolden(t, "sandbox_extension_model", snap)
 }
 
-// --- View kind golden tests ---
-
-func TestE2E_ViewKind(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/source.sql", `-- @kind: table
-SELECT 1 AS id, 'Alice' AS name, 100 AS amount
-UNION ALL SELECT 2, 'Bob', 200
-`)
-	runModel(t, p, "raw/source.sql")
-
-	p.AddModel("staging/cleaned.sql", `-- @kind: view
--- @description: Cleaned source data
-
-SELECT id, name, amount FROM raw.source WHERE amount > 0
-`)
-	result := runModel(t, p, "staging/cleaned.sql")
-
-	snap := newSnapshot()
-	snap.addResult(result)
-	snap.addQuery(p.Sess, "view_count", "SELECT COUNT(*) FROM staging.cleaned")
-	snap.addQuery(p.Sess, "view_comment",
-		"SELECT COALESCE(comment, '') FROM duckdb_views() WHERE schema_name = 'staging' AND view_name = 'cleaned'")
-	assertGolden(t, "view_kind", snap)
-}
-
-func TestE2E_ViewKind_LiveResolution(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/src.sql", `-- @kind: table
-SELECT 1 AS id, 'Alice' AS name
-`)
-	runModel(t, p, "raw/src.sql")
-
-	p.AddModel("staging/v.sql", `-- @kind: view
-SELECT * FROM raw.src
-`)
-	r1 := runModel(t, p, "staging/v.sql")
-
-	p.AddModel("raw/src.sql", `-- @kind: table
-SELECT 1 AS id, 'Alice' AS name
-UNION ALL SELECT 2, 'Bob'
-`)
-	runModel(t, p, "raw/src.sql")
-
-	r2 := runModel(t, p, "staging/v.sql")
-
-	snap := newSnapshot()
-	snap.addLine("--- run 1 (create) ---")
-	snap.addResult(r1)
-	snap.addLine("--- run 2 (skip, source updated) ---")
-	snap.addResult(r2)
-	snap.addQuery(p.Sess, "live_count", "SELECT COUNT(*) FROM staging.v")
-	assertGolden(t, "view_kind_live", snap)
-}
-
 // --- COMMENT ON golden tests ---
 
 func TestE2E_CommentOnTable(t *testing.T) {
@@ -2541,7 +2485,7 @@ event_name VARCHAR NOT NULL,
 page_url VARCHAR
 `)
 
-	p.AddModel("staging/page_views.sql", `-- @kind: view
+	p.AddModel("staging/page_views.sql", `-- @kind: table
 SELECT * FROM raw.events
 `)
 

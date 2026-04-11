@@ -174,7 +174,7 @@ func TestRapid_MaterializeSCD2_ClosedSession(t *testing.T) {
 		model := &parser.Model{Target: target, Kind: "scd2", UniqueKey: uk, SQL: "SELECT 1 AS id"}
 		result := &Result{Target: target}
 
-		_, err := runner.materializeSCD2(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "hash", "backfill", result, time.Now())
+		_, err := runner.materializeSCD2(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "", "hash", "backfill", result, time.Now())
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}
@@ -196,27 +196,7 @@ func TestRapid_MaterializePartition_ClosedSession(t *testing.T) {
 		model := &parser.Model{Target: target, Kind: "partition", UniqueKey: partCol, SQL: "SELECT 1 AS id"}
 		result := &Result{Target: target}
 
-		_, err := runner.materializePartition(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "hash", "backfill", result, time.Now())
-		if err == nil {
-			rt.Fatal("expected error on closed session")
-		}
-	})
-}
-
-// --- Property: rollback never panics on closed session with any snapshot ---
-
-func TestRapid_Rollback_ClosedSession(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		sess := mustClosedSession()
-		runner := NewRunner(sess, ModeRun, "test-rapid")
-		target := genErrTarget().Draw(rt, "target")
-		snapshot := int64(rapid.IntRange(0, 1000).Draw(rt, "snapshot"))
-
-		err := runner.rollback(target, snapshot, nil)
+		_, err := runner.materializePartition(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "", "hash", "backfill", result, time.Now())
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}

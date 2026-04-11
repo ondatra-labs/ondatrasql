@@ -28,7 +28,7 @@ func TestRapid_ScriptModel_NoQueryNoDeps(t *testing.T) {
 		g.Add(&parser.Model{
 			Target:   target,
 			Kind:     "table",
-			IsScript: true,
+			ScriptType: parser.ScriptTypeStarlark,
 			SQL:      code,
 		})
 
@@ -76,7 +76,7 @@ func TestRapid_MixedDAG_SortInvariants(t *testing.T) {
 			g.Add(&parser.Model{
 				Target:   target,
 				Kind:     "append",
-				IsScript: true,
+				ScriptType: parser.ScriptTypeStarlark,
 				SQL:      `save.row({"id": 1})`,
 			})
 		}

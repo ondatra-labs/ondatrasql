@@ -46,13 +46,13 @@ func TestIntegration_Audit_RowCount(t *testing.T) {
 	}
 
 	// Pass: count >= 1
-	rows := execAudit(t, "row_count >= 1", "test_arc", 0)
+	rows := execAudit(t, "row_count >= 1", "test_arc")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
 	// Fail: count >= 100
-	rows = execAudit(t, "row_count >= 100", "test_arc", 0)
+	rows = execAudit(t, "row_count >= 100", "test_arc")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for row_count < 100")
 	}
@@ -78,7 +78,7 @@ func TestIntegration_Audit_RowCountAllOps(t *testing.T) {
 		{"row_count = 99", true},
 	} {
 		t.Run(tc.directive, func(t *testing.T) {
-			rows := execAudit(t, tc.directive, "test_arco", 0)
+			rows := execAudit(t, tc.directive, "test_arco")
 			if tc.wantFail && len(rows) == 0 {
 				t.Errorf("expected fail for %q", tc.directive)
 			}
@@ -100,7 +100,7 @@ func TestIntegration_Audit_Freshness(t *testing.T) {
 	}
 
 	// Pass: freshness within 24h
-	rows := execAudit(t, "freshness(updated_at, 24h)", "test_fresh", 0)
+	rows := execAudit(t, "freshness(updated_at, 24h)", "test_fresh")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -109,7 +109,7 @@ func TestIntegration_Audit_Freshness(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_fresh_f AS SELECT TIMESTAMP '2000-01-01' AS updated_at`); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "freshness(updated_at, 24h)", "test_fresh_f", 0)
+	rows = execAudit(t, "freshness(updated_at, 24h)", "test_fresh_f")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for stale data")
 	}
@@ -121,7 +121,7 @@ func TestIntegration_Audit_FreshnessDays(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows := execAudit(t, "freshness(ts, 7d)", "test_freshd", 0)
+	rows := execAudit(t, "freshness(ts, 7d)", "test_freshd")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -129,7 +129,7 @@ func TestIntegration_Audit_FreshnessDays(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_freshd_f AS SELECT TIMESTAMP '2000-01-01' AS ts`); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "freshness(ts, 7d)", "test_freshd_f", 0)
+	rows = execAudit(t, "freshness(ts, 7d)", "test_freshd_f")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for stale data")
 	}
@@ -141,12 +141,12 @@ func TestIntegration_Audit_MeanBetween(t *testing.T) {
 		t.Fatal(err)
 	}
 	// mean = 20
-	rows := execAudit(t, "mean(val) BETWEEN 15 AND 25", "test_mean", 0)
+	rows := execAudit(t, "mean(val) BETWEEN 15 AND 25", "test_mean")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
-	rows = execAudit(t, "mean(val) BETWEEN 0 AND 10", "test_mean", 0)
+	rows = execAudit(t, "mean(val) BETWEEN 0 AND 10", "test_mean")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for mean outside range")
 	}
@@ -158,12 +158,12 @@ func TestIntegration_Audit_MeanComparison(t *testing.T) {
 		t.Fatal(err)
 	}
 	// mean = 20
-	rows := execAudit(t, "mean(val) >= 10", "test_meanc", 0)
+	rows := execAudit(t, "mean(val) >= 10", "test_meanc")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
-	rows = execAudit(t, "mean(val) >= 50", "test_meanc", 0)
+	rows = execAudit(t, "mean(val) >= 50", "test_meanc")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for mean < 50")
 	}
@@ -175,7 +175,7 @@ func TestIntegration_Audit_Stddev(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_std AS SELECT * FROM (VALUES (10), (10), (11), (10)) t(val)`); err != nil {
 		t.Fatal(err)
 	}
-	rows := execAudit(t, "stddev(val) < 5", "test_std", 0)
+	rows := execAudit(t, "stddev(val) < 5", "test_std")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -184,7 +184,7 @@ func TestIntegration_Audit_Stddev(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_std_f AS SELECT * FROM (VALUES (1), (100), (1000), (10000)) t(val)`); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "stddev(val) < 5", "test_std_f", 0)
+	rows = execAudit(t, "stddev(val) < 5", "test_std_f")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for high stddev")
 	}
@@ -195,12 +195,12 @@ func TestIntegration_Audit_Min(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_min AS SELECT * FROM (VALUES (5), (10), (15)) t(val)`); err != nil {
 		t.Fatal(err)
 	}
-	rows := execAudit(t, "min(val) >= 5", "test_min", 0)
+	rows := execAudit(t, "min(val) >= 5", "test_min")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
-	rows = execAudit(t, "min(val) >= 10", "test_min", 0)
+	rows = execAudit(t, "min(val) >= 10", "test_min")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for min < 10")
 	}
@@ -211,12 +211,12 @@ func TestIntegration_Audit_Max(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_max AS SELECT * FROM (VALUES (5), (10), (15)) t(val)`); err != nil {
 		t.Fatal(err)
 	}
-	rows := execAudit(t, "max(val) <= 15", "test_max", 0)
+	rows := execAudit(t, "max(val) <= 15", "test_max")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
-	rows = execAudit(t, "max(val) <= 10", "test_max", 0)
+	rows = execAudit(t, "max(val) <= 10", "test_max")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for max > 10")
 	}
@@ -228,12 +228,12 @@ func TestIntegration_Audit_Sum(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sum = 60
-	rows := execAudit(t, "sum(val) >= 50", "test_sum", 0)
+	rows := execAudit(t, "sum(val) >= 50", "test_sum")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
-	rows = execAudit(t, "sum(val) >= 100", "test_sum", 0)
+	rows = execAudit(t, "sum(val) >= 100", "test_sum")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for sum < 100")
 	}
@@ -245,7 +245,7 @@ func TestIntegration_Audit_Zscore(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_zs AS SELECT * FROM (VALUES (10), (11), (10), (11), (10), (11)) t(val)`); err != nil {
 		t.Fatal(err)
 	}
-	rows := execAudit(t, "zscore(val) < 3", "test_zs", 0)
+	rows := execAudit(t, "zscore(val) < 3", "test_zs")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -254,7 +254,7 @@ func TestIntegration_Audit_Zscore(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_zs_f AS SELECT * FROM (VALUES (10), (10), (10), (10), (10), (1000)) t(val)`); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "zscore(val) < 2", "test_zs_f", 0)
+	rows = execAudit(t, "zscore(val) < 2", "test_zs_f")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for outlier zscore")
 	}
@@ -266,12 +266,12 @@ func TestIntegration_Audit_Percentile(t *testing.T) {
 		t.Fatal(err)
 	}
 	// p95 ≈ 95
-	rows := execAudit(t, "percentile(val, 0.95) <= 100", "test_pct", 0)
+	rows := execAudit(t, "percentile(val, 0.95) <= 100", "test_pct")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
-	rows = execAudit(t, "percentile(val, 0.95) <= 50", "test_pct", 0)
+	rows = execAudit(t, "percentile(val, 0.95) <= 50", "test_pct")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for p95 > 50")
 	}
@@ -287,7 +287,7 @@ func TestIntegration_Audit_ReconcileCount(t *testing.T) {
 	}
 
 	// Pass: same row count
-	rows := execAudit(t, "reconcile_count(test_rc2)", "test_rc1", 0)
+	rows := execAudit(t, "reconcile_count(test_rc2)", "test_rc1")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -296,7 +296,7 @@ func TestIntegration_Audit_ReconcileCount(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_rc3 AS SELECT * FROM (VALUES (1), (2)) t(id)`); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "reconcile_count(test_rc3)", "test_rc1", 0)
+	rows = execAudit(t, "reconcile_count(test_rc3)", "test_rc1")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for different row counts")
 	}
@@ -312,7 +312,7 @@ func TestIntegration_Audit_ReconcileSum(t *testing.T) {
 	}
 
 	// Pass: both sum to 60
-	rows := execAudit(t, "reconcile_sum(amount, test_rs2.total)", "test_rs1", 0)
+	rows := execAudit(t, "reconcile_sum(amount, test_rs2.total)", "test_rs1")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -321,7 +321,7 @@ func TestIntegration_Audit_ReconcileSum(t *testing.T) {
 	if err := shared.Exec(`CREATE OR REPLACE TABLE test_rs3 AS SELECT * FROM (VALUES (1), (2)) t(total)`); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "reconcile_sum(amount, test_rs3.total)", "test_rs1", 0)
+	rows = execAudit(t, "reconcile_sum(amount, test_rs3.total)", "test_rs1")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for different sums")
 	}
@@ -334,13 +334,13 @@ func TestIntegration_Audit_ColumnExists(t *testing.T) {
 	}
 
 	// Pass: column exists
-	rows := execAudit(t, "column_exists(name)", "test_ce", 0)
+	rows := execAudit(t, "column_exists(name)", "test_ce")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
 	// Fail: column doesn't exist
-	rows = execAudit(t, "column_exists(nonexistent)", "test_ce", 0)
+	rows = execAudit(t, "column_exists(nonexistent)", "test_ce")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for missing column")
 	}
@@ -353,13 +353,13 @@ func TestIntegration_Audit_ColumnType(t *testing.T) {
 	}
 
 	// Pass: correct type
-	rows := execAudit(t, "column_type(id, INTEGER)", "test_ct", 0)
+	rows := execAudit(t, "column_type(id, INTEGER)", "test_ct")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
 
 	// Fail: wrong type
-	rows = execAudit(t, "column_type(id, VARCHAR)", "test_ct", 0)
+	rows = execAudit(t, "column_type(id, VARCHAR)", "test_ct")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for wrong column type")
 	}
@@ -377,7 +377,7 @@ func TestIntegration_Audit_Golden(t *testing.T) {
 	if err := os.WriteFile(matchCSV, []byte("id,name\n1,a\n2,b\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rows := execAudit(t, "golden('"+matchCSV+"')", "test_gold", 0)
+	rows := execAudit(t, "golden('"+matchCSV+"')", "test_gold")
 	if len(rows) != 0 {
 		t.Errorf("pass: expected 0 rows, got %v", rows)
 	}
@@ -387,7 +387,7 @@ func TestIntegration_Audit_Golden(t *testing.T) {
 	if err := os.WriteFile(mismatchCSV, []byte("id,name\n1,a\n3,c\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rows = execAudit(t, "golden('"+mismatchCSV+"')", "test_gold", 0)
+	rows = execAudit(t, "golden('"+mismatchCSV+"')", "test_gold")
 	if len(rows) == 0 {
 		t.Error("fail: expected error for mismatched golden data")
 	}

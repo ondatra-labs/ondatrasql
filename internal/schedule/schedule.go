@@ -3,7 +3,8 @@
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
 // Package schedule generates OS-native scheduler config (systemd timer,
-// launchd plist, Windows Task Scheduler XML) for running ondatrasql on cron.
+// launchd plist) for running ondatrasql on cron.
+// Windows is not supported natively — use WSL2.
 package schedule
 
 import (
@@ -19,7 +20,7 @@ type Status struct {
 	NextRun   string
 	LastRun   string
 	UnitName  string
-	Backend   string // "systemd", "launchd", "task-scheduler"
+	Backend   string // "systemd" or "launchd"
 }
 
 // Backend is the OS-native scheduler interface.
@@ -30,7 +31,7 @@ type Backend interface {
 	Remove(projectName string) error
 	// Status returns the current schedule state.
 	Status(projectName string) (*Status, error)
-	// Name returns the backend name (systemd/launchd/task-scheduler).
+	// Name returns the backend name (systemd or launchd).
 	Name() string
 }
 
@@ -41,8 +42,6 @@ func Detect() (Backend, error) {
 		return &systemdBackend{}, nil
 	case "darwin":
 		return &launchdBackend{}, nil
-	case "windows":
-		return &taskBackend{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported OS: %s", runtime.GOOS)
 	}

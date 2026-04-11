@@ -618,7 +618,7 @@ func TestRun_Script_MaterializeError(t *testing.T) {
 		Target:   "staging.script_mat_err",
 		Kind:     "imaginary",
 		SQL:      `save.row({"id": 1})`,
-		IsScript: true,
+		ScriptType: parser.ScriptTypeStarlark,
 		FilePath: "models/staging/script_mat_err.star",
 	}
 

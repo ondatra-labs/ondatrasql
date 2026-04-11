@@ -92,7 +92,7 @@ SELECT 1`)
 	f.Add(`-- @kind: table
 -- @expose
 SELECT 1`)
-	f.Add(`-- @kind: view
+	f.Add(`-- @kind: table
 -- @expose
 SELECT 1`)
 
@@ -244,9 +244,6 @@ description: Customer SCD2 loader`)
 			t.Error("successful parse should produce non-empty Source")
 		}
 		// Must be a script model
-		if !m.IsScript {
-			t.Error("YAML model should have IsScript=true")
-		}
 		if m.ScriptType != ScriptTypeStarlark {
 			t.Errorf("YAML model should have ScriptType=starlark, got %q", m.ScriptType)
 		}

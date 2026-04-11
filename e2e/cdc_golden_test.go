@@ -59,9 +59,9 @@ SELECT customer, SUM(amount) AS total FROM raw.orders GROUP BY customer
 	assertGolden(t, "cdc_merge_to_append", snap)
 }
 
-// TestE2E_CDC_MergeViewAppend tests CDC through a view layer:
-// merge → view → append
-func TestE2E_CDC_MergeViewAppend(t *testing.T) {
+// TestE2E_CDC_MergeTableAppend tests CDC through a table layer:
+// merge → table → append
+func TestE2E_CDC_MergeTableAppend(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.Sess.Exec("CREATE SCHEMA IF NOT EXISTS raw")
@@ -72,7 +72,7 @@ func TestE2E_CDC_MergeViewAppend(t *testing.T) {
 SELECT * FROM raw.source
 `)
 
-	p.AddModel("staging/clean.sql", `-- @kind: view
+	p.AddModel("staging/clean.sql", `-- @kind: table
 SELECT id, LOWER(customer) AS customer, amount FROM raw.orders
 `)
 
@@ -96,12 +96,12 @@ SELECT customer, SUM(amount) AS total FROM staging.clean GROUP BY customer
 	snap.addLine("--- run 1 (backfill) ---")
 	snap.addResult(r1_raw)
 	snap.addResult(r1_mart)
-	snap.addLine("--- run 2 (CDC through view) ---")
+	snap.addLine("--- run 2 (CDC through table) ---")
 	snap.addResult(r2_raw)
 	snap.addResult(r2_mart)
 	snap.addQuery(p.Sess, "total_rows", "SELECT COUNT(*) FROM mart.revenue")
 	snap.addQueryRows(p.Sess, "data", "SELECT customer, total FROM mart.revenue ORDER BY customer, total")
-	assertGolden(t, "cdc_merge_view_append", snap)
+	assertGolden(t, "cdc_merge_table_append", snap)
 }
 
 // TestE2E_CDC_TrackedToAppend tests CDC when upstream is tracked kind.

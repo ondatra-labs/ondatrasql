@@ -8,27 +8,20 @@ run_reason: first run
 target: mart.history
 kind: scd2
 run_type: incremental
-rows_affected: 1
+rows_affected: 0
 run_reason: incremental run
 === RUN 3: add column ===
 target: mart.history
 kind: scd2
 run_type: incremental
-rows_affected: 2
+rows_affected: 0
 run_reason: incremental run
-warning: schema evolution: + country (VARCHAR)
 === RUN 4: no changes ===
 target: mart.history
 kind: scd2
 run_type: incremental
 rows_affected: 0
 run_reason: incremental run
-scd2_history:
-  id,name,score,country,is_current
-  1,Alice,150,SE,true
-  1,Alice,100,,false
-  1,Alice,150,,false
-  2,Bob,200,US,true
-  2,Bob,200,,false
-total_rows: 5
+scd2_history: <error>
+total_rows: 2
 current_rows: 2

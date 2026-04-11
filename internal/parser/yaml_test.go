@@ -47,9 +47,6 @@ description: GAM report data
 	if model.Target != "raw.gam" {
 		t.Errorf("expected target 'raw.gam', got %q", model.Target)
 	}
-	if !model.IsScript {
-		t.Error("expected IsScript to be true")
-	}
 	if model.ScriptType != ScriptTypeStarlark {
 		t.Errorf("expected ScriptType Starlark, got %q", model.ScriptType)
 	}
@@ -271,8 +268,8 @@ func TestParseYAMLModel_RejectsViewKind(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for view kind in YAML model")
 	}
-	if !contains(err.Error(), "view") {
-		t.Fatalf("expected view error, got: %v", err)
+	if !contains(err.Error(), "removed in v0.14.0") {
+		t.Fatalf("expected view removal error, got: %v", err)
 	}
 }
 

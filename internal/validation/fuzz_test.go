@@ -67,30 +67,30 @@ func FuzzConstraintToSQL(f *testing.F) {
 
 // SQL injection safety + structural invariant for audit queries.
 func FuzzAuditToSQL(f *testing.F) {
-	f.Add("row_count >= 1", "staging.orders", int64(0))
-	f.Add("row_count_change < 50", "staging.orders", int64(100))
-	f.Add("freshness 24h updated_at", "staging.orders", int64(0))
-	f.Add("freshness 7d created_at", "staging.orders", int64(0))
-	f.Add("mean amount BETWEEN 10 AND 1000", "staging.orders", int64(0))
-	f.Add("stddev amount < 100", "staging.orders", int64(0))
-	f.Add("min price >= 0", "staging.orders", int64(0))
-	f.Add("max price <= 999999", "staging.orders", int64(0))
-	f.Add("sum amount > 0", "staging.orders", int64(0))
-	f.Add("zscore amount < 3", "staging.orders", int64(0))
-	f.Add("percentile 0.95 amount < 1000", "staging.orders", int64(0))
-	f.Add("reconcile_count staging.source", "staging.orders", int64(0))
-	f.Add("reconcile_sum amount staging.source", "staging.orders", int64(0))
-	f.Add("column_exists status", "staging.orders", int64(0))
-	f.Add("column_type status VARCHAR", "staging.orders", int64(0))
-	f.Add("distribution STABLE status", "staging.orders", int64(100))
+	f.Add("row_count >= 1", "staging.orders")
+	f.Add("row_count_change < 50", "staging.orders")
+	f.Add("freshness 24h updated_at", "staging.orders")
+	f.Add("freshness 7d created_at", "staging.orders")
+	f.Add("mean amount BETWEEN 10 AND 1000", "staging.orders")
+	f.Add("stddev amount < 100", "staging.orders")
+	f.Add("min price >= 0", "staging.orders")
+	f.Add("max price <= 999999", "staging.orders")
+	f.Add("sum amount > 0", "staging.orders")
+	f.Add("zscore amount < 3", "staging.orders")
+	f.Add("percentile 0.95 amount < 1000", "staging.orders")
+	f.Add("reconcile_count staging.source", "staging.orders")
+	f.Add("reconcile_sum amount staging.source", "staging.orders")
+	f.Add("column_exists status", "staging.orders")
+	f.Add("column_type status VARCHAR", "staging.orders")
+	f.Add("distribution STABLE status", "staging.orders")
 
 	// Edge cases
-	f.Add("", "tmp", int64(0))
-	f.Add("unknown_audit", "tmp", int64(0))
-	f.Add("'; DROP TABLE x; --", "tmp", int64(-1))
+	f.Add("", "tmp")
+	f.Add("unknown_audit", "tmp")
+	f.Add("'; DROP TABLE x; --", "tmp")
 
-	f.Fuzz(func(t *testing.T, directive, table string, prevSnapshot int64) {
-		sql, err := AuditToSQL(directive, table, "", prevSnapshot)
+	f.Fuzz(func(t *testing.T, directive, table string) {
+		sql, err := AuditToSQL(directive, table)
 		if err != nil {
 			return
 		}
@@ -143,16 +143,16 @@ func FuzzConstraintToSQLSyntax(f *testing.F) {
 
 // Query-builder: validate generated audit SQL has balanced parens/quotes.
 func FuzzAuditToSQLSyntax(f *testing.F) {
-	f.Add("row_count >= 1", int64(0))
-	f.Add("freshness 24h updated_at", int64(0))
-	f.Add("mean amount BETWEEN 10 AND 1000", int64(0))
-	f.Add("percentile 0.95 amount < 1000", int64(0))
-	f.Add("reconcile_sum amount staging.source", int64(0))
-	f.Add("distribution STABLE status", int64(100))
+	f.Add("row_count >= 1")
+	f.Add("freshness 24h updated_at")
+	f.Add("mean amount BETWEEN 10 AND 1000")
+	f.Add("percentile 0.95 amount < 1000")
+	f.Add("reconcile_sum amount staging.source")
+	f.Add("distribution STABLE status")
 
-	f.Fuzz(func(t *testing.T, directive string, prevSnapshot int64) {
+	f.Fuzz(func(t *testing.T, directive string) {
 		// table is always an internal identifier, never user input.
-		sql, err := AuditToSQL(directive, "staging.orders", "", prevSnapshot)
+		sql, err := AuditToSQL(directive, "staging.orders")
 		if err != nil {
 			return
 		}

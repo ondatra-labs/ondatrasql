@@ -84,7 +84,7 @@ func TestE2E_DAG_SchemaEvolution_SCD2History(t *testing.T) {
 SELECT 1 AS id, 'Alice' AS name, 100 AS score
 UNION ALL SELECT 2, 'Bob', 200
 `)
-	p.AddModel("staging/v.sql", `-- @kind: view
+	p.AddModel("staging/v.sql", `-- @kind: table
 SELECT * FROM raw.users
 `)
 	p.AddModel("mart/history.sql", `-- @kind: scd2
@@ -200,7 +200,7 @@ UNION ALL SELECT 3, 'Doohickey', 5, 'A'
 func addAllKindModels(t *testing.T, p *testutil.Project, rawSQL string) {
 	t.Helper()
 	p.AddModel("raw/orders.sql", "-- @kind: table\n"+rawSQL+"\n")
-	p.AddModel("staging/orders_v.sql", "-- @kind: view\nSELECT * FROM raw.orders\n")
+	p.AddModel("staging/orders_v.sql", "-- @kind: table\nSELECT * FROM raw.orders\n")
 	p.AddModel("mart/orders_append.sql", "-- @kind: append\nSELECT * FROM staging.orders_v\n")
 	p.AddModel("mart/orders_merge.sql", "-- @kind: merge\n-- @unique_key: id\nSELECT * FROM staging.orders_v\n")
 	p.AddModel("mart/orders_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\nSELECT * FROM staging.orders_v\n")

@@ -405,7 +405,7 @@ func TestRapid_Validation_InvalidKind(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		invalid := rapid.StringMatching(`^[a-z]{3,10}$`).Filter(func(s string) bool {
 			switch s {
-			case "table", "view", "append", "merge", "scd2", "partition", "events", "tracked":
+			case "table", "append", "merge", "scd2", "partition", "events", "tracked":
 				return false
 			}
 			return true
@@ -679,7 +679,7 @@ func TestRapid_YAML_TargetAlwaysTwoParts(t *testing.T) {
 	})
 }
 
-// Property: YAML model always has IsScript=true and ScriptType=starlark.
+// Property: YAML model always has ScriptType=starlark.
 func TestRapid_YAML_AlwaysScript(t *testing.T) {
 	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
@@ -705,9 +705,6 @@ func TestRapid_YAML_AlwaysScript(t *testing.T) {
 			rt.Fatalf("ParseModel: %v", err)
 		}
 
-		if !m.IsScript {
-			rt.Fatal("expected IsScript=true")
-		}
 		if m.ScriptType != ScriptTypeStarlark {
 			rt.Fatalf("expected ScriptType=starlark, got %q", m.ScriptType)
 		}

@@ -260,13 +260,8 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		return result, fmt.Errorf("constraint validation failed")
 	}
 
-	// Capture snapshot BEFORE materialize for audits/rollback
-	stepStart = time.Now()
-	prevSnapshot, _ := backfill.GetPreviousSnapshot(r.sess, model.Target)
-	r.trace(result, "prev_snapshot", stepStart, "ok")
-
 	// Build ack SQL for Badger claims — included in the materialize transaction
-	// so the ack record is atomic with the data commit. On rollback (audit failure),
+	// so the ack record is atomic with the data commit. On audit failure,
 	// the ack record is undone too, and we nack Badger claims for retry.
 	var extraPreSQL []string
 	if len(scriptResult.ClaimIDs) > 0 {
@@ -283,7 +278,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// runner.go's SQL flow). Parse errors abort BEFORE materialize so a
 	// broken @audit directive doesn't waste a Badger ack cycle.
 	stepStart = time.Now()
-	auditSQL, auditParseErrors := r.buildAuditSQL(model, prevSnapshot)
+	auditSQL, auditParseErrors := r.buildAuditSQL(model)
 	r.trace(result, "audits.render", stepStart, "ok")
 	if len(auditParseErrors) > 0 {
 		for _, e := range auditParseErrors {
@@ -355,7 +350,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	// Run warnings (same as SQL models)
 	stepStart = time.Now()
-	r.runWarnings(model, model.Target, prevSnapshot, result)
+	r.runWarnings(model, model.Target, result)
 	if len(model.Warnings) > 0 {
 		r.trace(result, "warnings", stepStart, "ok")
 	}

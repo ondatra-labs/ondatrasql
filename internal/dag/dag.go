@@ -63,7 +63,7 @@ func NewGraph(sess *duckdb.Session, projectDir ...string) *Graph {
 func (g *Graph) Add(model *parser.Model) {
 	var deps []string
 
-	if model.IsScript {
+	if model.ScriptType != parser.ScriptTypeNone {
 		// Script model: extract deps from query() calls in Starlark code
 		info := &modelInfo{
 			sql:      model.SQL,

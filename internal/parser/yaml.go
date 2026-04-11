@@ -94,7 +94,7 @@ func parseYAMLModel(path, projectDir string) (*Model, error) {
 		kind = "table"
 	}
 	if kind == "view" {
-		return nil, fmt.Errorf("kind 'view' is not supported for YAML models (views are SQL-only)")
+		return nil, fmt.Errorf("the 'view' kind was removed in v0.14.0. Use 'table' instead — DuckLake makes table storage essentially free, and you gain snapshots, sandbox, lineage, validation, and CDC")
 	}
 	if kind == "events" {
 		return nil, fmt.Errorf("kind 'events' is not supported for YAML models (events use column definitions, not source functions)")
@@ -124,7 +124,6 @@ func parseYAMLModel(path, projectDir string) (*Model, error) {
 		SQL:                expanded,
 		Source:             ym.Source,
 		SourceConfig:       ym.Config,
-		IsScript:           true,
 		ScriptType:         ScriptTypeStarlark,
 		UniqueKey:          ym.UniqueKey,
 		PartitionedBy:      ym.PartitionedBy,

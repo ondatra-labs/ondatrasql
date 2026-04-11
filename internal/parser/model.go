@@ -44,10 +44,6 @@ type Model struct {
 	// Kind is the materialization type: table, append, merge, scd2, partition, or tracked.
 	Kind string
 
-	// IsScript indicates if this is a script model (Starlark).
-	// Deprecated: Use ScriptType instead.
-	IsScript bool
-
 	// ScriptType indicates the type of script (starlark) or empty for SQL.
 	ScriptType ScriptType
 
@@ -67,7 +63,7 @@ type Model struct {
 	IncrementalInitial string
 
 	// SQL is the model query without directive comments.
-	// If IsScript is true, this contains Starlark script code.
+	// If ScriptType is set, this contains Starlark script code.
 	SQL string
 
 	// Constraints are validation rules checked before INSERT.
@@ -181,7 +177,6 @@ func ParseModel(path, projectDir string) (*Model, error) {
 	ext = filepath.Ext(absPath)
 	if ext == ".star" {
 		model.ScriptType = ScriptTypeStarlark
-		model.IsScript = true
 	}
 
 	// Calculate target from path
@@ -244,10 +239,7 @@ func ParseModel(path, projectDir string) (*Model, error) {
 			model.Kind = strings.TrimSpace(matches[1])
 
 		case scriptRe.MatchString(trimmed):
-			model.IsScript = true
-			if model.ScriptType == ScriptTypeNone {
-				model.ScriptType = ScriptTypeStarlark // @script directive implies Starlark
-			}
+			return nil, fmt.Errorf("the @script directive was removed in v0.14.0. Use a .star file extension instead — Starlark models are detected automatically by file type")
 
 		case uniqueKeyRe.MatchString(trimmed):
 			matches := uniqueKeyRe.FindStringSubmatch(trimmed)
@@ -407,49 +399,23 @@ func extractColumnTags(desc string) (string, []string) {
 func validateModel(m *Model) error {
 	// Validate kind
 	switch m.Kind {
-	case "table", "view", "append", "merge", "scd2", "partition", "events", "tracked":
+	case "table", "append", "merge", "scd2", "partition", "events", "tracked":
 		// OK
+	case "view":
+		return fmt.Errorf("the 'view' kind was removed in v0.14.0. Use '@kind: table' instead — DuckLake makes table storage essentially free, and you gain snapshots, sandbox, lineage, validation, and CDC")
 	default:
-		return fmt.Errorf("invalid kind %q: must be table, view, append, merge, scd2, partition, events, or tracked", m.Kind)
+		return fmt.Errorf("invalid kind %q: must be table, append, merge, scd2, partition, events, or tracked", m.Kind)
 	}
 
 	// SQL models must have a non-empty body. Scripts and events kind have
 	// their own body semantics and are exempt. (Bug 11)
-	if !m.IsScript && m.Kind != "events" && strings.TrimSpace(m.SQL) == "" {
+	if m.ScriptType == ScriptTypeNone && m.Kind != "events" && strings.TrimSpace(m.SQL) == "" {
 		return fmt.Errorf("model %s has no SQL body — write a SELECT statement after the directives", m.Target)
 	}
 
 	// Validate target
 	if err := ValidateIdentifier(m.Target); err != nil {
 		return fmt.Errorf("invalid target: %w", err)
-	}
-
-	// Views cannot have materialization directives
-	if m.Kind == "view" {
-		if m.UniqueKey != "" {
-			return fmt.Errorf("@unique_key is not supported for views")
-		}
-		if len(m.PartitionedBy) > 0 {
-			return fmt.Errorf("@partitioned_by is not supported for views")
-		}
-		if m.Incremental != "" {
-			return fmt.Errorf("@incremental is not supported for views")
-		}
-		if len(m.Constraints) > 0 {
-			return fmt.Errorf("@constraint is not supported for views (no materialized data to validate)")
-		}
-		if len(m.Audits) > 0 {
-			return fmt.Errorf("@audit is not supported for views (no materialized data to validate)")
-		}
-		if len(m.Warnings) > 0 {
-			return fmt.Errorf("@warning is not supported for views (no materialized data to validate)")
-		}
-		if len(m.SortedBy) > 0 {
-			return fmt.Errorf("@sorted_by is not supported for views (no materialized data to sort)")
-		}
-		if len(m.ColumnDescriptions) > 0 || len(m.ColumnTags) > 0 {
-			return fmt.Errorf("@column is not supported for views (DuckLake does not support column comments on views)")
-		}
 	}
 
 	// @expose is only allowed on materialized SQL models

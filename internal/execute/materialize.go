@@ -117,26 +117,18 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	// Apply schema evolution if needed (before any materialization).
 	//
 	// For SCD2/tracked/partition the ALTER must be applied immediately so
-	// their change-detection queries (which compare temp-table columns
-	// against the target table) see the updated target schema before they
-	// build the diff SQL. Each of those code paths runs its own audit
-	// inside its own commit transaction, so the early-apply ALTER is
-	// not part of the audit-rollback envelope for those kinds.
+	// Schema evolution (ALTER TABLE) is folded into the materialize
+	// transaction for ALL kinds. DuckLake supports DDL inside explicit
+	// transactions, so a failing audit rolls back the schema change too.
+	// For scd2/tracked/partition, the ALTER runs inside the transaction
+	// before change-detection queries so they see the new columns.
 	//
-	// For table/append/merge the ALTER is folded into the materialize
-	// transaction (prepended to mainSQL below), so a failing audit also
-	// rolls back the schema change. DuckLake supports DDL inside an
-	// explicit transaction:
-	//   https://ducklake.select/docs/stable/duckdb/advanced_features/transactions
+	// On backfill with type changes (e.g. unique_key type changed), the
+	// ALTER is still needed before TRUNCATE+INSERT so the target schema
+	// matches the new data types.
 	var schemaEvolutionSQL string
-	if schemaChange != nil && !isBackfill {
+	if schemaChange != nil {
 		schemaEvolutionSQL = r.buildSchemaEvolutionSQL(model.Target, *schemaChange)
-		if model.Kind == "scd2" || model.Kind == "tracked" || model.Kind == "partition" {
-			if err := r.sess.Exec(schemaEvolutionSQL); err != nil {
-				return 0, fmt.Errorf("schema evolution: %w", err)
-			}
-			schemaEvolutionSQL = "" // already applied; do not duplicate
-		}
 	}
 
 	// In sandbox mode, force backfill if target table doesn't exist in sandbox.
@@ -227,7 +219,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// SCD2 handles its own transaction - return early
-		return r.materializeSCD2(model, tmpTable, isBackfill, auditSQL, sqlHash, runType, result, startTime)
+		return r.materializeSCD2(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
 
 	case "partition":
 		if model.UniqueKey == "" {
@@ -242,7 +234,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// Partition handles its own transaction - return early
-		return r.materializePartition(model, tmpTable, isBackfill, auditSQL, sqlHash, runType, result, startTime)
+		return r.materializePartition(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
 
 	case "tracked":
 		if model.UniqueKey == "" {
@@ -257,7 +249,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// Tracked handles its own transaction - return early
-		return r.materializeTracked(model, tmpTable, isBackfill, auditSQL, sqlHash, runType, result, startTime)
+		return r.materializeTracked(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
 
 	default:
 		return 0, fmt.Errorf("unknown kind: %s", model.Kind)
@@ -505,47 +497,11 @@ func (r *Runner) buildSchemaEvolutionSQL(target string, change backfill.SchemaCh
 	return strings.Join(stmts, ";\n")
 }
 
-// reverseSchemaEvolution undoes schema changes applied by applySchemaEvolution.
-// Called during rollback to restore the table schema to match the previous snapshot
-// before inserting historical data. Best-effort: errors are logged but not fatal,
-// since a partially reversed schema is better than aborting the rollback entirely.
-func (r *Runner) reverseSchemaEvolution(target string, change backfill.SchemaChange) {
-	// Reverse type promotions (old type)
-	for _, tc := range change.TypeChanged {
-		qc := duckdb.QuoteIdentifier(tc.Column)
-		alterSQL := sql.MustFormat("schema/alter_column_type.sql", target, qc, tc.OldType)
-		r.sess.Exec(alterSQL) // best-effort
-	}
-
-	// Re-add dropped columns
-	for _, col := range change.Dropped {
-		qc := duckdb.QuoteIdentifier(col.Name)
-		alterSQL := sql.MustFormat("schema/alter_add_column.sql", target, qc, col.Type)
-		r.sess.Exec(alterSQL) // best-effort
-	}
-
-	// Drop added columns
-	for _, col := range change.Added {
-		qc := duckdb.QuoteIdentifier(col.Name)
-		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", target, qc)
-		r.sess.Exec(dropSQL) // best-effort
-	}
-
-	// Reverse renames
-	for _, rename := range change.Renamed {
-		oldName := duckdb.QuoteIdentifier(rename.OldName)
-		newName := duckdb.QuoteIdentifier(rename.NewName)
-		// Reverse: rename newName back to oldName
-		alterSQL := sql.MustFormat("schema/alter_rename_column.sql", target, newName, oldName)
-		r.sess.Exec(alterSQL) // best-effort
-	}
-}
-
 // materializeSCD2 creates or updates an SCD2 table with history tracking.
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
 // On subsequent runs, closes old versions and inserts new versions for changed/new rows.
-func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
 	uk := duckdb.QuoteIdentifier(model.UniqueKey)
 	ukRaw := model.UniqueKey
 
@@ -691,6 +647,9 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		mainSQL := fmt.Sprintf(
 			"TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT %s, %d::BIGINT AS valid_from_snapshot, CAST(NULL AS BIGINT) AS valid_to_snapshot, true AS is_current FROM %s",
 			model.Target, model.Target, colList, currSnapshot, tmpTable)
+		if schemaEvolutionSQL != "" {
+			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
+		}
 		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 		stepStart = time.Now()
@@ -725,29 +684,45 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		changeWhere = "false" // No columns to compare
 	}
 
-	// Step 1+2: Create temp tables for changes and deletions in one round-trip
+	// All steps run inside one transaction so ALTER + change-detection +
+	// DML + audit are atomic. DuckDB sees pending DDL within the same txn.
 	detectSQL := sql.MustFormat("execute/scd2_detect.sql",
 		model.Target, tmpTable, uk, uk, tmpTable, uk, uk, changeWhere,
 		uk, model.Target, uk, uk, tmpTable)
 
-	if err := r.sess.Exec(detectSQL); err != nil {
-		return 0, fmt.Errorf("detect scd2 changes: %w", err)
+	// Step 1: BEGIN transaction + schema evolution + change detection
+	stepStart := time.Now()
+	if err := r.sess.Exec("BEGIN"); err != nil {
+		return 0, fmt.Errorf("begin scd2 transaction: %w", err)
 	}
-
-	// Count affected rows (new + changed)
-	countSQL := "SELECT COUNT(*) FROM scd2_changes"
-	countResult, err := r.sess.QueryValue(countSQL)
-	if err != nil {
+	rollbackOnErr := func(err error, msg string) (int64, error) {
+		r.trace(result, "commit", stepStart, "error")
+		r.sess.Exec("ROLLBACK")
 		r.sess.Exec("DROP TABLE IF EXISTS scd2_changes")
 		r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted")
-		return 0, fmt.Errorf("count changes: %w", err)
+		return 0, fmt.Errorf("%s: %w", msg, err)
+	}
+
+	if schemaEvolutionSQL != "" {
+		if err := r.sess.Exec(schemaEvolutionSQL); err != nil {
+			return rollbackOnErr(err, "schema evolution")
+		}
+	}
+
+	if err := r.sess.Exec(detectSQL); err != nil {
+		return rollbackOnErr(err, "detect scd2 changes")
+	}
+
+	// Step 2: Count affected rows (inside txn)
+	countResult, err := r.sess.QueryValue("SELECT COUNT(*) FROM scd2_changes")
+	if err != nil {
+		return rollbackOnErr(err, "count changes")
 	}
 	if _, err := fmt.Sscanf(countResult, "%d", &rowsAffected); err != nil {
 		return 0, fmt.Errorf("parse row count %q: %w", countResult, err)
 	}
 
-	// Build commit metadata
-	stepStart := time.Now()
+	// Step 3: Build commit metadata (inside txn — temp tables visible)
 	columns, _ := backfill.CaptureSchema(r.sess, tmpTable)
 	schemaHash := backfill.ComputeSchemaHash(columns)
 	colLineage, tableDeps, _ := r.extractLineage(model.SQL)
@@ -765,46 +740,63 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		RowsAffected:  rowsAffected,
 		DagRunID:      r.dagRunID,
 		Depends:       tableDeps,
-		// Execution metadata
 		Kind:          model.Kind,
 		SourceFile:    model.FilePath,
 		StartTime:     startTime.UTC().Format(time.RFC3339),
 		EndTime:       endTime.UTC().Format(time.RFC3339),
 		DurationMs:    endTime.Sub(startTime).Milliseconds(),
 		DuckDBVersion: r.sess.GetVersion(),
-		// Execution trace
-		Steps:      steps,
-
-		// Git fields
-		GitCommit:  r.gitInfo.Commit,
-		GitBranch:  r.gitInfo.Branch,
-		GitRepoURL: r.gitInfo.RepoURL,
+		Steps:         steps,
+		GitCommit:     r.gitInfo.Commit,
+		GitBranch:     r.gitInfo.Branch,
+		GitRepoURL:    r.gitInfo.RepoURL,
 	}
 	jsonBytes, err := json.Marshal(info)
 	if err != nil {
-		return 0, fmt.Errorf("marshal commit metadata: %w", err)
+		return rollbackOnErr(err, "marshal commit metadata")
 	}
 	extraInfo := string(jsonBytes)
 
-	// Step 3: Close old versions (changed + deleted)
-	// Step 4: Insert new versions (new + changed)
-	// auditSQL is folded in just before set_commit_message so a failing
-	// audit aborts the SCD2 update atomically (same guarantee as the
-	// generic commit.sql template).
-	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes.
-	txnSQL := sql.MustFormat("execute/scd2_update.sql",
-		escapeSQL(model.Target), escapeSQL(model.Target),
-		model.Target, currSnapshot-1, uk, uk,
-		model.Target, currSnapshot-1, uk, uk,
-		model.Target, colList, colList, currSnapshot,
-		auditSQL, model.Target, escapeSQL(extraInfo))
+	// Step 4: Registry + DML + audit + commit message (all inside the txn)
+	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', 'scd2', current_timestamp)",
+		escapeSQL(model.Target), escapeSQL(model.Target))
+	if err := r.sess.Exec(registrySQL); err != nil {
+		return rollbackOnErr(err, "registry upsert")
+	}
 
-	stepStart = time.Now()
-	if err := r.sess.Exec(txnSQL); err != nil {
-		r.trace(result, "commit", stepStart, "error")
-		r.sess.Exec("DROP TABLE IF EXISTS scd2_changes")
-		r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted")
-		return 0, fmt.Errorf("update scd2 table: %w", err)
+	// Close old versions for changed rows
+	closeChangedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_changes WHERE _change_type = 'changed')",
+		model.Target, currSnapshot-1, uk, uk)
+	if err := r.sess.Exec(closeChangedSQL); err != nil {
+		return rollbackOnErr(err, "close changed versions")
+	}
+
+	// Close versions for deleted rows
+	closeDeletedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_deleted)",
+		model.Target, currSnapshot-1, uk, uk)
+	if err := r.sess.Exec(closeDeletedSQL); err != nil {
+		return rollbackOnErr(err, "close deleted versions")
+	}
+
+	// Insert new versions
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s, valid_from_snapshot, valid_to_snapshot, is_current) SELECT %s, %d, NULL, true FROM scd2_changes",
+		model.Target, colList, colList, currSnapshot)
+	if err := r.sess.Exec(insertSQL); err != nil {
+		return rollbackOnErr(err, "insert new versions")
+	}
+
+	// Audit (raises error() and aborts if any fail)
+	if auditSQL != "" {
+		if err := r.sess.Exec(auditSQL); err != nil {
+			return rollbackOnErr(err, "audit failed")
+		}
+	}
+
+	// Commit with metadata
+	commitSQL := fmt.Sprintf("CALL %s.set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');\nCOMMIT",
+		r.sess.CatalogAlias(), model.Target, escapeSQL(extraInfo))
+	if err := r.sess.Exec(commitSQL); err != nil {
+		return rollbackOnErr(err, "commit scd2")
 	}
 	r.trace(result, "commit", stepStart, "ok")
 
@@ -821,7 +813,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 // Partition tables replace entire partitions (DELETE + INSERT) instead of row-by-row upserts.
 // On first run (isBackfill=true or table doesn't exist), creates the table.
 // On subsequent runs, deletes matching partitions and inserts new data.
-func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBackfill bool, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
 	// Split UniqueKey on comma for partition column list
 	var partitionColList []string
 	for _, col := range strings.Split(model.UniqueKey, ",") {
@@ -918,6 +910,9 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain
 		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
 			model.Target, model.Target, tmpTable)
+		if schemaEvolutionSQL != "" {
+			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
+		}
 		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(extraInfo))
 
 		stepStart = time.Now()
@@ -942,6 +937,9 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 		model.Target, partitionCols, partitionCols, tmpTable,
 		model.Target, tmpTable,
 		auditSQL, model.Target, escapeSQL(extraInfo))
+	if schemaEvolutionSQL != "" {
+		txnSQL = strings.Replace(txnSQL, "BEGIN;\n", "BEGIN;\n"+schemaEvolutionSQL+";\n", 1)
+	}
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {
@@ -959,7 +957,7 @@ func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBa
 // Groups rows by unique_key and computes an md5 hash of all non-key columns per group.
 // On incremental runs, only groups with changed or new hashes are replaced (DELETE + INSERT).
 // The _content_hash column is added automatically, like SCD2's valid_from_snapshot.
-func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
 	uk := duckdb.QuoteIdentifier(model.UniqueKey)
 
 	// Ensure schema exists
@@ -1103,6 +1101,9 @@ FROM %s s JOIN group_hash g ON s.%s = g.%s`,
 
 		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM tracked_hashed",
 			model.Target, model.Target)
+		if schemaEvolutionSQL != "" {
+			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
+		}
 		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 		stepStart = time.Now()
@@ -1151,11 +1152,18 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 		// Registry upsert ensures DuckLake creates a snapshot (so schema metadata is committed).
 		info.RowsAffected = 0
 		jsonBytes, _ := json.Marshal(info)
-		registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
+		noChangeSQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
 			escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
-		txnSQL := sql.MustFormat("execute/commit.sql", registrySQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
+		if schemaEvolutionSQL != "" {
+			noChangeSQL = schemaEvolutionSQL + ";\n" + noChangeSQL
+		}
+		txnSQL := sql.MustFormat("execute/commit.sql", noChangeSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 		stepStart = time.Now()
-		r.sess.Exec(txnSQL)
+		if err := r.sess.Exec(txnSQL); err != nil {
+			r.trace(result, "commit", stepStart, "error")
+			r.sess.Exec("ROLLBACK")
+			return 0, fmt.Errorf("commit tracked (no changes): %w", err)
+		}
 		r.trace(result, "commit", stepStart, "ok")
 		return 0, nil
 	}
@@ -1173,6 +1181,9 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 	mainSQL := fmt.Sprintf(`DELETE FROM %[1]s WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes);
 INSERT INTO %[1]s BY NAME SELECT * FROM tracked_hashed WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes WHERE _action = 'upsert')`,
 		model.Target, uk)
+	if schemaEvolutionSQL != "" {
+		mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
+	}
 
 	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 

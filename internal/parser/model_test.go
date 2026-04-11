@@ -356,12 +356,11 @@ SELECT 'EU' AS region, 1 AS id`
 	}
 }
 
-func TestParseModel_ViewKind_PartitionedByRejected(t *testing.T) {
+func TestParseModel_ViewKind_Removed(t *testing.T) {
 	t.Parallel()
 	content := `-- @kind: view
--- @partitioned_by: region
 
-SELECT 1 AS id, 'EU' AS region`
+SELECT 1 AS id`
 
 	tmpDir := t.TempDir()
 	modelsDir := filepath.Join(tmpDir, "models", "staging")
@@ -371,9 +370,9 @@ SELECT 1 AS id, 'EU' AS region`
 
 	_, err := ParseModel(modelFile, tmpDir)
 	if err == nil {
-		t.Error("expected error for view with @partitioned_by")
+		t.Error("expected error for view kind")
 	}
-	if !strings.Contains(err.Error(), "@partitioned_by is not supported for views") {
+	if !strings.Contains(err.Error(), "removed in v0.14.0") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -507,9 +506,6 @@ resp = http.get("https://api.example.com/data")
 	}
 	if model.IncrementalInitial != "2024-01-01" {
 		t.Errorf("IncrementalInitial = %q, want %q", model.IncrementalInitial, "2024-01-01")
-	}
-	if !model.IsScript {
-		t.Error("IsScript should be true for .star files")
 	}
 	if model.ScriptType != ScriptTypeStarlark {
 		t.Errorf("ScriptType = %q, want %q", model.ScriptType, ScriptTypeStarlark)
@@ -676,9 +672,9 @@ func TestParseModel_FileOutsideModelsDir(t *testing.T) {
 	}
 }
 
-func TestParseModel_ScriptDirective(t *testing.T) {
+func TestParseModel_ScriptDirectiveRejected(t *testing.T) {
 	t.Parallel()
-	// @script directive in .sql file should set IsScript
+	// @script directive was removed — it must produce an explicit migration error
 	content := "-- @script\n-- @kind: append\nSELECT 1 AS id"
 	tmpDir := t.TempDir()
 	modelsDir := filepath.Join(tmpDir, "models", "staging")
@@ -686,15 +682,12 @@ func TestParseModel_ScriptDirective(t *testing.T) {
 	modelFile := filepath.Join(modelsDir, "scripted.sql")
 	os.WriteFile(modelFile, []byte(content), 0644)
 
-	model, err := ParseModel(modelFile, tmpDir)
-	if err != nil {
-		t.Fatalf("ParseModel failed: %v", err)
+	_, err := ParseModel(modelFile, tmpDir)
+	if err == nil {
+		t.Fatal("expected error for @script directive")
 	}
-	if !model.IsScript {
-		t.Error("expected IsScript=true with @script directive")
-	}
-	if model.ScriptType != ScriptTypeStarlark {
-		t.Errorf("ScriptType = %q, want starlark", model.ScriptType)
+	if !strings.Contains(err.Error(), "removed in v0.14.0") {
+		t.Fatalf("expected migration error, got: %v", err)
 	}
 }
 
@@ -1212,7 +1205,10 @@ func TestParseModel_ExposeView_Rejected(t *testing.T) {
 
 	_, err := ParseModel(path, dir)
 	if err == nil {
-		t.Fatal("expected error: @expose not supported for views")
+		t.Fatal("expected error for view kind")
+	}
+	if !strings.Contains(err.Error(), "removed in v0.14.0") {
+		t.Fatalf("expected view removal error, got: %v", err)
 	}
 }
 
@@ -1617,62 +1613,22 @@ func TestParseModel_EmptySQLBody_EventsExempt(t *testing.T) {
 	}
 }
 
-// TestValidateModel_ViewRejectsColumnTags is the regression test for Bug S22.
-// A @column directive with only a tag (no description) populated ColumnTags
-// but not ColumnDescriptions, bypassing the view validation check that only
-// inspected ColumnDescriptions. The fix checks both.
-func TestValidateModel_ViewRejectsColumnTags(t *testing.T) {
+// TestValidateModel_ViewKindRejected verifies that all view-based models
+// are rejected at the kind level with the v0.14.0 removal message.
+// (Previously Bug S22 — view column tag bypass — now moot since view is rejected outright.)
+func TestValidateModel_ViewKindRejected(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	modelsDir := filepath.Join(tmpDir, "models", "staging")
 	os.MkdirAll(modelsDir, 0755)
 
-	tests := []struct {
-		name      string
-		file      string
-		content   string
-		wantError bool
-	}{
-		{
-			"tag-only rejected",
-			"tagonly.sql",
-			"-- @kind: view\n-- @column: ssn = | mask_ssn\nSELECT 1 AS ssn\n",
-			true,
-		},
-		{
-			"desc-only rejected",
-			"desconly.sql",
-			"-- @kind: view\n-- @column: ssn = Social security number\nSELECT 1 AS ssn\n",
-			true,
-		},
-		{
-			"desc-and-tag rejected",
-			"descandtag.sql",
-			"-- @kind: view\n-- @column: ssn = SSN | mask_ssn\nSELECT 1 AS ssn\n",
-			true,
-		},
-		{
-			"no column accepted",
-			"nocolumn.sql",
-			"-- @kind: view\nSELECT 1 AS ssn\n",
-			false,
-		},
+	path := filepath.Join(modelsDir, "v.sql")
+	os.WriteFile(path, []byte("-- @kind: view\nSELECT 1 AS id\n"), 0644)
+	_, err := ParseModel(path, tmpDir)
+	if err == nil {
+		t.Fatal("expected error for view kind")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(modelsDir, tt.file)
-			os.WriteFile(path, []byte(tt.content), 0644)
-			_, err := ParseModel(path, tmpDir)
-			if tt.wantError && err == nil {
-				t.Errorf("expected error for %q, got nil", tt.name)
-			}
-			if !tt.wantError && err != nil {
-				t.Errorf("unexpected error for %q: %v", tt.name, err)
-			}
-			if tt.wantError && err != nil && !strings.Contains(err.Error(), "@column is not supported for views") {
-				t.Errorf("wrong error for %q: %v", tt.name, err)
-			}
-		})
+	if !strings.Contains(err.Error(), "removed in v0.14.0") {
+		t.Fatalf("expected view removal error, got: %v", err)
 	}
 }

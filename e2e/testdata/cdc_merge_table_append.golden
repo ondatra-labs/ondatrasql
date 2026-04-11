@@ -9,7 +9,7 @@ kind: append
 run_type: backfill
 rows_affected: 2
 run_reason: first run
---- run 2 (CDC through view) ---
+--- run 2 (CDC through table) ---
 target: raw.orders
 kind: merge
 run_type: incremental

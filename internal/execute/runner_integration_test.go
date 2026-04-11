@@ -8,6 +8,7 @@ package execute_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,7 +49,7 @@ func runModelErr(t *testing.T, p *testutil.Project, relPath string) (*execute.Re
 }
 
 // TestRunner_TableExistsInCatalog_SurfaceErrors pins the (bool, error)
-// contract on the runner method that the materialize / runner / view code
+// contract on the runner method that the materialize / runner code
 // paths use to decide whether to skip, force backfill, or qualify with prod.
 //
 // Earlier, the helper returned only a bool and silently collapsed every
@@ -4551,8 +4552,6 @@ SELECT 1 AS id
 	}
 }
 
-// --- View kind through DuckLake ---
-
 // --- ComputeSingleRunType for all kinds ---
 
 func TestComputeSingleRunType_AllKinds(t *testing.T) {
@@ -4805,144 +4804,6 @@ SELECT 1 AS id, 100 AS value
 	}
 	if val != "100" {
 		t.Errorf("value = %s, want 100 (data preserved after skip)", val)
-	}
-}
-
-// --- View kind integration tests ---
-
-func TestRun_ViewKind(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/data.sql", `-- @kind: table
-SELECT 1 AS id, 'Alice' AS name
-UNION ALL SELECT 2, 'Bob'
-`)
-	runModel(t, p, "raw/data.sql")
-
-	p.AddModel("staging/data.sql", `-- @kind: view
-SELECT id, name FROM raw.data WHERE id > 0
-`)
-	result := runModel(t, p, "staging/data.sql")
-
-	if result.Kind != "view" {
-		t.Errorf("kind = %q, want view", result.Kind)
-	}
-	if result.RunType != "create" {
-		t.Errorf("run_type = %q, want create", result.RunType)
-	}
-
-	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.data")
-	if err != nil {
-		t.Fatalf("query view: %v", err)
-	}
-	if val != "2" {
-		t.Errorf("count = %s, want 2", val)
-	}
-}
-
-func TestRun_ViewKind_SkipUnchanged(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/src.sql", `-- @kind: table
-SELECT 1 AS id
-`)
-	runModel(t, p, "raw/src.sql")
-
-	p.AddModel("staging/v.sql", `-- @kind: view
-SELECT id FROM raw.src
-`)
-	r1 := runModel(t, p, "staging/v.sql")
-	if r1.RunType != "create" {
-		t.Errorf("run1: run_type = %q, want create", r1.RunType)
-	}
-
-	r2 := runModel(t, p, "staging/v.sql")
-	if r2.RunType != "skip" {
-		t.Errorf("run2: run_type = %q, want skip", r2.RunType)
-	}
-}
-
-func TestRun_ViewKind_LiveResolution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/src.sql", `-- @kind: table
-SELECT 1 AS id, 'Alice' AS name
-`)
-	runModel(t, p, "raw/src.sql")
-
-	p.AddModel("staging/v.sql", `-- @kind: view
-SELECT * FROM raw.src
-`)
-	runModel(t, p, "staging/v.sql")
-
-	p.AddModel("raw/src.sql", `-- @kind: table
-SELECT 1 AS id, 'Alice' AS name
-UNION ALL SELECT 2, 'Bob'
-`)
-	runModel(t, p, "raw/src.sql")
-
-	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.v")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if val != "2" {
-		t.Errorf("count = %s, want 2 (view resolves live)", val)
-	}
-}
-
-func TestRun_ViewKind_WithDescription(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/src.sql", `-- @kind: table
-SELECT 1 AS id
-`)
-	runModel(t, p, "raw/src.sql")
-
-	p.AddModel("staging/described.sql", `-- @kind: view
--- @description: Cleaned source data
-
-SELECT id FROM raw.src
-`)
-	runModel(t, p, "staging/described.sql")
-
-	comment, err := p.Sess.QueryValue(`
-		SELECT COALESCE(comment, '') FROM duckdb_views()
-		WHERE schema_name = 'staging' AND view_name = 'described'
-	`)
-	if err != nil {
-		t.Fatalf("query comment: %v", err)
-	}
-	if comment != "Cleaned source data" {
-		t.Errorf("comment = %q, want %q", comment, "Cleaned source data")
-	}
-}
-
-func TestRun_ViewKind_RejectsConstraints(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	p := testutil.NewProject(t)
-	p.AddModel("staging/bad.sql", `-- @kind: view
--- @constraint: id NOT NULL
-
-SELECT 1 AS id
-`)
-	modelPath := filepath.Join(p.Dir, "models", "staging/bad.sql")
-	_, err := parser.ParseModel(modelPath, p.Dir)
-	if err == nil {
-		t.Error("expected error for view with @constraint")
 	}
 }
 
@@ -5317,7 +5178,7 @@ func TestRun_FullDAG_AllKinds(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 
-	// --- Setup: raw.orders (table) → staging.orders_v (view) → 5 downstream kinds ---
+	// --- Setup: raw.orders (table) → staging.orders_v (table) → 5 downstream kinds ---
 
 	p.AddModel("raw/orders.sql", `-- @kind: table
 SELECT 1 AS id, 'Alice' AS customer, 'SE' AS region, 100 AS amount, 'active' AS status
@@ -5326,7 +5187,7 @@ UNION ALL SELECT 3, 'Charlie', 'SE', 150, 'active'
 UNION ALL SELECT 4, 'Diana', 'US', 300, 'pending'
 `)
 
-	p.AddModel("staging/orders_v.sql", `-- @kind: view
+	p.AddModel("staging/orders_v.sql", `-- @kind: table
 SELECT * FROM raw.orders
 `)
 
@@ -5586,5 +5447,247 @@ func mustQuery(t *testing.T, p *testutil.Project, sql string) string {
 		t.Fatalf("query %q: %v", sql, err)
 	}
 	return v
+}
+
+// =============================================================================
+// Atomic schema evolution tests (DORA compliance)
+//
+// These tests verify that ALTER TABLE + audit failure rolls back BOTH the
+// schema change and the data write atomically. No column should be added
+// and no data committed when an audit fails — regardless of kind.
+// =============================================================================
+
+// columnExists returns true if the given column exists in the table.
+func columnExists(t *testing.T, p *testutil.Project, table, column string) bool {
+	t.Helper()
+	val, err := p.Sess.QueryValue(fmt.Sprintf(
+		"SELECT COUNT(*) FROM (DESCRIBE %s) WHERE column_name = '%s'", table, column))
+	if err != nil {
+		t.Fatalf("describe %s: %v", table, err)
+	}
+	return val != "0"
+}
+
+func TestRun_AtomicSchemaEvolution_TableKind_AuditRollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Run 1: create table with columns id, amount
+	p.AddModel("staging/orders.sql", `-- @kind: table
+SELECT 1 AS id, 100 AS amount
+`)
+	runModel(t, p, "staging/orders.sql")
+
+	// Run 2: add column "channel" + audit that ALWAYS fails
+	p.AddModel("staging/orders.sql", `-- @kind: table
+-- @audit: row_count = 0
+SELECT 1 AS id, 100 AS amount, 'web' AS channel
+`)
+	_, err := runModelErr(t, p, "staging/orders.sql")
+	if err == nil {
+		t.Fatal("expected audit failure")
+	}
+
+	// Verify: column "channel" must NOT exist (ALTER rolled back)
+	if columnExists(t, p, "staging.orders", "channel") {
+		t.Error("DORA violation: column 'channel' was added despite audit failure — schema evolution was not atomic")
+	}
+
+	// Verify: data unchanged
+	count := mustQuery(t, p, "SELECT COUNT(*) FROM staging.orders")
+	if count != "1" {
+		t.Errorf("row count = %s, want 1 (data should be unchanged after audit failure)", count)
+	}
+}
+
+func TestRun_AtomicSchemaEvolution_SCD2Kind_AuditRollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Run 1: create SCD2 table with id, amount
+	p.AddModel("staging/history.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT 1 AS id, 100 AS amount
+`)
+	runModel(t, p, "staging/history.sql")
+
+	origCount := mustQuery(t, p, "SELECT COUNT(*) FROM staging.history")
+
+	// Run 2: add column "channel" + audit that ALWAYS fails
+	p.AddModel("staging/history.sql", `-- @kind: scd2
+-- @unique_key: id
+-- @audit: row_count = 0
+SELECT 1 AS id, 200 AS amount, 'web' AS channel
+`)
+	_, err := runModelErr(t, p, "staging/history.sql")
+	if err == nil {
+		t.Fatal("expected audit failure")
+	}
+
+	// Verify: column "channel" must NOT exist (ALTER rolled back)
+	if columnExists(t, p, "staging.history", "channel") {
+		t.Error("DORA violation: column 'channel' was added to SCD2 table despite audit failure")
+	}
+
+	// Verify: row count unchanged (no new SCD2 versions inserted)
+	count := mustQuery(t, p, "SELECT COUNT(*) FROM staging.history")
+	if count != origCount {
+		t.Errorf("SCD2 row count = %s, want %s (no versions should be added after audit failure)", count, origCount)
+	}
+}
+
+func TestRun_AtomicSchemaEvolution_TrackedKind_AuditRollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Run 1: create tracked table with id, amount
+	p.AddModel("staging/inventory.sql", `-- @kind: tracked
+-- @unique_key: id
+SELECT 1 AS id, 100 AS amount
+`)
+	runModel(t, p, "staging/inventory.sql")
+
+	// Run 2: add column "warehouse" + audit that ALWAYS fails
+	p.AddModel("staging/inventory.sql", `-- @kind: tracked
+-- @unique_key: id
+-- @audit: row_count = 0
+SELECT 1 AS id, 100 AS amount, 'SE' AS warehouse
+`)
+	_, err := runModelErr(t, p, "staging/inventory.sql")
+	if err == nil {
+		t.Fatal("expected audit failure")
+	}
+
+	// Verify: column "warehouse" must NOT exist (ALTER rolled back)
+	if columnExists(t, p, "staging.inventory", "warehouse") {
+		t.Error("DORA violation: column 'warehouse' was added to tracked table despite audit failure")
+	}
+
+	// Verify: data unchanged
+	count := mustQuery(t, p, "SELECT COUNT(*) FROM staging.inventory")
+	if count != "1" {
+		t.Errorf("tracked row count = %s, want 1 (data should be unchanged after audit failure)", count)
+	}
+}
+
+func TestRun_AtomicSchemaEvolution_PartitionKind_AuditRollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Run 1: create partition table with region, amount
+	p.AddModel("staging/sales.sql", `-- @kind: partition
+-- @unique_key: region
+SELECT 'SE' AS region, 100 AS amount
+`)
+	runModel(t, p, "staging/sales.sql")
+
+	// Run 2: add column "channel" + audit that ALWAYS fails
+	p.AddModel("staging/sales.sql", `-- @kind: partition
+-- @unique_key: region
+-- @audit: row_count = 0
+SELECT 'SE' AS region, 200 AS amount, 'web' AS channel
+`)
+	_, err := runModelErr(t, p, "staging/sales.sql")
+	if err == nil {
+		t.Fatal("expected audit failure")
+	}
+
+	// Verify: column "channel" must NOT exist (ALTER rolled back)
+	if columnExists(t, p, "staging.sales", "channel") {
+		t.Error("DORA violation: column 'channel' was added to partition table despite audit failure")
+	}
+
+	// Verify: data unchanged
+	count := mustQuery(t, p, "SELECT COUNT(*) FROM staging.sales")
+	if count != "1" {
+		t.Errorf("partition row count = %s, want 1 (data should be unchanged after audit failure)", count)
+	}
+}
+
+// TestRun_AtomicSchemaEvolution_UniqueKeyTypeChange_AuditRollback verifies
+// that a unique_key type change (which forces backfill) is also atomic with
+// audits. Previously the type change ALTER was applied outside the transaction.
+func TestRun_AtomicSchemaEvolution_UniqueKeyTypeChange_AuditRollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Run 1: create merge table with VARCHAR id
+	p.AddModel("staging/orders.sql", `-- @kind: merge
+-- @unique_key: id
+SELECT 'A' AS id, 100 AS amount
+`)
+	runModel(t, p, "staging/orders.sql")
+
+	// Verify original column type
+	origType, _ := p.Sess.QueryValue("SELECT column_type FROM (DESCRIBE staging.orders) WHERE column_name = 'id'")
+
+	// Run 2: change id type to INTEGER + audit that ALWAYS fails
+	p.AddModel("staging/orders.sql", `-- @kind: merge
+-- @unique_key: id
+-- @audit: row_count = 0
+SELECT 1 AS id, 200 AS amount
+`)
+	_, err := runModelErr(t, p, "staging/orders.sql")
+	if err == nil {
+		t.Fatal("expected audit failure")
+	}
+
+	// Verify: column type must be UNCHANGED (type change rolled back)
+	currentType, _ := p.Sess.QueryValue("SELECT column_type FROM (DESCRIBE staging.orders) WHERE column_name = 'id'")
+	if currentType != origType {
+		t.Errorf("DORA violation: unique_key type changed from %s to %s despite audit failure", origType, currentType)
+	}
+
+	// Verify: data unchanged
+	val := mustQuery(t, p, "SELECT id FROM staging.orders")
+	if val != "A" {
+		t.Errorf("data changed: id = %s, want A", val)
+	}
+}
+
+// TestRun_AtomicSchemaEvolution_SuccessCommitsBoth verifies the happy path:
+// schema evolution + passing audit commits both the new column and the data.
+func TestRun_AtomicSchemaEvolution_SuccessCommitsBoth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Run 1: create tables for all kinds
+	p.AddModel("staging/t_table.sql", "-- @kind: table\nSELECT 1 AS id, 100 AS amount\n")
+	p.AddModel("staging/t_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\nSELECT 1 AS id, 100 AS amount\n")
+	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\nSELECT 1 AS id, 100 AS amount\n")
+	p.AddModel("staging/t_partition.sql", "-- @kind: partition\n-- @unique_key: region\nSELECT 'SE' AS region, 100 AS amount\n")
+	runModel(t, p, "staging/t_table.sql")
+	runModel(t, p, "staging/t_scd2.sql")
+	runModel(t, p, "staging/t_tracked.sql")
+	runModel(t, p, "staging/t_partition.sql")
+
+	// Run 2: add column + passing audit (row_count >= 1)
+	p.AddModel("staging/t_table.sql", "-- @kind: table\n-- @audit: row_count >= 1\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\n-- @audit: row_count >= 1\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\n-- @audit: row_count >= 1\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_partition.sql", "-- @kind: partition\n-- @unique_key: region\n-- @audit: row_count >= 1\nSELECT 'SE' AS region, 100 AS amount, 'web' AS channel\n")
+	runModel(t, p, "staging/t_table.sql")
+	runModel(t, p, "staging/t_scd2.sql")
+	runModel(t, p, "staging/t_tracked.sql")
+	runModel(t, p, "staging/t_partition.sql")
+
+	// Verify: "channel" column exists in ALL kinds
+	for _, tbl := range []string{"staging.t_table", "staging.t_scd2", "staging.t_tracked", "staging.t_partition"} {
+		if !columnExists(t, p, tbl, "channel") {
+			t.Errorf("%s: column 'channel' missing after successful schema evolution + audit", tbl)
+		}
+	}
 }
 

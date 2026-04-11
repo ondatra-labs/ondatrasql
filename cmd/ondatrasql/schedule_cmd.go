@@ -125,8 +125,6 @@ func installSchedule(cfg *config.Config, cronExpr string) error {
 	case "launchd":
 		home, _ := os.UserHomeDir()
 		output.Fprintf("Logs:             tail -f %s\n", filepath.Join(home, "Library", "LaunchAgents", unit+".log"))
-	case "task-scheduler":
-		output.Fprintf("Logs:             Event Viewer → Windows Logs → System\n")
 	}
 
 	return nil

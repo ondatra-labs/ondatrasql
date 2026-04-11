@@ -12,12 +12,11 @@ import (
 func TestAuditToSQL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		directive    string
-		table        string
-		prevSnapshot int64
-		wantParts    []string // all substrings that must be in the SQL
-		wantErrMsg   string
+		name       string
+		directive  string
+		table      string
+		wantParts  []string // all substrings that must be in the SQL
+		wantErrMsg string
 	}{
 		// Row count
 		{
@@ -226,7 +225,7 @@ func TestAuditToSQL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sql, err := AuditToSQL(tt.directive, tt.table, "", tt.prevSnapshot)
+			sql, err := AuditToSQL(tt.directive, tt.table)
 
 			if tt.wantErrMsg != "" {
 				if err == nil {
@@ -279,7 +278,7 @@ func TestSplitSchemaTable(t *testing.T) {
 
 func TestAuditToSQL_ColumnExistsNoSchema(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("column_exists(id)", "orders", "", 0)
+	sql, err := AuditToSQL("column_exists(id)", "orders")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -295,7 +294,7 @@ func TestAuditToSQL_ColumnExistsNoSchema(t *testing.T) {
 
 func TestAuditToSQL_FreshnessDays(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("freshness(created_at, 3d)", "staging.orders", "", 0)
+	sql, err := AuditToSQL("freshness(created_at, 3d)", "staging.orders")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -351,7 +350,7 @@ func TestAuditToSQL_FreshnessDays(t *testing.T) {
 
 func TestAuditToSQL_ColumnExists_UsesDescribe(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("column_exists(id)", "raw.t", "", 0)
+	sql, err := AuditToSQL("column_exists(id)", "raw.t")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -365,7 +364,7 @@ func TestAuditToSQL_ColumnExists_UsesDescribe(t *testing.T) {
 
 func TestAuditToSQL_ColumnType_UsesDescribe(t *testing.T) {
 	t.Parallel()
-	sql, err := AuditToSQL("column_type(amount, INTEGER)", "raw.t", "", 0)
+	sql, err := AuditToSQL("column_type(amount, INTEGER)", "raw.t")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -385,7 +384,7 @@ func TestAuditsToBatchSQL_ColumnExistsPlusColumnType(t *testing.T) {
 	// The fix removes the CTEs entirely.
 	sql, errs := AuditsToBatchSQL(
 		[]string{"column_exists(id)", "column_type(amount, INTEGER)"},
-		"raw.t", "", 0,
+		"raw.t",
 	)
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
@@ -411,7 +410,7 @@ func TestAuditToSQL_PercentileFraction_OutOfRange(t *testing.T) {
 	t.Parallel()
 	cases := []string{"95", "1.5", "100"}
 	for _, frac := range cases {
-		_, err := AuditToSQL("percentile(amount, "+frac+") < 100", "raw.t", "", 0)
+		_, err := AuditToSQL("percentile(amount, "+frac+") < 100", "raw.t")
 		if err == nil {
 			t.Errorf("percentile fraction %s should be rejected at parse time", frac)
 			continue
@@ -426,7 +425,7 @@ func TestAuditToSQL_PercentileFraction_InRange(t *testing.T) {
 	t.Parallel()
 	cases := []string{"0", "0.5", "0.95", "1"}
 	for _, frac := range cases {
-		_, err := AuditToSQL("percentile(amount, "+frac+") < 100", "raw.t", "", 0)
+		_, err := AuditToSQL("percentile(amount, "+frac+") < 100", "raw.t")
 		if err != nil {
 			t.Errorf("percentile fraction %s should be accepted, got: %v", frac, err)
 		}
@@ -445,7 +444,7 @@ func TestAuditToSQL_UsesTableParam(t *testing.T) {
 		"column_exists(id)",
 	}
 	for _, d := range directives {
-		sql, err := AuditToSQL(d, "custom.my_table", "", 0)
+		sql, err := AuditToSQL(d, "custom.my_table")
 		if err != nil {
 			t.Errorf("directive %q: unexpected error: %v", d, err)
 			continue
@@ -458,7 +457,7 @@ func TestAuditToSQL_UsesTableParam(t *testing.T) {
 
 func TestAuditsToBatchSQL_AllInvalid(t *testing.T) {
 	t.Parallel()
-	sql, errs := AuditsToBatchSQL([]string{"bad1", "bad2"}, "staging.orders", "", 0)
+	sql, errs := AuditsToBatchSQL([]string{"bad1", "bad2"}, "staging.orders")
 	if sql != "" {
 		t.Errorf("expected empty SQL when all audits invalid, got %q", sql)
 	}
@@ -509,7 +508,7 @@ func TestAuditsToBatchSQL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sql, errs := AuditsToBatchSQL(tt.directives, "staging.orders", "", 0)
+			sql, errs := AuditsToBatchSQL(tt.directives, "staging.orders")
 
 			if len(errs) != tt.wantErrors {
 				t.Errorf("got %d errors, want %d", len(errs), tt.wantErrors)
@@ -546,7 +545,7 @@ func TestAuditsToTransactionalSQL(t *testing.T) {
 
 	t.Run("empty directives produce empty SQL", func(t *testing.T) {
 		t.Parallel()
-		sql, errs := AuditsToTransactionalSQL(nil, "staging.orders", "", 0)
+		sql, errs := AuditsToTransactionalSQL(nil, "staging.orders")
 		if sql != "" || len(errs) != 0 {
 			t.Errorf("expected empty SQL and no errors, got %q / %v", sql, errs)
 		}
@@ -556,7 +555,7 @@ func TestAuditsToTransactionalSQL(t *testing.T) {
 		t.Parallel()
 		sql, errs := AuditsToTransactionalSQL(
 			[]string{"row_count >= 1", "min(amount) >= 0"},
-			"staging.orders", "", 0,
+			"staging.orders",
 		)
 		if len(errs) != 0 {
 			t.Fatalf("unexpected parse errors: %v", errs)
@@ -582,7 +581,7 @@ func TestAuditsToTransactionalSQL(t *testing.T) {
 		t.Parallel()
 		_, errs := AuditsToTransactionalSQL(
 			[]string{"this is not a valid audit", "row_count >= 1"},
-			"staging.orders", "", 0,
+			"staging.orders",
 		)
 		if len(errs) == 0 {
 			t.Error("expected parse error to propagate from AuditsToBatchSQL")
@@ -621,7 +620,7 @@ func TestAuditToSQL_MixedCasePreservesLiterals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sql, err := AuditToSQL(tt.directive, "test_table", "", 0)
+			sql, err := AuditToSQL(tt.directive, "test_table")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

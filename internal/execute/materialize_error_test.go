@@ -35,7 +35,7 @@ func TestMaterializeSCD2_NoTempTable(t *testing.T) {
 	result := &Result{Target: model.Target}
 
 	// ensureSchemaExists succeeds, then hits error on tmp table access
-	_, err := runner.materializeSCD2(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model,"tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from nonexistent tmp table")
 	}
@@ -55,7 +55,7 @@ func TestMaterializePartition_NoTempTable(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -157,7 +157,7 @@ func TestMaterializeSCD2_EnsureSchemaError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializeSCD2(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model,"tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error for bad target with nonexistent tmp table")
 	}
@@ -177,7 +177,7 @@ func TestMaterializePartition_EnsureSchemaError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error for bad target with nonexistent tmp table")
 	}
@@ -244,7 +244,7 @@ func TestMaterializeSCD2_CommitError_Backfill(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_scd2_commit", true, "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_scd2_commit", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -273,7 +273,7 @@ func TestMaterializeSCD2_DetectChangesError(t *testing.T) {
 		SQL:       "SELECT 1 AS id, 'Alice' AS name",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializeSCD2(model, "tmp_scd2_detect", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model,"tmp_scd2_detect", true, "", "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestMaterializeSCD2_DetectChangesError(t *testing.T) {
 	p.Sess.Exec("DROP TABLE tmp_scd2_detect")
 
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializeSCD2(model, "tmp_scd2_detect", false, "", "hash", "incremental", result2, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_scd2_detect", false, "", "", "hash", "incremental", result2, time.Now())
 	if err == nil {
 		t.Fatal("expected error on incremental with missing temp table")
 	}
@@ -312,7 +312,7 @@ func TestMaterializePartition_CommitError_Backfill(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_part_commit", true, "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializePartition(model, "tmp_part_commit", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -341,7 +341,7 @@ func TestMaterializePartition_UpdateError(t *testing.T) {
 		SQL:         "SELECT 'EU' AS region, 1 AS id",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializePartition(model, "tmp_part_upd", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializePartition(model, "tmp_part_upd", true, "", "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestMaterializePartition_UpdateError(t *testing.T) {
 	p.Sess.Exec("DROP TABLE tmp_part_upd")
 
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializePartition(model, "tmp_part_upd", false, "", "hash", "incremental", result2, time.Now())
+	_, err = runner.materializePartition(model, "tmp_part_upd", false, "", "", "hash", "incremental", result2, time.Now())
 	if err == nil {
 		t.Fatal("expected error on incremental with missing temp table")
 	}
@@ -390,7 +390,7 @@ func TestMaterializeSCD2_CountChangesError(t *testing.T) {
 		SQL:       "SELECT 1 AS id, 'Alice' AS name",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializeSCD2(model, "tmp_scd2_cnt", true, "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeSCD2(model,"tmp_scd2_cnt", true, "", "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestMaterializeSCD2_CountChangesError(t *testing.T) {
 
 	// Run incremental — detect changes creates scd2_changes, then we test that path executes
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializeSCD2(model, "tmp_scd2_cnt", false, "", "hash2", "incremental", result2, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_scd2_cnt", false, "", "", "hash2", "incremental", result2, time.Now())
 	// This should either succeed or fail at commit — either way it covers the incremental path
 	if err != nil {
 		// Expected: covers lines 376-387 and/or 437-442
@@ -440,7 +440,7 @@ func TestMaterializeSCD2_IncrementalCommitError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_scd2_incr", false, "", "hash", "incremental", result, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_scd2_incr", false, "", "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -474,7 +474,7 @@ func TestMaterializePartition_IncrementalCommitError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_part_incr", false, "", "hash", "incremental", result, time.Now())
+	_, err = runner.materializePartition(model, "tmp_part_incr", false, "", "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
@@ -506,7 +506,7 @@ func TestMaterializeSCD2_TableExistsCheckError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_x", true, "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_x", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from tableExistsCheck")
 	}
@@ -541,7 +541,7 @@ func TestMaterializeSCD2_GetSourceColumnsError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializeSCD2(model, "tmp_scd2_cols", true, "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_scd2_cols", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from get source columns")
 	}
@@ -573,7 +573,7 @@ func TestMaterializePartition_TableExistsCheckError(t *testing.T) {
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_x", true, "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializePartition(model, "tmp_x", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from tableExistsCheck")
 	}
@@ -734,7 +734,7 @@ func TestMaterializeSCD2_CountChangesError_Direct(t *testing.T) {
 	// Incremental: detect changes will create scd2_changes/scd2_deleted temp tables,
 	// count changes will succeed, then commit will fail (no DuckLake).
 	// This covers lines 376-442 (detect, count, update error)
-	_, err = runner.materializeSCD2(model, "tmp_scd2_cnt_d", false, "", "hash", "incremental", result, time.Now())
+	_, err = runner.materializeSCD2(model,"tmp_scd2_cnt_d", false, "", "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from commit")
 	}

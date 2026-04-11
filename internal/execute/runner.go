@@ -168,14 +168,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	}
 
 	// Script models (Starlark) are executed differently
-	if model.IsScript {
+	if model.ScriptType != parser.ScriptTypeNone {
 		return r.runScript(ctx, model)
 	}
 
-	// View models have a separate code path — no materialization
-	if model.Kind == "view" {
-		return r.runView(model, result, start)
-	}
+
 
 	// Events models: flush from daemon's Badger store into DuckLake.
 	// Early dispatch — bypasses batch run_type decisions entirely.
@@ -519,22 +516,15 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return result, fmt.Errorf("constraint validation failed")
 	}
 
-	// Capture snapshot BEFORE materialize. Historical audits time-travel
-	// against this snapshot to compare current vs. previous values.
-	stepStart = time.Now()
-	prevSnapshot, _ := backfill.GetPreviousSnapshot(r.sess, model.Target)
-	r.trace(result, "prev_snapshot", stepStart, "ok")
-
 	// Render audits as a transactional pre-commit check. The result is
 	// a SELECT error(...) wrapper that aborts the materialize transaction
 	// if any audit fails — so failing audits roll back the schema ALTER,
-	// the data write, and the commit metadata together (no zombie state
-	// where metadata says one thing and the physical table says another).
+	// the data write, and the commit metadata together.
 	//
 	// Parse errors abort BEFORE materialize: there's no point trying to
 	// materialize a model whose audit directives are syntactically broken.
 	stepStart = time.Now()
-	auditSQL, auditParseErrors := r.buildAuditSQL(model, prevSnapshot)
+	auditSQL, auditParseErrors := r.buildAuditSQL(model)
 	r.trace(result, "audits.render", stepStart, "ok")
 	if len(auditParseErrors) > 0 {
 		for _, e := range auditParseErrors {
@@ -558,8 +548,6 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// error from the ROLLBACK itself (the session might already be
 		// clean if the error came from a non-transactional path).
 		r.sess.Exec("ROLLBACK")
-		// No need to call rollback()/reverseSchemaEvolution — the
-		// transaction abort already restored the physical state.
 		result.Errors = append(result.Errors, err.Error())
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
@@ -570,7 +558,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Run warnings (soft validations, log only)
 	stepStart = time.Now()
-	r.runWarnings(model, model.Target, prevSnapshot, result)
+	r.runWarnings(model, model.Target, result)
 	if len(model.Warnings) > 0 {
 		r.trace(result, "warnings", stepStart, "ok")
 	}
@@ -597,83 +585,20 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	return result, nil
 }
 
-// rollback reverts to a previous snapshot using TRUNCATE + INSERT with time travel.
 // buildAuditSQL renders the model's audits as a transactional pre-commit
 // check. The returned SQL, when executed inside a BEGIN/COMMIT, raises a
 // DuckDB error() (and aborts the surrounding transaction) the moment any
 // audit query produces an error row. Returns "" when the model has no
-// audits, in which case callers should pass an empty string into the
-// commit.sql template's pre-commit-checks slot.
-//
-// In sandbox mode, historical (time-travel) audit clauses must reference
-// the prod catalog explicitly because the sandbox catalog does not have
-// the model's snapshot history; we surface that here so audits keep
-// working in both modes without each materialize call site duplicating
-// the branch.
+// audits.
 //
 // Parse errors are returned to the caller so they can abort BEFORE
 // materialize runs — there's no value in trying to materialize a model
 // whose audit directives are syntactically broken.
-func (r *Runner) buildAuditSQL(model *parser.Model, prevSnapshot int64) (string, []error) {
+func (r *Runner) buildAuditSQL(model *parser.Model) (string, []error) {
 	if len(model.Audits) == 0 {
 		return "", nil
 	}
-	historicalTable := model.Target
-	if r.sess.ProdAlias() != "" {
-		historicalTable = r.sess.ProdAlias() + "." + model.Target
-	}
-	return validation.AuditsToTransactionalSQL(
-		model.Audits, model.Target, historicalTable, prevSnapshot,
-	)
-}
-
-// This preserves the DuckLake table_id and snapshot chain (unlike CREATE OR REPLACE
-// which creates a new table_id and breaks row lineage).
-// If schema evolution was applied, it is reversed first so the table schema matches
-// the previous snapshot before restoring data.
-// If the table did not exist at prevSnapshot (first run of a new model),
-// falls back to DROP TABLE.
-//
-// In sandbox mode, prevSnapshot is a prod snapshot ID that doesn't exist in
-// the sandbox catalog, so time-travel rollback is impossible. Sandbox is also
-// throwaway by design — drop the sandbox table and let the next sandbox run
-// rebuild it from scratch.
-func (r *Runner) rollback(target string, prevSnapshot int64, sc *backfill.SchemaChange) error {
-	if r.sess.ProdAlias() != "" {
-		// Sandbox mode — no meaningful snapshot to roll back to.
-		return r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target))
-	}
-	if prevSnapshot == 0 {
-		// No previous snapshot, drop the table
-		if err := r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target)); err != nil {
-			return err
-		}
-	} else {
-		// Reverse schema evolution before restoring data
-		if sc != nil {
-			r.reverseSchemaEvolution(target, *sc)
-		}
-		sql := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s AT (VERSION => %d)",
-			target, target, target, prevSnapshot)
-		if err := r.sess.Exec(sql); err != nil {
-			if isTableNotExistError(err) {
-				if err := r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", target)); err != nil {
-					return err
-				}
-			} else {
-				return fmt.Errorf("rollback to snapshot %d: %w", prevSnapshot, err)
-			}
-		}
-	}
-
-	// Clean up ack records for this target. Without this, a crash between
-	// rollback and AckClaims would leave stale ack records — on next startup
-	// IsAcked() would return true and discard inflight events permanently.
-	// Best-effort: _ondatra_acks may not exist if no scripts have run.
-	r.sess.Exec(fmt.Sprintf(
-		"DELETE FROM _ondatra_acks WHERE target = '%s'", escapeSQL(target)))
-
-	return nil
+	return validation.AuditsToTransactionalSQL(model.Audits, model.Target)
 }
 
 // cdcSchemaChanged checks if any CDC table's schema differs between current and snapshot.
@@ -747,16 +672,12 @@ func (r *Runner) cleanup(tmpTable string) {
 // runWarnings runs warning validations (log only, no rollback).
 // Warnings support both audit patterns (post-INSERT, history-aware) and
 // constraint patterns (row-level checks). Both are tried for each directive.
-func (r *Runner) runWarnings(model *parser.Model, table string, prevSnapshot int64, result *Result) {
-	historicalTable := table
-	if r.sess.ProdAlias() != "" {
-		historicalTable = r.sess.ProdAlias() + "." + table
-	}
+func (r *Runner) runWarnings(model *parser.Model, table string, result *Result) {
 	for _, warning := range model.Warnings {
 		var queries []string
 
 		// Try audit pattern first (aggregate checks like row_count, mean, etc.)
-		if sql, err := validation.AuditToSQL(warning, table, historicalTable, prevSnapshot); err == nil {
+		if sql, err := validation.AuditToSQL(warning, table); err == nil {
 			queries = append(queries, sql)
 		} else if sql, err := validation.ConstraintToSQL(warning, table); err == nil {
 			// Fall back to constraint pattern (row-level checks like col NOT NULL)
@@ -926,17 +847,12 @@ func (r *Runner) ensureUniqueKeyNotNull(tmpTable, uniqueKey string) error {
 //   - on destructive changes, just warned instead of applying ALTER
 //     (breaking the DuckLake snapshot chain)
 //
-// Views are exempt — they have no persisted schema to evolve.
 func (r *Runner) detectSchemaEvolution(
 	model *parser.Model,
 	tmpTable string,
 	needsBackfill bool,
 	result *Result,
 ) (*backfill.SchemaChange, bool) {
-	if model.Kind == "view" {
-		return nil, needsBackfill
-	}
-
 	stepStart := time.Now()
 	newSchema, schemaErr := backfill.CaptureSchema(r.sess, tmpTable)
 	r.trace(result, "schema.capture_new", stepStart, "ok")
@@ -967,7 +883,7 @@ func (r *Runner) detectSchemaEvolution(
 	// SQL-based lineage to compare against.
 	if change.Type == backfill.SchemaChangeDestructive &&
 		len(change.Dropped) > 0 && len(change.Added) > 0 &&
-		!model.IsScript {
+		model.ScriptType == parser.ScriptTypeNone {
 		stepStart = time.Now()
 		if prevCommit, err := backfill.GetModelCommitInfo(r.sess, model.Target); err == nil && prevCommit != nil {
 			if newLineage, _, err := r.extractLineage(model.SQL); err == nil {
@@ -994,10 +910,8 @@ func (r *Runner) detectSchemaEvolution(
 	// If the unique_key column has a type change, force backfill. Type changes
 	// use DROP+ADD which NULLs existing rows, breaking incremental detection
 	// (e.g. SCD2 JOIN on id compares '1' = NULL → no match → silent data loss).
-	// We apply the schema evolution (type change) IMMEDIATELY here, then return
-	// backfill with nil change — the subsequent TRUNCATE+INSERT populates the
-	// column with the correct type. Without the early ALTER, the target column
-	// retains its old type and future incremental runs fail with type mismatches.
+	// The schema evolution is returned so it runs inside the materialize
+	// transaction (atomic with audit + data write).
 	if model.UniqueKey != "" && len(change.TypeChanged) > 0 {
 		ukCols := make(map[string]bool)
 		for _, part := range strings.Split(model.UniqueKey, ",") {
@@ -1010,11 +924,7 @@ func (r *Runner) detectSchemaEvolution(
 				result.Warnings = append(result.Warnings,
 					fmt.Sprintf("schema evolution: unique_key column %q type changed from %s to %s, forcing backfill",
 						tc.Column, tc.OldType, tc.NewType))
-				// Apply all schema changes now (ADD before DROP, type changes via DROP+ADD)
-				if err := r.applySchemaEvolution(model.Target, change); err != nil {
-					return nil, true // ALTER failed — backfill will handle via TRUNCATE+INSERT
-				}
-				return nil, true
+				return &change, true
 			}
 		}
 	}

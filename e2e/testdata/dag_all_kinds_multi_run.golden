@@ -5,9 +5,9 @@ run_type: backfill
 rows_affected: 4
 run_reason: first run
 target: staging.orders_v
-kind: view
-run_type: create
-rows_affected: 0
+kind: table
+run_type: backfill
+rows_affected: 4
 run_reason: first run
 target: mart.orders_append
 kind: append
@@ -48,10 +48,10 @@ run_type: skip
 rows_affected: 0
 run_reason: no dependencies
 target: staging.orders_v
-kind: view
+kind: table
 run_type: skip
 rows_affected: 0
-run_reason: definition unchanged
+run_reason: deps unchanged
 target: mart.orders_append
 kind: append
 run_type: incremental
@@ -91,10 +91,10 @@ run_type: backfill
 rows_affected: 3
 run_reason: sql changed
 target: staging.orders_v
-kind: view
-run_type: skip
-rows_affected: 0
-run_reason: definition unchanged
+kind: table
+run_type: full
+rows_affected: 3
+run_reason: dep changed: raw.orders
 target: mart.orders_append
 kind: append
 run_type: incremental
@@ -157,10 +157,11 @@ rows_affected: 3
 run_reason: sql changed
 warning: schema evolution: + channel (VARCHAR)
 target: staging.orders_v
-kind: view
-run_type: skip
-rows_affected: 0
-run_reason: definition unchanged
+kind: table
+run_type: incremental
+rows_affected: 3
+run_reason: dep changed: raw.orders
+warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_append
 kind: append
 run_type: incremental
@@ -210,10 +211,11 @@ rows_affected: 3
 run_reason: sql changed
 warning: schema evolution: - channel
 target: staging.orders_v
-kind: view
-run_type: skip
-rows_affected: 0
-run_reason: definition unchanged
+kind: table
+run_type: full
+rows_affected: 3
+run_reason: dep changed: raw.orders
+warning: schema evolution: - channel
 target: mart.orders_append
 kind: append
 run_type: incremental
@@ -261,10 +263,10 @@ run_type: skip
 rows_affected: 0
 run_reason: no dependencies
 target: staging.orders_v
-kind: view
+kind: table
 run_type: skip
 rows_affected: 0
-run_reason: definition unchanged
+run_reason: deps unchanged
 target: mart.orders_append
 kind: append
 run_type: incremental
