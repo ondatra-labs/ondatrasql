@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -114,7 +114,7 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 	}
 
 	// Get snapshot count
-	snapshotQuery := fmt.Sprintf("SELECT COUNT(*) as cnt FROM %s.snapshots()", sess.CatalogAlias())
+	snapshotQuery := "SELECT COUNT(*) as cnt FROM snapshots()"
 	snapRows, err := sess.QueryRowsMap(snapshotQuery)
 	if err == nil && len(snapRows) > 0 {
 		stats.Snapshots, _ = strconv.Atoi(snapRows[0]["cnt"])

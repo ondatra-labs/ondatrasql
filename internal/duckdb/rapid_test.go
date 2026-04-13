@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -117,7 +117,7 @@ func TestRapid_Session_StateMachine(t *testing.T) {
 var preCatalogFiles = []string{"settings.sql", "secrets.sql", "extensions.sql"}
 
 // Post-catalog config files are loaded after ATTACH — invalid SQL here must also fail.
-var postCatalogFiles = []string{"schemas.sql", "variables.sql", "sources.sql"}
+var postCatalogFiles = []string{"schemas.sql", "sources.sql"}
 
 // Property: InitWithCatalog never panics regardless of config file state.
 // Invariants:
@@ -326,8 +326,10 @@ func TestRapid_InitWithCatalog_InvalidMacros(t *testing.T) {
 		os.WriteFile(filepath.Join(configDir, "catalog.sql"),
 			[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
 
-		// Invalid macros.sql
-		os.WriteFile(filepath.Join(configDir, "macros.sql"),
+		// Invalid macro in config/macros/ directory
+		macroDir := filepath.Join(configDir, "macros")
+		os.MkdirAll(macroDir, 0o755)
+		os.WriteFile(filepath.Join(macroDir, "bad.sql"),
 			[]byte("CREATE MACRO bad_macro AS (INVALID SYNTAX HERE);\n"), 0o644)
 
 		s, err := NewSession(":memory:")

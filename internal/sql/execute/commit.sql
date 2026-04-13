@@ -17,5 +17,5 @@
 BEGIN;
 %s;
 %s;
-CALL {{catalog}}.set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');
+CALL set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');
 COMMIT

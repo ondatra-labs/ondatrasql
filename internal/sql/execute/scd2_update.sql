@@ -42,5 +42,5 @@ SELECT %s, %d, NULL, true FROM scd2_changes;
 -- if any of them fail). Empty when the model has no audits.
 %s;
 
-CALL {{catalog}}.set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');
+CALL set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');
 COMMIT;

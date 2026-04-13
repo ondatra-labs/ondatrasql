@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -149,7 +149,8 @@ func TestInitWithCatalog_CustomSettings(t *testing.T) {
 		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
 	os.WriteFile(filepath.Join(configDir, "settings.sql"),
 		[]byte("SET threads = 1;\n"), 0o644)
-	os.WriteFile(filepath.Join(configDir, "variables.sql"),
+	os.MkdirAll(filepath.Join(configDir, "variables"), 0o755)
+	os.WriteFile(filepath.Join(configDir, "variables", "global.sql"),
 		[]byte("SET VARIABLE my_var = 'hello';\n"), 0o644)
 
 	sess, err := NewSession(":memory:")
@@ -481,10 +482,11 @@ func TestInitSandbox_WithCustomSettings(t *testing.T) {
 
 	sandboxCatalog := filepath.Join(dir, "sandbox_ducklake.sqlite")
 
-	// Add settings.sql and variables.sql
+	// Add settings.sql and variables/global.sql
 	os.WriteFile(filepath.Join(configDir, "settings.sql"),
 		[]byte("SET threads = 1;\n"), 0o644)
-	os.WriteFile(filepath.Join(configDir, "variables.sql"),
+	os.MkdirAll(filepath.Join(configDir, "variables"), 0o755)
+	os.WriteFile(filepath.Join(configDir, "variables", "global.sql"),
 		[]byte("SET VARIABLE sandbox_var = 'sandbox_val';\n"), 0o644)
 
 	sess, err := NewSession(":memory:")
@@ -565,7 +567,8 @@ func TestInitWithCatalog_MacroWithCatalogTemplate(t *testing.T) {
 	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
 		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
 	// Macro using {{catalog}} template
-	os.WriteFile(filepath.Join(configDir, "macros.sql"),
+	os.MkdirAll(filepath.Join(configDir, "macros"), 0o755)
+	os.WriteFile(filepath.Join(configDir, "macros", "custom.sql"),
 		[]byte("CREATE OR REPLACE MACRO my_catalog_macro() AS '{{catalog}}';\n"), 0o644)
 
 	sess, err := NewSession(":memory:")

@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -207,9 +207,9 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 			MIN(strftime(snapshot_time, '%%Y-%%m-%%d')) as first_run,
 			MAX(strftime(snapshot_time, '%%Y-%%m-%%d %%H:%%M')) as last_run,
 			100 as success_rate
-		FROM %s.snapshots()
+		FROM snapshots()
 		WHERE commit_extra_info->>'model' = '%s'
-	`, sess.CatalogAlias(), duckdb.EscapeSQL(target))
+	`, duckdb.EscapeSQL(target))
 
 	rows, err := sess.QueryRowsMap(statsQuery)
 	if err == nil && len(rows) > 0 {
@@ -255,11 +255,11 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 			strftime(snapshot_time, '%%Y-%%m-%%d %%H:%%M') as timestamp,
 			CAST(commit_extra_info->>'duration_ms' AS INTEGER) as duration,
 			CAST(commit_extra_info->>'rows_affected' AS BIGINT) as rows
-		FROM %s.snapshots()
+		FROM snapshots()
 		WHERE commit_extra_info->>'model' = '%s'
 		ORDER BY snapshot_id DESC
 		LIMIT 3
-	`, sess.CatalogAlias(), duckdb.EscapeSQL(target))
+	`, duckdb.EscapeSQL(target))
 	recentRows, err := sess.QueryRowsMap(recentQuery)
 	if err == nil {
 		for _, row := range recentRows {

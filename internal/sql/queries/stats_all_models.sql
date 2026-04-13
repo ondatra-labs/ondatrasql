@@ -13,7 +13,7 @@ WITH latest AS (
         -- PARTITION on lowercased model so case-variant commits dedup to a
         -- single "latest" row, matching the case-insensitive lookup story.
         ROW_NUMBER() OVER (PARTITION BY LOWER(commit_extra_info->>'model') ORDER BY snapshot_id DESC) as rn
-    FROM {{catalog}}.snapshots()
+    FROM snapshots()
     WHERE commit_extra_info->>'model' IS NOT NULL
 )
 SELECT model, kind, run_type, rows, duration, last_run

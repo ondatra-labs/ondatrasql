@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.14.0"
+var version = "0.15.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -207,7 +207,7 @@ func isValidCommandName(cmd string) bool {
 }
 
 func printHelp() {
-	help := fmt.Sprintf(`OndatraSQL v%s - Write models, not infrastructure
+	help := fmt.Sprintf(`OndatraSQL v%s - A data pipeline runtime for DuckDB and DuckLake
 
 Project:
   init                    Initialize project in current directory
@@ -236,8 +236,8 @@ Development:
   new <model[.ext]>       Create model (.sql or .star)
   edit <target>           Open in $EDITOR (model, or one of:)
         env               .env
-        macros            config/macros.sql
-        variables         config/variables.sql
+        macros/<name>     config/macros/<name>.sql
+        variables/<name>  config/variables/<name>.sql
         sources           config/sources.sql
         secrets           config/secrets.sql
         settings          config/settings.sql

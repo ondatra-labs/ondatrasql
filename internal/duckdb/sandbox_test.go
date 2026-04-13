@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -283,8 +283,9 @@ func TestInitWithCatalog_UserMacros(t *testing.T) {
 	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
 		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
 
-	// Create a macros.sql with a user-defined macro
-	os.WriteFile(filepath.Join(configDir, "macros.sql"),
+	// Create a macros/custom.sql with a user-defined macro
+	os.MkdirAll(filepath.Join(configDir, "macros"), 0o755)
+	os.WriteFile(filepath.Join(configDir, "macros", "custom.sql"),
 		[]byte("CREATE OR REPLACE MACRO my_double(x) AS x * 2;\n"), 0o644)
 
 	sess, err := NewSession(":memory:")

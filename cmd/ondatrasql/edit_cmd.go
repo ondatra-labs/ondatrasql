@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -21,24 +21,40 @@ func runEdit(cfg *config.Config, target string) error {
 	var sourceFile string
 
 	// Handle special targets
-	switch target {
-	case "env", ".env":
+	switch {
+	case target == "env" || target == ".env":
 		sourceFile = ".env"
-	// sql/ folder files
-	case "macros", "macros.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "macros.sql")
-	case "variables", "variables.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "variables.sql")
-	case "sources", "sources.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "sources.sql")
-	case "catalog", "catalog.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "catalog.sql")
-	case "extensions", "extensions.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "extensions.sql")
-	case "secrets", "secrets.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "secrets.sql")
-	case "settings", "settings.sql":
-		sourceFile = filepath.Join(cfg.ConfigPath, "settings.sql")
+	case strings.HasPrefix(target, "macros/") || strings.HasPrefix(target, "variables/"):
+		// Dynamic: macros/<name> and variables/<name> open config/<target>.sql
+		// Validate: name part must not contain path separators or ".."
+		name := target[strings.Index(target, "/")+1:]
+		if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+			return fmt.Errorf("invalid target: %q", target)
+		}
+		fullPath := filepath.Join(cfg.ConfigPath, target+".sql")
+		if _, err := os.Stat(fullPath); err != nil {
+			// Show relative path in error for readability
+			rel, _ := filepath.Rel(cfg.ProjectDir, fullPath)
+			if rel == "" {
+				rel = fullPath
+			}
+			return fmt.Errorf("file not found: %s", rel)
+		}
+		// Store relative path for editor (runEdit joins with ProjectDir later)
+		sourceFile, _ = filepath.Rel(cfg.ProjectDir, fullPath)
+		if sourceFile == "" {
+			sourceFile = fullPath
+		}
+	case target == "sources" || target == "sources.sql":
+		sourceFile = filepath.Join("config", "sources.sql")
+	case target == "catalog" || target == "catalog.sql":
+		sourceFile = filepath.Join("config", "catalog.sql")
+	case target == "extensions" || target == "extensions.sql":
+		sourceFile = filepath.Join("config", "extensions.sql")
+	case target == "secrets" || target == "secrets.sql":
+		sourceFile = filepath.Join("config", "secrets.sql")
+	case target == "settings" || target == "settings.sql":
+		sourceFile = filepath.Join("config", "settings.sql")
 	default:
 		// Reject path traversal attempts
 		for _, p := range strings.Split(target, ".") {

@@ -3,6 +3,6 @@ kind: table
 run_type: backfill
 rows_affected: 0
 run_reason: sql changed
-error: audit parse error: unknown audit format: amount > 0
+error: Invalid Input Error: audit failed: min(amount) > 0 failed: actual min is -50
 exec_error: false
 prod_amount: 100

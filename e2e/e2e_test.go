@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -170,7 +170,7 @@ func TestE2E_Constraints(t *testing.T) {
 
 	// Model with a constraint that will fail: id NOT NULL, but we insert a NULL
 	p.AddModel("staging/bad_data.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT NULL AS id, 'broken' AS name
 `)
 
@@ -359,7 +359,7 @@ func TestE2E_AuditNullHandling(t *testing.T) {
 
 	// Model with all-NULL values and aggregate audits — should fail
 	p.AddModel("staging/nulls.sql", `-- @kind: table
--- @audit: mean(val) >= 0
+-- @audit: mean(val, >=, 0)
 -- @audit: freshness(ts, 24h)
 SELECT 1 AS id, NULL::INTEGER AS val, NULL::TIMESTAMP AS ts
 `)
@@ -1210,7 +1210,7 @@ func TestE2E_SandboxDAG_ErrorMidDAG(t *testing.T) {
 SELECT * FROM (VALUES (1, 'Alice'), (2, 'Bob')) AS t(id, name)
 `)
 	prod.AddModel("staging/checked.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT id, name FROM raw.source
 `)
 	prod.AddModel("mart/final.sql", `-- @kind: table
@@ -1227,7 +1227,7 @@ SELECT COUNT(*) AS total FROM staging.checked
 SELECT * FROM (VALUES (1, 'Alice'), (NULL, 'Bad')) AS t(id, name)
 `)
 	sbox.AddModel("staging/checked.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT id, name FROM raw.source
 `)
 	sbox.AddModel("mart/final.sql", `-- @kind: table
@@ -1504,7 +1504,7 @@ SELECT id, name, country FROM raw.customers
 func TestE2E_Sandbox_DirectiveOnlyChangeStillEvaluatesAudits(t *testing.T) {
 	prod := testutil.NewProject(t)
 	prod.AddModel("staging/checked.sql", `-- @kind: table
--- @audit: row_count >= 1
+-- @audit: row_count(>=, 1)
 SELECT 1 AS id, 100 AS amount
 `)
 	runModel(t, prod, "staging/checked.sql")
@@ -1513,7 +1513,7 @@ SELECT 1 AS id, 100 AS amount
 	// SQL body unchanged. Pre-v0.12.1 this would have been silently skipped.
 	sbox := testutil.NewSandboxProject(t, prod)
 	sbox.AddModel("staging/checked.sql", `-- @kind: table
--- @audit: row_count >= 999999
+-- @audit: row_count(>=, 999999)
 SELECT 1 AS id, 100 AS amount
 `)
 
@@ -1959,7 +1959,7 @@ SELECT 1 AS id, 100 AS amount
 	// Sandbox: add audit + bad data (negative amount fails audit)
 	sbox := testutil.NewSandboxProject(t, prod)
 	sbox.AddModel("staging/audited.sql", `-- @kind: table
--- @audit: amount > 0
+-- @audit: min(amount, >, 0)
 SELECT 1 AS id, -50 AS amount
 `)
 
@@ -2003,7 +2003,7 @@ func TestE2E_Sandbox_WarningInDAG(t *testing.T) {
 SELECT * FROM (VALUES (1, 'Alice', 100), (2, 'Bob', -50)) AS t(id, name, amount)
 `)
 	prod.AddModel("staging/with_warning.sql", `-- @kind: table
--- @warning: amount > 0
+-- @warning: min(amount, >, 0)
 SELECT id, name, amount FROM raw.source
 `)
 	prod.AddModel("mart/summary.sql", `-- @kind: table
@@ -2019,7 +2019,7 @@ SELECT COUNT(*) AS total FROM staging.with_warning
 SELECT * FROM (VALUES (1, 'Alice', 100), (2, 'Bob', -50), (3, 'Charlie', -10)) AS t(id, name, amount)
 `)
 	sbox.AddModel("staging/with_warning.sql", `-- @kind: table
--- @warning: amount > 0
+-- @warning: min(amount, >, 0)
 SELECT id, name, amount FROM raw.source
 `)
 	sbox.AddModel("mart/summary.sql", `-- @kind: table

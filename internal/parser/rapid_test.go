@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -214,10 +214,10 @@ func TestRapid_Directive_MixedDirectives(t *testing.T) {
 		var lines []string
 		lines = append(lines, "-- @kind: table")
 		for i := 0; i < nAudits; i++ {
-			lines = append(lines, "-- @audit: row_count >= 0")
+			lines = append(lines, "-- @audit: row_count(>=, 0)")
 		}
 		for i := 0; i < nWarnings; i++ {
-			lines = append(lines, "-- @warning: row_count >= 0")
+			lines = append(lines, "-- @warning: row_count(>=, 0)")
 		}
 		for i := 0; i < nExtensions; i++ {
 			lines = append(lines, "-- @extension: httpfs")
@@ -591,9 +591,9 @@ func TestRapid_Events_RejectsInvalidDirectives(t *testing.T) {
 		directive := rapid.SampledFrom([]string{
 			"-- @unique_key: id",
 			"-- @incremental: ts",
-			"-- @constraint: x NOT NULL",
-			"-- @audit: COUNT(*) > 0",
-			"-- @warning: COUNT(*) > 0",
+			"-- @constraint: not_null(x)",
+			"-- @audit: row_count(>, 0)",
+			"-- @warning: row_count(>, 0)",
 		}).Draw(rt, "directive")
 
 		content := "-- @kind: events\n" + directive + "\nevent_name VARCHAR"

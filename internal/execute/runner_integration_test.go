@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -360,8 +360,8 @@ func TestRun_ConstraintPass(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/valid.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id UNIQUE
+-- @constraint: not_null(id)
+-- @constraint: unique(id)
 SELECT 1 AS id, 'Alice' AS name
 UNION ALL SELECT 2, 'Bob'
 `)
@@ -377,7 +377,7 @@ func TestRun_ConstraintFail_NotNull(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/nulls.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT NULL AS id, 'broken' AS name
 `)
 	result, err := runModelErr(t, p, "staging/nulls.sql")
@@ -408,7 +408,7 @@ func TestRun_ConstraintFail_Unique(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/dupes.sql", `-- @kind: table
--- @constraint: id UNIQUE
+-- @constraint: unique(id)
 SELECT 1 AS id UNION ALL SELECT 1
 `)
 	_, err := runModelErr(t, p, "staging/dupes.sql")
@@ -423,7 +423,7 @@ func TestRun_Warnings(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/warned.sql", `-- @kind: table
--- @warning: id NOT NULL
+-- @warning: not_null(id)
 SELECT NULL AS id, 'test' AS name
 UNION ALL SELECT 1, 'ok'
 `)
@@ -668,7 +668,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Second run with audit that fails: amount must be positive
 	p.AddModel("staging/audited.sql", `-- @kind: table
--- @audit: amount > 0
+-- @audit: min(amount, >, 0)
 SELECT 1 AS id, -50 AS amount
 `)
 	_, err := runModelErr(t, p, "staging/audited.sql")
@@ -885,8 +885,8 @@ func TestRun_WarningPass_NoWarnings(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/warn_ok.sql", `-- @kind: table
--- @warning: id NOT NULL
--- @warning: id UNIQUE
+-- @warning: not_null(id)
+-- @warning: unique(id)
 SELECT 1 AS id, 'Alice' AS name
 UNION ALL SELECT 2, 'Bob'
 `)
@@ -909,7 +909,7 @@ func TestRun_WarningConstraintPattern(t *testing.T) {
 
 	// Warning with UNIQUE pattern
 	p.AddModel("staging/warn_unique.sql", `-- @kind: table
--- @warning: id UNIQUE
+-- @warning: unique(id)
 SELECT 1 AS id UNION ALL SELECT 1
 `)
 	result := runModel(t, p, "staging/warn_unique.sql")
@@ -929,7 +929,7 @@ func TestRun_Constraint_DistinctCount(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/dc.sql", `-- @kind: table
--- @constraint: id DISTINCT_COUNT >= 2
+-- @constraint: distinct_count(id, >=, 2)
 SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3
 `)
 	result := runModel(t, p, "staging/dc.sql")
@@ -1008,7 +1008,7 @@ func TestRun_Constraint_DistinctCount_Fail(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/dc_fail.sql", `-- @kind: table
--- @constraint: id DISTINCT_COUNT >= 10
+-- @constraint: distinct_count(id, >=, 10)
 SELECT 1 AS id UNION ALL SELECT 2
 `)
 	_, err := runModelErr(t, p, "staging/dc_fail.sql")
@@ -1093,14 +1093,14 @@ SELECT 1 AS id
 `)
 	r := runModel(t, p, "staging/warn_bad.sql")
 
-	hasParseError := false
+	hasError := false
 	for _, w := range r.Warnings {
-		if strings.Contains(w, "warning parse error") || strings.Contains(w, "unknown") {
-			hasParseError = true
+		if strings.Contains(w, "warning parse error") || strings.Contains(w, "warning check error") || strings.Contains(w, "does not exist") {
+			hasError = true
 		}
 	}
-	if !hasParseError {
-		t.Errorf("expected warning parse error, got warnings: %v", r.Warnings)
+	if !hasError {
+		t.Errorf("expected warning error for unknown macro, got warnings: %v", r.Warnings)
 	}
 }
 
@@ -1195,7 +1195,7 @@ func TestRun_StarlarkScript_WithConstraint(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/star_constraint.star", `# @kind: table
-# @constraint: id NOT NULL
+# @constraint: not_null(id)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": 2, "name": "Bob"})
 `)
@@ -1216,7 +1216,7 @@ func TestRun_StarlarkScript_ConstraintFail(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/star_cfail.star", `# @kind: table
-# @constraint: id UNIQUE
+# @constraint: unique(id)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": 1, "name": "Duplicate"})
 `)
@@ -1339,7 +1339,7 @@ func TestRun_StarlarkScript_WithWarning(t *testing.T) {
 
 	// Starlark script with warning directive
 	p.AddModel("staging/star_warn.star", `# @kind: table
-# @warning: id UNIQUE
+# @warning: unique(id)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": 1, "name": "Duplicate"})
 `)
@@ -1368,7 +1368,7 @@ save.row({"id": 1, "amount": 100})
 
 	// Second run with audit that will fail
 	p.AddModel("staging/star_aud.star", `# @kind: table
-# @audit: amount > 0
+# @audit: min(amount, >, 0)
 save.row({"id": 1, "amount": -50})
 `)
 	_, err := runModelErr(t, p, "staging/star_aud.star")
@@ -1442,9 +1442,9 @@ func TestRun_Constraint_MultipleConstraints(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/multi_c.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id UNIQUE
--- @constraint: amount > 0
+-- @constraint: not_null(id)
+-- @constraint: unique(id)
+-- @constraint: compare(amount, >, 0)
 SELECT 1 AS id, 100 AS amount
 UNION ALL SELECT 2, 200
 `)
@@ -1468,7 +1468,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Second run with audit that passes (row_count >= 1)
 	p.AddModel("staging/aud_pass.sql", `-- @kind: table
--- @audit: row_count >= 1
+-- @audit: row_count(>=, 1)
 SELECT 1 AS id, 200 AS amount
 `)
 	result := runModel(t, p, "staging/aud_pass.sql")
@@ -1642,7 +1642,7 @@ save.row({"id": 1, "amount": 100})
 
 	// Second run with audit that will fail
 	p.AddModel("staging/star_aroll.star", `# @kind: table
-# @audit: row_count >= 999
+# @audit: row_count(>=, 999)
 save.row({"id": 1, "amount": 200})
 `)
 	result, err := runModelErr(t, p, "staging/star_aroll.star")
@@ -1674,9 +1674,9 @@ func TestRun_StarlarkScript_MultipleConstraints(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/star_mc.star", `# @kind: table
-# @constraint: id NOT NULL
-# @constraint: id UNIQUE
-# @constraint: amount >= 0
+# @constraint: not_null(id)
+# @constraint: unique(id)
+# @constraint: compare(amount, >=, 0)
 save.row({"id": 1, "name": "Alice", "amount": 10})
 save.row({"id": 2, "name": "Bob", "amount": 20})
 `)
@@ -1695,18 +1695,9 @@ func TestRun_StarlarkScript_ConstraintParseError(t *testing.T) {
 # @constraint: not_a_valid_constraint_xyz
 save.row({"id": 1})
 `)
-	result, err := runModelErr(t, p, "staging/star_cperr.star")
+	_, err := runModelErr(t, p, "staging/star_cperr.star")
 	if err == nil {
-		t.Fatal("expected constraint error")
-	}
-	hasParseErr := false
-	for _, e := range result.Errors {
-		if strings.Contains(e, "parse error") || strings.Contains(e, "unknown") {
-			hasParseErr = true
-		}
-	}
-	if !hasParseErr {
-		t.Errorf("expected constraint parse error, got: %v", result.Errors)
+		t.Fatal("expected constraint error for unknown macro")
 	}
 }
 
@@ -1724,7 +1715,7 @@ save.row({"id": 1, "amount": 100})
 
 	// Second run with audit that passes
 	p.AddModel("staging/star_audp.star", `# @kind: table
-# @audit: row_count >= 1
+# @audit: row_count(>=, 1)
 save.row({"id": 1, "amount": 200})
 `)
 	result := runModel(t, p, "staging/star_audp.star")
@@ -1748,7 +1739,7 @@ func TestRun_StarlarkScript_AuditFail_FirstRun(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/star_af1.star", `# @kind: table
-# @audit: row_count >= 999
+# @audit: row_count(>=, 999)
 save.row({"id": 1})
 `)
 	result, err := runModelErr(t, p, "staging/star_af1.star")
@@ -1775,8 +1766,8 @@ func TestRun_StarlarkScript_WarningPass(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/star_wok.star", `# @kind: table
-# @warning: id NOT NULL
-# @warning: id UNIQUE
+# @warning: not_null(id)
+# @warning: unique(id)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": 2, "name": "Bob"})
 `)
@@ -1803,7 +1794,7 @@ save.row({"id": 1, "amount": 100})
 
 	// Second run with warning audit pattern that fails
 	p.AddModel("staging/star_waud.star", `# @kind: table
-# @warning: row_count >= 999
+# @warning: row_count(>=, 999)
 save.row({"id": 1, "amount": 200})
 `)
 	result := runModel(t, p, "staging/star_waud.star")
@@ -1840,13 +1831,13 @@ func TestRun_StarlarkScript_WarningUnknownPattern(t *testing.T) {
 save.row({"id": 1})
 `)
 	result := runModel(t, p, "staging/star_wunk.star")
-	hasParseErr := false
+	hasErr := false
 	for _, w := range result.Warnings {
-		if strings.Contains(w, "warning parse error") {
-			hasParseErr = true
+		if strings.Contains(w, "warning parse error") || strings.Contains(w, "warning check error") || strings.Contains(w, "does not exist") {
+			hasErr = true
 		}
 	}
-	if !hasParseErr {
+	if !hasErr {
 		t.Errorf("expected warning parse error, got: %v", result.Warnings)
 	}
 	// Data should still be committed
@@ -1861,7 +1852,7 @@ func TestRun_StarlarkScript_ResultStatus_Pass(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/star_sok.star", `# @kind: table
-# @constraint: id NOT NULL
+# @constraint: not_null(id)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": 2, "name": "Bob"})
 `)
@@ -1882,7 +1873,7 @@ func TestRun_StarlarkScript_ResultStatus_Fail(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/star_serr.star", `# @kind: table
-# @constraint: id NOT NULL
+# @constraint: not_null(id)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": nil, "name": "Bad"})
 `)
@@ -1936,7 +1927,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Warning with audit pattern (row_count) - should trigger audit code path in runWarnings
 	p.AddModel("staging/warn_aud.sql", `-- @kind: table
--- @warning: row_count >= 999
+-- @warning: row_count(>=, 999)
 SELECT 1 AS id, 200 AS amount
 `)
 	result := runModel(t, p, "staging/warn_aud.sql")
@@ -2235,7 +2226,7 @@ func TestRun_AuditFailure_FirstRun_Rollback(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/audit_first.sql", `-- @kind: table
--- @audit: row_count >= 100
+-- @audit: row_count(>=, 100)
 SELECT 1 AS id
 `)
 	_, err := runModelErr(t, p, "staging/audit_first.sql")
@@ -2719,7 +2710,7 @@ func TestRun_AuditFail_Rollback_FirstRun(t *testing.T) {
 	// observable property — the table simply doesn't exist after the
 	// failed run.
 	p.AddModel("staging/audit_new.sql", `-- @kind: table
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id
 `)
 	result, err := runModelErr(t, p, "staging/audit_new.sql")
@@ -2767,7 +2758,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Second run with audit that fails → should rollback to previous snapshot
 	p.AddModel("staging/audit_restore.sql", `-- @kind: table
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 999 AS amount
 `)
 	_, err := runModelErr(t, p, "staging/audit_restore.sql")
@@ -2850,8 +2841,8 @@ func TestRun_ResultStatus_ConstraintPass(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/status_ok.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id UNIQUE
+-- @constraint: not_null(id)
+-- @constraint: unique(id)
 SELECT 1 AS id, 'Alice' AS name
 UNION ALL SELECT 2, 'Bob'
 `)
@@ -2877,8 +2868,8 @@ func TestRun_ResultStatus_ConstraintFail(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/status_cerr.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id UNIQUE
+-- @constraint: not_null(id)
+-- @constraint: unique(id)
 SELECT 1 AS id UNION ALL SELECT NULL UNION ALL SELECT 1
 `)
 	result, err := runModelErr(t, p, "staging/status_cerr.sql")
@@ -2919,7 +2910,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Second run: audit fails
 	p.AddModel("staging/status_aerr.sql", `-- @kind: table
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 200 AS amount
 `)
 	result, err := runModelErr(t, p, "staging/status_aerr.sql")
@@ -3213,7 +3204,7 @@ func TestRun_ConstraintOnMissingColumn(t *testing.T) {
 	// Constraint references a column that doesn't exist in the query
 	p := testutil.NewProject(t)
 	p.AddModel("staging/missing_col.sql", `-- @kind: table
--- @constraint: nonexistent_column NOT NULL
+-- @constraint: not_null(nonexistent_column)
 SELECT 1 AS id
 `)
 	_, err := runModelErr(t, p, "staging/missing_col.sql")
@@ -3402,9 +3393,9 @@ func TestRun_MultipleConstraintFailures_AllReported(t *testing.T) {
 	// When multiple constraints fail, ALL failures should be reported, not just the first.
 	p := testutil.NewProject(t)
 	p.AddModel("staging/multi_fail.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id UNIQUE
--- @constraint: amount > 0
+-- @constraint: not_null(id)
+-- @constraint: unique(id)
+-- @constraint: compare(amount, >, 0)
 SELECT NULL AS id, -5 AS amount
 UNION ALL SELECT NULL, -10
 `)
@@ -3448,8 +3439,8 @@ SELECT 1 AS id, 100 AS amount
 	// abort BEFORE materialize and we'd only get the parse error.
 	// (That's tested separately.)
 	p.AddModel("staging/multi_aud.sql", `-- @kind: table
--- @audit: row_count >= 999
--- @audit: min(amount) >= 0
+-- @audit: row_count(>=, 999)
+-- @audit: min(amount, >=, 0)
 SELECT 1 AS id, -50 AS amount
 `)
 	result, err := runModelErr(t, p, "staging/multi_aud.sql")
@@ -3521,8 +3512,8 @@ func TestRun_DuplicateConstraints_AllApply(t *testing.T) {
 	// Multiple identical constraints should all apply (no deduplication)
 	p := testutil.NewProject(t)
 	p.AddModel("staging/dup_c.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
+-- @constraint: not_null(id)
 SELECT 1 AS id
 `)
 	result := runModel(t, p, "staging/dup_c.sql")
@@ -3538,8 +3529,8 @@ func TestRun_DuplicateConstraints_BothFail(t *testing.T) {
 	// When duplicated constraints both fail, should report both
 	p := testutil.NewProject(t)
 	p.AddModel("staging/dup_cfail.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
+-- @constraint: not_null(id)
 SELECT NULL AS id
 `)
 	result, err := runModelErr(t, p, "staging/dup_cfail.sql")
@@ -3564,7 +3555,7 @@ func TestRun_ConstraintBlocksBeforeMaterialization(t *testing.T) {
 	// (constraints run before materialization, audits run after)
 	p := testutil.NewProject(t)
 	p.AddModel("staging/blocked.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT NULL AS id
 `)
 	_, err := runModelErr(t, p, "staging/blocked.sql")
@@ -3594,7 +3585,7 @@ SELECT 1 AS id, 'original' AS val
 
 	// Second run: audit fails → table was created temporarily then rolled back
 	p.AddModel("staging/aud_order.sql", `-- @kind: table
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'changed' AS val
 `)
 	_, err := runModelErr(t, p, "staging/aud_order.sql")
@@ -3635,7 +3626,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Model 2: fails (constraint)
 	p.AddModel("staging/bad.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT NULL AS id
 `)
 	_, err := runModelErr(t, p, "staging/bad.sql")
@@ -3660,8 +3651,8 @@ func TestRun_Constraint_ErrorMessageDescriptive(t *testing.T) {
 	// Error messages should contain enough info for debugging
 	p := testutil.NewProject(t)
 	p.AddModel("staging/desc_err.sql", `-- @kind: table
--- @constraint: amount > 0
--- @constraint: id UNIQUE
+-- @constraint: compare(amount, >, 0)
+-- @constraint: unique(id)
 SELECT 1 AS id, -5 AS amount
 UNION ALL SELECT 1, 10
 `)
@@ -4143,7 +4134,7 @@ func TestRun_AuditFail_RollbackRestoresFullState(t *testing.T) {
 
 	// Create initial data
 	p.AddModel("staging/audit_rb.sql", `-- @kind: table
--- @audit: row_count >= 5
+-- @audit: row_count(>=, 5)
 SELECT 1 AS id, 'Alice' AS name
 UNION ALL SELECT 2, 'Bob'
 UNION ALL SELECT 3, 'Charlie'
@@ -4167,7 +4158,7 @@ UNION ALL SELECT 3, 300
 
 	// Run 2: change data AND add failing audit
 	p.AddModel("staging/audit_rb.sql", `-- @kind: table
--- @audit: row_count >= 100
+-- @audit: row_count(>=, 100)
 SELECT 1 AS id, 999 AS amount
 `)
 	_, err := runModelErr(t, p, "staging/audit_rb.sql")
@@ -4216,7 +4207,7 @@ UNION ALL SELECT 2, 'Bob', 200
 
 	// Run 2: drop 'score' column (destructive schema change) + failing audit
 	p.AddModel("staging/destruct_rb.sql", `-- @kind: append
--- @audit: row_count >= 1000
+-- @audit: row_count(>=, 1000)
 SELECT 3 AS id, 'Charlie' AS name
 `)
 	_, err := runModelErr(t, p, "staging/destruct_rb.sql")
@@ -4251,7 +4242,7 @@ func TestRun_AuditFail_FirstRun_DropsTable(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/audit_first.sql", `-- @kind: table
--- @audit: row_count >= 100
+-- @audit: row_count(>=, 100)
 SELECT 1 AS id
 `)
 
@@ -4386,9 +4377,9 @@ func TestRun_ConstraintAndAudit_BothChecked(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/both_checks.sql", `-- @kind: table
--- @constraint: id NOT NULL
--- @constraint: id UNIQUE
--- @audit: row_count >= 1
+-- @constraint: not_null(id)
+-- @constraint: unique(id)
+-- @audit: row_count(>=, 1)
 SELECT 1 AS id, 'Alice' AS name
 UNION ALL SELECT 2, 'Bob'
 `)
@@ -4418,7 +4409,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Second run: constraint will fail (id has duplicates)
 	p.AddModel("staging/cfail.sql", `-- @kind: table
--- @constraint: id UNIQUE
+-- @constraint: unique(id)
 SELECT 1 AS id, 999 AS amount
 UNION ALL SELECT 1, 888
 `)
@@ -4535,7 +4526,7 @@ func TestRun_Warning_DoesNotRollback(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("staging/warn_test.sql", `-- @kind: table
--- @warning: row_count >= 100
+-- @warning: row_count(>=, 100)
 SELECT 1 AS id
 `)
 	result := runModel(t, p, "staging/warn_test.sql")
@@ -4549,6 +4540,48 @@ SELECT 1 AS id
 	count, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.warn_test")
 	if count != "1" {
 		t.Errorf("count = %s, want 1 (warning should not rollback)", count)
+	}
+}
+
+func TestRun_Warning_BadLocalSQL_SurfacesError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	// If config/variables/local.sql has a syntax error, the warning system
+	// must surface it rather than silently using stale variable values.
+	p := testutil.NewProject(t)
+
+	p.AddModel("staging/w.sql", "-- @kind: table\n-- @warning: row_count(>=, 100)\nSELECT 1 AS id\n")
+
+	// Break local.sql
+	testutil.WriteFile(t, p.Dir, "config/variables/local.sql", "INVALID SQL SYNTAX HERE;")
+
+	modelPath := filepath.Join(p.Dir, "models", "staging/w.sql")
+	model, err := parser.ParseModel(modelPath, p.Dir)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	runner := execute.NewRunner(p.Sess, execute.ModeRun, dag.GenerateRunID())
+	runner.SetProjectDir(p.Dir)
+	result, err := runner.Run(context.Background(), model)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Model should still succeed (warnings are best-effort)
+	if result.RowsAffected != 1 {
+		t.Errorf("rows = %d, want 1 — model should not fail on bad local.sql", result.RowsAffected)
+	}
+
+	// But we must see a warning about the load failure
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "load per-model variables") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about failed per-model variables, got: %v", result.Warnings)
 	}
 }
 
@@ -5482,7 +5515,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Run 2: add column "channel" + audit that ALWAYS fails
 	p.AddModel("staging/orders.sql", `-- @kind: table
--- @audit: row_count = 0
+-- @audit: row_count(=, 0)
 SELECT 1 AS id, 100 AS amount, 'web' AS channel
 `)
 	_, err := runModelErr(t, p, "staging/orders.sql")
@@ -5520,7 +5553,7 @@ SELECT 1 AS id, 100 AS amount
 	// Run 2: add column "channel" + audit that ALWAYS fails
 	p.AddModel("staging/history.sql", `-- @kind: scd2
 -- @unique_key: id
--- @audit: row_count = 0
+-- @audit: row_count(=, 0)
 SELECT 1 AS id, 200 AS amount, 'web' AS channel
 `)
 	_, err := runModelErr(t, p, "staging/history.sql")
@@ -5556,7 +5589,7 @@ SELECT 1 AS id, 100 AS amount
 	// Run 2: add column "warehouse" + audit that ALWAYS fails
 	p.AddModel("staging/inventory.sql", `-- @kind: tracked
 -- @unique_key: id
--- @audit: row_count = 0
+-- @audit: row_count(=, 0)
 SELECT 1 AS id, 100 AS amount, 'SE' AS warehouse
 `)
 	_, err := runModelErr(t, p, "staging/inventory.sql")
@@ -5592,7 +5625,7 @@ SELECT 'SE' AS region, 100 AS amount
 	// Run 2: add column "channel" + audit that ALWAYS fails
 	p.AddModel("staging/sales.sql", `-- @kind: partition
 -- @unique_key: region
--- @audit: row_count = 0
+-- @audit: row_count(=, 0)
 SELECT 'SE' AS region, 200 AS amount, 'web' AS channel
 `)
 	_, err := runModelErr(t, p, "staging/sales.sql")
@@ -5634,7 +5667,7 @@ SELECT 'A' AS id, 100 AS amount
 	// Run 2: change id type to INTEGER + audit that ALWAYS fails
 	p.AddModel("staging/orders.sql", `-- @kind: merge
 -- @unique_key: id
--- @audit: row_count = 0
+-- @audit: row_count(=, 0)
 SELECT 1 AS id, 200 AS amount
 `)
 	_, err := runModelErr(t, p, "staging/orders.sql")
@@ -5674,10 +5707,10 @@ func TestRun_AtomicSchemaEvolution_SuccessCommitsBoth(t *testing.T) {
 	runModel(t, p, "staging/t_partition.sql")
 
 	// Run 2: add column + passing audit (row_count >= 1)
-	p.AddModel("staging/t_table.sql", "-- @kind: table\n-- @audit: row_count >= 1\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
-	p.AddModel("staging/t_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\n-- @audit: row_count >= 1\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
-	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\n-- @audit: row_count >= 1\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
-	p.AddModel("staging/t_partition.sql", "-- @kind: partition\n-- @unique_key: region\n-- @audit: row_count >= 1\nSELECT 'SE' AS region, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_table.sql", "-- @kind: table\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_partition.sql", "-- @kind: partition\n-- @unique_key: region\n-- @audit: row_count(>=, 1)\nSELECT 'SE' AS region, 100 AS amount, 'web' AS channel\n")
 	runModel(t, p, "staging/t_table.sql")
 	runModel(t, p, "staging/t_scd2.sql")
 	runModel(t, p, "staging/t_tracked.sql")
@@ -5688,6 +5721,53 @@ func TestRun_AtomicSchemaEvolution_SuccessCommitsBoth(t *testing.T) {
 		if !columnExists(t, p, tbl, "channel") {
 			t.Errorf("%s: column 'channel' missing after successful schema evolution + audit", tbl)
 		}
+	}
+}
+
+// --- CDC gate tests ---
+
+func TestRun_CDCGate_SkipsWhenSourceUnchanged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// Source
+	p.AddModel("raw/src.sql", "-- @kind: table\nSELECT 1 AS id, 100 AS val\n")
+	// Downstream with CDC kind
+	p.AddModel("staging/dst.sql", "-- @kind: append\nSELECT id, val FROM raw.src\n")
+
+	// First run: both backfill
+	runModel(t, p, "raw/src.sql")
+	runModel(t, p, "staging/dst.sql")
+
+	// Second run: source unchanged → dst should have 0 rows affected
+	r := runModel(t, p, "staging/dst.sql")
+	if r.RowsAffected != 0 {
+		t.Errorf("rows = %d, want 0 (source unchanged, CDC should skip)", r.RowsAffected)
+	}
+}
+
+func TestRun_CDCGate_RunsWhenSourceChanged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	p.AddModel("raw/src.sql", "-- @kind: table\nSELECT 1 AS id, 100 AS val\n")
+	p.AddModel("staging/dst.sql", "-- @kind: append\nSELECT id, val FROM raw.src\n")
+
+	runModel(t, p, "raw/src.sql")
+	runModel(t, p, "staging/dst.sql")
+
+	// Change source
+	p.AddModel("raw/src.sql", "-- @kind: table\nSELECT * FROM (VALUES (1, 100), (2, 200)) AS t(id, val)\n")
+	runModel(t, p, "raw/src.sql")
+
+	// Re-run dst: source changed → should have new rows
+	r := runModel(t, p, "staging/dst.sql")
+	if r.RowsAffected == 0 {
+		t.Error("expected rows > 0 after source change")
 	}
 }
 

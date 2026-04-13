@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -852,29 +852,38 @@ func (s *Session) InitWithCatalog(configPath string) error {
 		}
 	}
 
-	// Metadata macros (still in memory context, lake exists for validation)
+	// Switch to lake catalog so DuckLake functions (snapshots(), current_snapshot(),
+	// set_commit_message()) resolve without catalog prefix.
+	if err := s.Exec(fmt.Sprintf("USE %s;", catalogAlias)); err != nil {
+		return fmt.Errorf("use %s: %w", catalogAlias, err)
+	}
+
+	// Metadata macros: must target memory catalog (DuckLake doesn't support
+	// CREATE MACRO). macroPrefix ensures CREATE MACRO → CREATE MACRO memory.
+	// Body references snapshots()/current_snapshot() which resolve via USE.
 	if metadataMacros, err := sqlfiles.Load("macros/metadata.sql"); err == nil {
+		metadataMacros = macroPrefix.ReplaceAllString(metadataMacros, "${1}memory.")
 		if err := s.Exec(metadataMacros); err != nil {
 			return fmt.Errorf("load metadata macros: %w", err)
 		}
 	}
 
-	// Switch to lake catalog (before user macros so table refs resolve against lake)
-	if err := s.Exec(fmt.Sprintf("USE %s;", catalogAlias)); err != nil {
-		return fmt.Errorf("use %s: %w", catalogAlias, err)
+	// Include memory in search path BEFORE user macros, so cross-file macro
+	// references resolve (e.g. audits.sql calling helper() from common.sql).
+	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", catalogAlias)); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
 	}
 
-	// User macros: stored in memory catalog (DuckLake doesn't support macros).
+	// User macros: load all .sql files in config/macros/ directory.
 	// CREATE MACRO is auto-prefixed with memory. so macros go to the in-memory
-	// catalog. Since USE lake is active, table refs like mart.orders resolve
-	// against the catalog without needing a catalog prefix.
-	if err := s.loadUserMacros(configPath, catalogAlias); err != nil {
+	// catalog. search_path includes memory so cross-file refs resolve.
+	if err := s.loadMacroDir(filepath.Join(configPath, "macros"), catalogAlias); err != nil {
 		return err
 	}
 
-	// PHASE 4: CDC variables
+	// PHASE 4: CDC variables (USE is active, so current_snapshot() resolves natively)
 	cdcVars := []string{
-		fmt.Sprintf("SET VARIABLE curr_snapshot = COALESCE((SELECT id FROM %s.current_snapshot()), 0);", catalogAlias),
+		"SET VARIABLE curr_snapshot = COALESCE((SELECT id FROM current_snapshot()), 0);",
 		"SET VARIABLE prev_snapshot = COALESCE(getvariable('curr_snapshot') - 1, 0);",
 		"SET VARIABLE dag_start_snapshot = getvariable('curr_snapshot');",
 	}
@@ -889,16 +898,15 @@ func (s *Session) InitWithCatalog(configPath string) error {
 		return fmt.Errorf("create registry: %w", err)
 	}
 
-	// Include memory in search path so macros are found
-	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", catalogAlias)); err != nil {
-		return fmt.Errorf("set search_path: %w", err)
-	}
-
 	// PHASE 5: Post-catalog setup (catalog is attached and active)
 	if err := loadSQL("schemas.sql"); err != nil {
 		return err
 	}
-	if err := loadSQL("variables.sql"); err != nil {
+	// Variables: constants first, then global (computed).
+	if err := s.loadConfigSQL(configPath, "variables/constants.sql", "", catalogAlias); err != nil {
+		return err
+	}
+	if err := s.loadConfigSQL(configPath, "variables/global.sql", "", catalogAlias); err != nil {
 		return err
 	}
 	if err := loadSQL("sources.sql"); err != nil {
@@ -912,15 +920,58 @@ func (s *Session) InitWithCatalog(configPath string) error {
 // and inserts memory. before the macro name. Skips commented-out lines.
 var macroPrefix = regexp.MustCompile(`(?im)(^\s*CREATE\s+(?:OR\s+REPLACE\s+)?MACRO\s+)`)
 
-// loadUserMacros reads macros.sql, prefixes each CREATE MACRO with memory.
-// so macros are stored in DuckDB's in-memory catalog instead of DuckLake
-// (which doesn't support macros). Also replaces {{catalog}} with the catalog
-// alias as an escape hatch for fully qualified references.
-func (s *Session) loadUserMacros(configPath, catalogAlias string) error {
-	path := filepath.Join(configPath, "macros.sql")
+// loadMacroDir loads all .sql files in a directory as macros.
+// Each CREATE MACRO is prefixed with memory. so macros go to the in-memory catalog.
+// Files may depend on each other in arbitrary chains (a.sql → b.sql → c.sql),
+// so loading iterates until all files succeed or no progress is made.
+func (s *Session) loadMacroDir(dirPath, catalogAlias string) error {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // Directory missing is OK
+		}
+		return fmt.Errorf("read macro dir %s: %w", filepath.Base(dirPath), err)
+	}
+
+	var pending []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		pending = append(pending, entry.Name())
+	}
+
+	// Iterate: each round tries all pending files. Stop when all succeed
+	// or no progress is made (meaning a real error, not a dependency issue).
+	var lastErr error
+	for len(pending) > 0 {
+		var failed []string
+		for _, name := range pending {
+			if err := s.loadMacroFile(filepath.Join(dirPath, name), catalogAlias); err != nil {
+				failed = append(failed, name)
+				lastErr = err
+			}
+		}
+		if len(failed) == len(pending) {
+			// No progress — return the last error
+			return lastErr
+		}
+		pending = failed
+	}
+	return nil
+}
+
+// loadMacroFile reads a SQL file and loads it with memory. prefix on CREATE MACRO.
+func (s *Session) loadMacroFile(path, catalogAlias string) error {
 	content, err := os.ReadFile(path)
-	if err != nil || len(content) == 0 {
-		return nil // File missing or empty is OK
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File missing is OK
+		}
+		return fmt.Errorf("read %s: %w", filepath.Base(path), err)
+	}
+	if len(content) == 0 {
+		return nil // Empty file is OK
 	}
 
 	sql := os.ExpandEnv(string(content))
@@ -928,9 +979,59 @@ func (s *Session) loadUserMacros(configPath, catalogAlias string) error {
 	sql = macroPrefix.ReplaceAllString(sql, "${1}memory.")
 
 	if err := s.Exec(sql); err != nil {
-		return fmt.Errorf("load macros.sql: %w", err)
+		return fmt.Errorf("load %s: %w", filepath.Base(path), err)
 	}
 	return nil
+}
+
+// loadConfigSQL loads a SQL config file with {{catalog}} replacement.
+// Tries primary path first, falls back to fallback path.
+// Missing files are silently skipped; I/O errors (permissions, etc.) are returned.
+func (s *Session) loadConfigSQL(configPath, primary, fallback, catalogAlias string) error {
+	path := filepath.Join(configPath, primary)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("load %s: %w", primary, err)
+		}
+		// Primary missing — try fallback
+		if fallback == "" {
+			return nil
+		}
+		path = filepath.Join(configPath, fallback)
+		content, err = os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("load %s: %w", fallback, err)
+		}
+	}
+	if len(content) == 0 {
+		return nil
+	}
+
+	sql := os.ExpandEnv(string(content))
+	sql = strings.ReplaceAll(sql, "{{catalog}}", catalogAlias)
+
+	loadedFile := primary
+	if path != filepath.Join(configPath, primary) {
+		loadedFile = fallback
+	}
+	if err := s.Exec(sql); err != nil {
+		return fmt.Errorf("load %s: %w", loadedFile, err)
+	}
+	return nil
+}
+
+// LoadPerModelVars loads config/variables/local.sql for the current model.
+// Called by runner per model before validation dispatch.
+func (s *Session) LoadPerModelVars(configPath, modelTarget, catalogAlias string) error {
+	// Set current_model so local.sql can derive other variables
+	if err := s.Exec(fmt.Sprintf("SET VARIABLE current_model = '%s'", strings.ReplaceAll(modelTarget, "'", "''"))); err != nil {
+		return err
+	}
+	return s.loadConfigSQL(configPath, "variables/local.sql", "", catalogAlias)
 }
 
 // validateCatalogBackend is called after catalog.sql has been executed.
@@ -1275,25 +1376,30 @@ func (s *Session) ProdAlias() string {
 	return s.prodAlias
 }
 
-// RefreshSnapshot updates curr_snapshot. v0.12.0+: in sandbox mode the
-// sandbox catalog is a fork of prod, so it has the full snapshot history
-// (inherited at fork plus new sandbox commits). Always read from the active
-// catalog regardless of mode — no more prod-alias special-case.
-func (s *Session) RefreshSnapshot() error {
-	catalog := s.CatalogAlias()
-	sqlStr := fmt.Sprintf("SET VARIABLE curr_snapshot = COALESCE((SELECT id FROM %s.current_snapshot()), 0);", catalog)
-	return s.Exec(sqlStr)
+// DefaultSearchPath returns the search_path that should be restored after
+// temporary changes (CDC gate, warnings). In sandbox mode this includes
+// sandbox, prod, and memory. In normal mode: catalog and memory.
+func (s *Session) DefaultSearchPath() string {
+	if s.prodAlias != "" {
+		return fmt.Sprintf("sandbox,%s,memory", s.prodAlias)
+	}
+	return fmt.Sprintf("%s,memory", s.catalogAlias)
 }
 
-// SetHighWaterMark sets dag_start_snapshot for CDC. Same v0.12.0 reasoning
-// as RefreshSnapshot — sandbox has the inherited commit history, so we read
-// from the active catalog instead of forcing prod.
+// RefreshSnapshot updates curr_snapshot. current_snapshot() resolves via
+// USE to the active catalog (sandbox in sandbox mode, which has inherited
+// prod commits plus new sandbox commits).
+func (s *Session) RefreshSnapshot() error {
+	return s.Exec("SET VARIABLE curr_snapshot = COALESCE((SELECT id FROM current_snapshot()), 0);")
+}
+
+// SetHighWaterMark sets dag_start_snapshot for CDC. snapshots() resolves
+// via USE to the active catalog.
 func (s *Session) SetHighWaterMark(target string) error {
-	catalog := s.CatalogAlias()
 	sqlStr := fmt.Sprintf(`SET VARIABLE dag_start_snapshot = COALESCE(
-		(SELECT snapshot_id FROM %s.snapshots()
+		(SELECT snapshot_id FROM snapshots()
 		 WHERE LOWER(commit_extra_info->>'model') = LOWER('%s')
-		 ORDER BY snapshot_id DESC LIMIT 1), 0);`, catalog, strings.ReplaceAll(target, "'", "''"))
+		 ORDER BY snapshot_id DESC LIMIT 1), 0);`, strings.ReplaceAll(target, "'", "''"))
 	return s.Exec(sqlStr)
 }
 
@@ -1304,6 +1410,56 @@ func (s *Session) HasCDCChanges() (bool, error) {
 		return false, err
 	}
 	return result == "true", nil
+}
+
+// TableHasChanges checks if a specific table has changes between two snapshots
+// using table_changes(). Returns the count of changes. Schema must be set via
+// SET SCHEMA before calling (table_changes takes bare table name).
+func (s *Session) TableHasChanges(table string, startSnapshot, endSnapshot int64) (int64, error) {
+	if startSnapshot > endSnapshot {
+		return 0, nil // No changes possible
+	}
+	result, err := s.QueryValue(fmt.Sprintf(
+		"SELECT COUNT(*) FROM table_changes('%s', %d, %d)",
+		strings.ReplaceAll(table, "'", "''"), startSnapshot, endSnapshot))
+	if err != nil {
+		return 0, err
+	}
+	var cnt int64
+	fmt.Sscanf(result, "%d", &cnt)
+	return cnt, nil
+}
+
+// TableChangesInsertOnly checks if all changes to a table between two snapshots
+// are insert-only (no deletes or updates). Returns true if safe for insert-only
+// optimization. Returns false if any deletes or updates exist.
+func (s *Session) TableChangesInsertOnly(table string, startSnapshot, endSnapshot int64) (bool, error) {
+	if startSnapshot > endSnapshot {
+		return true, nil // No changes = trivially insert-only
+	}
+	result, err := s.QueryValue(fmt.Sprintf(
+		"SELECT COUNT(*) FROM table_changes('%s', %d, %d) WHERE change_type IN ('delete', 'update_postimage')",
+		strings.ReplaceAll(table, "'", "''"), startSnapshot, endSnapshot))
+	if err != nil {
+		return false, err
+	}
+	return result == "0", nil
+}
+
+// GetCurrentSnapshot returns curr_snapshot value.
+func (s *Session) GetCurrentSnapshot() (int64, error) {
+	result, err := s.QueryValue("SELECT getvariable('curr_snapshot')::BIGINT;")
+	if err != nil {
+		return 0, err
+	}
+	if result == "" {
+		return 0, nil
+	}
+	var id int64
+	if _, err := fmt.Sscanf(result, "%d", &id); err != nil {
+		return 0, fmt.Errorf("parse curr_snapshot %q: %w", result, err)
+	}
+	return id, nil
 }
 
 // GetDagStartSnapshot returns dag_start_snapshot value.
@@ -1450,14 +1606,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		}
 	}
 
-	// Metadata macros (reference lake.snapshots())
-	if metadataMacros, err := sqlfiles.Load("macros/metadata.sql"); err == nil {
-		if err := s.Exec(metadataMacros); err != nil {
-			return fmt.Errorf("load metadata macros: %w", err)
-		}
-	}
-
-	// PHASE 4: CDC variables (requires prod catalog)
+	// PHASE 4: CDC variables (requires prod catalog — no USE active yet)
 	cdcVars := []string{
 		fmt.Sprintf("SET VARIABLE curr_snapshot = COALESCE((SELECT id FROM %s.current_snapshot()), 0);", prodAlias),
 		"SET VARIABLE prev_snapshot = COALESCE(getvariable('curr_snapshot') - 1, 0);",
@@ -1469,14 +1618,28 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		}
 	}
 
-	// USE prod catalog so macro table refs (e.g. mart.orders) resolve against
-	// existing production tables, then switch to sandbox for the rest of init.
+	// USE prod catalog so DuckLake functions and table refs resolve natively.
 	if err := s.Exec(fmt.Sprintf("USE %s;", prodAlias)); err != nil {
 		return fmt.Errorf("use %s: %w", prodAlias, err)
 	}
 
-	// User macros: stored in memory catalog (DuckLake doesn't support macros).
-	if err := s.loadUserMacros(configPath, prodAlias); err != nil {
+	// Metadata macros: must target memory catalog (DuckLake doesn't support
+	// CREATE MACRO). macroPrefix ensures CREATE MACRO → CREATE MACRO memory.
+	if metadataMacros, err := sqlfiles.Load("macros/metadata.sql"); err == nil {
+		metadataMacros = macroPrefix.ReplaceAllString(metadataMacros, "${1}memory.")
+		if err := s.Exec(metadataMacros); err != nil {
+			return fmt.Errorf("load metadata macros: %w", err)
+		}
+	}
+
+	// Set search_path BEFORE user macros so cross-file macro refs resolve.
+	// Temporary path with memory — will be updated after USE sandbox.
+	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", prodAlias)); err != nil {
+		return fmt.Errorf("set search_path: %w", err)
+	}
+
+	// User macros: load all .sql files in config/macros/ directory.
+	if err := s.loadMacroDir(filepath.Join(configPath, "macros"), prodAlias); err != nil {
 		return err
 	}
 
@@ -1489,7 +1652,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		return fmt.Errorf("create registry: %w", err)
 	}
 
-	// Search path: sandbox first (for writes), then prod (for reads from existing tables)
+	// Final search path: sandbox first (for writes), then prod (for reads), then memory (for macros)
 	if err := s.Exec(fmt.Sprintf("SET search_path = 'sandbox,%s,memory';", prodAlias)); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
 	}
@@ -1498,7 +1661,11 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 	if err := loadSQL("schemas.sql"); err != nil {
 		return err
 	}
-	if err := loadSQL("variables.sql"); err != nil {
+	// Variables: constants first, then global
+	if err := s.loadConfigSQL(configPath, "variables/constants.sql", "", prodAlias); err != nil {
+		return err
+	}
+	if err := s.loadConfigSQL(configPath, "variables/global.sql", "", prodAlias); err != nil {
 		return err
 	}
 	if err := loadSQL("sources.sql"); err != nil {

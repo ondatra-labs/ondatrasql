@@ -5,8 +5,14 @@ stdout 'Initialized'
 # Verify created files and directories
 exists config/catalog.sql
 exists config/extensions.sql
-exists config/macros.sql
-exists config/variables.sql
+exists config/macros/helpers.sql
+exists config/macros/masking.sql
+exists config/macros/constraints.sql
+exists config/macros/audits.sql
+exists config/macros/warnings.sql
+exists config/variables/constants.sql
+exists config/variables/global.sql
+exists config/variables/local.sql
 exists config/sources.sql
 exists config/secrets.sql
 exists config/settings.sql

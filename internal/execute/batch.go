@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -76,14 +76,11 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, confi
 		valueRows = append(valueRows, fmt.Sprintf("('%s','%s','%s')", target, hash, kind))
 	}
 
-	// v0.12.0+: always read snapshots from the active catalog. In sandbox
+	// v0.12.0+: snapshots() resolves via USE to the active catalog. In sandbox
 	// mode the catalog is a fork of prod with both inherited prod commits
 	// and new sandbox commits, so the recompute path correctly sees
 	// upstream models that ran in this sandbox session.
-	snapshotCatalog := sess.CatalogAlias()
-
-	// Load query template from SQL file
-	query := sql.MustFormat("execute/batch_run_type.sql", strings.Join(valueRows, ","), snapshotCatalog)
+	query := sql.MustFormat("execute/batch_run_type.sql", strings.Join(valueRows, ","))
 
 	// Execute batch query
 	rows, err := sess.QueryRowsMap(query)
@@ -133,13 +130,7 @@ func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model, configHash 
 	kind := strings.ReplaceAll(model.Kind, "'", "''")
 	valueRow := fmt.Sprintf("('%s','%s','%s')", target, hash, kind)
 
-	// v0.12.0+: always read snapshots from the active catalog. In sandbox
-	// mode the catalog is a fork of prod with both inherited prod commits
-	// and new sandbox commits, so the recompute path correctly sees
-	// upstream models that ran in this sandbox session.
-	snapshotCatalog := sess.CatalogAlias()
-
-	query := sql.MustFormat("execute/batch_run_type.sql", valueRow, snapshotCatalog)
+	query := sql.MustFormat("execute/batch_run_type.sql", valueRow)
 
 	rows, err := sess.QueryRowsMap(query)
 	if err != nil {

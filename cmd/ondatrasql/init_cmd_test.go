@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -17,8 +17,14 @@ func TestInitTemplates_NonEmpty(t *testing.T) {
 		"initGitignore":  initGitignore,
 		"initCatalog":    initCatalog,
 		"initExtensions": initExtensions,
-		"initMacros":     initMacros,
-		"initVariables":  initVariables,
+		"initMacroHelpers":     func() string { return initMacroFile("macros_helpers.sql") },
+		"initMacroConstraints": func() string { return initMacroFile("macros_constraint.sql") },
+		"initMacroAudits":      func() string { return initMacroFile("macros_audit.sql") },
+		"initMacroWarnings":    func() string { return initMacroFile("macros_warning.sql") },
+		"initMacroMasking":     func() string { return initMacroFile("macros_masking.sql") },
+		"initVarsConstants":    func() string { return initMacroFile("variables_constants.sql") },
+		"initVarsGlobal":       func() string { return initMacroFile("variables_global.sql") },
+		"initVarsLocal":        func() string { return initMacroFile("variables_models.sql") },
 		"initSources":    initSources,
 		"initSecrets":    initSecrets,
 		"initSettings":   initSettings,

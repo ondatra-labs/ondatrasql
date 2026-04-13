@@ -6,7 +6,7 @@ WITH latest AS (
     SELECT
         commit_extra_info->>'model' AS model,
         ROW_NUMBER() OVER (PARTITION BY LOWER(commit_extra_info->>'model') ORDER BY snapshot_id DESC) AS rn
-    FROM {{catalog}}.snapshots()
+    FROM snapshots()
     WHERE commit_extra_info->>'model' IS NOT NULL
 )
 SELECT model FROM latest WHERE rn = 1 ORDER BY LOWER(model)

@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-//go:embed execute/*.sql schema/*.sql macros/*.sql queries/*.sql
+//go:embed execute/*.sql schema/*.sql macros/*.sql queries/*.sql init/*.sql
 var sqlFiles embed.FS
 
 // catalogAlias holds the current DuckLake catalog alias.

@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -227,7 +227,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()
 	if len(model.Constraints) > 0 {
-		batchSQL, parseErrors := validation.ConstraintsToBatchSQL(model.Constraints, tmpTable)
+		batchSQL, parseErrors := validation.DispatchConstraintsBatch(model.Constraints, tmpTable)
 
 		// Add any parse errors
 		for _, err := range parseErrors {

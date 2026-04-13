@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -89,7 +89,7 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 // it back together with the data write.
 //
 // auditSQL is the pre-rendered transactional audit check produced by
-// validation.AuditsToTransactionalSQL — empty string when the model
+// validation.DispatchAuditsTransactional — empty string when the model
 // has no audits. The caller is responsible for handling parse errors
 // before calling materialize, so this function trusts auditSQL is
 // well-formed (or empty).
@@ -793,8 +793,8 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 
 	// Commit with metadata
-	commitSQL := fmt.Sprintf("CALL %s.set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');\nCOMMIT",
-		r.sess.CatalogAlias(), model.Target, escapeSQL(extraInfo))
+	commitSQL := fmt.Sprintf("CALL set_commit_message('ondatrasql', 'Pipeline run: %s', extra_info => '%s');\nCOMMIT",
+		model.Target, escapeSQL(extraInfo))
 	if err := r.sess.Exec(commitSQL); err != nil {
 		return rollbackOnErr(err, "commit scd2")
 	}

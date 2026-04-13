@@ -15,7 +15,7 @@ kind: table
 run_type: full
 rows_affected: 3
 run_reason: dep changed: raw.source
-warning: amount > 0 failed: found 2 violations (example: -50)
+warning: min(amount) > 0 warning: actual min is -50
 ---
 staging_count: 3
 mart_total: 3

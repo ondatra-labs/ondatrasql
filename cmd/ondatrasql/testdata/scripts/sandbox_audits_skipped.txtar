@@ -20,5 +20,5 @@ stdout 'Audits: 1 passed'
 
 -- m.sql --
 -- @kind: table
--- @audit: row_count >= 1
+-- @audit: row_count(>=, 1)
 SELECT 1 AS x

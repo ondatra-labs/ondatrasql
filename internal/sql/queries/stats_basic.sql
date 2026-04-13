@@ -10,5 +10,5 @@ SELECT
         WHEN MAX(snapshot_time)::DATE = CURRENT_DATE THEN strftime(MAX(snapshot_time), '%H:%M')
         ELSE strftime(MAX(snapshot_time), '%Y-%m-%d')
     END as last_run
-FROM {{catalog}}.snapshots()
+FROM snapshots()
 WHERE commit_extra_info->>'model' IS NOT NULL

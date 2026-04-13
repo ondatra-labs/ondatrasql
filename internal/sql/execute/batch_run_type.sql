@@ -1,6 +1,6 @@
 -- Batch query for run_type decisions (dependency-aware)
 -- Computes run_type for ALL models in one query instead of N individual queries
--- Args: 1) VALUES list like ('t1','h1','k1'),('t2','h2','k2')  2) snapshot catalog alias
+-- Args: 1) VALUES list like ('t1','h1','k1'),('t2','h2','k2')
 -- Logic: table kind uses dependency tracking to skip when nothing changed
 WITH model_input AS (
     SELECT * FROM (VALUES %s) AS t(target, current_hash, kind)
@@ -16,7 +16,7 @@ latest_commits AS (
         -- to a single row (matches the case-insensitive lookup story).
         ROW_NUMBER() OVER (PARTITION BY LOWER(commit_extra_info->>'model')
                           ORDER BY snapshot_id DESC) AS rn
-    FROM %s.snapshots()
+    FROM snapshots()
     WHERE commit_extra_info->>'model' IS NOT NULL
 ),
 model_status AS (

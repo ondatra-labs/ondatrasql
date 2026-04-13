@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
 // Project is a self-contained test project with a DuckDB/DuckLake session.
@@ -33,6 +34,22 @@ func NewProject(t *testing.T) *Project {
 	catalogPath := filepath.Join(dir, "ducklake.sqlite")
 	WriteFile(t, dir, "config/catalog.sql",
 		"ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n")
+
+	// Load validation macros into config/macros/ directory
+	for _, name := range []string{"macros_helpers.sql", "macros_masking.sql", "macros_constraint.sql", "macros_audit.sql", "macros_warning.sql"} {
+		content, _ := sqlfiles.Load("init/" + name)
+		WriteFile(t, dir, "config/macros/"+name, content)
+	}
+	// Load variables (constants, global, local)
+	varFiles := map[string]string{
+		"variables_constants.sql": "constants.sql",
+		"variables_global.sql":    "global.sql",
+		"variables_models.sql":    "local.sql",
+	}
+	for src, dst := range varFiles {
+		content, _ := sqlfiles.Load("init/" + src)
+		WriteFile(t, dir, "config/variables/"+dst, content)
+	}
 
 	// Create DuckDB session and initialize (loads all macros, attaches catalog, etc.)
 	sess, err := duckdb.NewSession(":memory:")

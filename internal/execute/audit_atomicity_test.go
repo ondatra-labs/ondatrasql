@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -125,7 +125,7 @@ SELECT id, name FROM staging.seed
 
 	// Edit: add a new column AND an audit that cannot pass.
 	p.AddModel("mart/target.sql", `-- @kind: table
--- @audit: row_count >= 100
+-- @audit: row_count(>=, 100)
 SELECT id, name, 'v2' AS extra FROM staging.seed
 `)
 	_, err := runModelErr(t, p, "mart/target.sql")
@@ -164,7 +164,7 @@ func TestAuditAtomicity_FailedRun_DoesNotZombieSkipNextRun(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/audit_zombie.sql", `-- @kind: table
--- @audit: row_count >= 100
+-- @audit: row_count(>=, 100)
 SELECT 1 AS id, 'x' AS name
 `)
 
@@ -205,7 +205,7 @@ SELECT 1 AS id, 100 AS amount
 
 	// Edit: add `category` column AND a failing audit.
 	p.AddModel("staging/sevol.sql", `-- @kind: table
--- @audit: row_count >= 100
+-- @audit: row_count(>=, 100)
 SELECT id, amount, 'electronics' AS category FROM (VALUES (1, 100), (2, 200)) v(id, amount)
 `)
 	_, err := runModelErr(t, p, "staging/sevol.sql")
@@ -244,14 +244,14 @@ func TestAuditAtomicity_AllKindsFailAtomically(t *testing.T) {
 		{
 			"table",
 			`-- @kind: table
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'a' AS name
 `,
 		},
 		{
 			"append",
 			`-- @kind: append
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'a' AS name
 `,
 		},
@@ -259,7 +259,7 @@ SELECT 1 AS id, 'a' AS name
 			"merge",
 			`-- @kind: merge
 -- @unique_key: id
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'a' AS name
 `,
 		},
@@ -267,7 +267,7 @@ SELECT 1 AS id, 'a' AS name
 			"scd2",
 			`-- @kind: scd2
 -- @unique_key: id
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'a' AS name
 `,
 		},
@@ -275,7 +275,7 @@ SELECT 1 AS id, 'a' AS name
 			"partition",
 			`-- @kind: partition
 -- @unique_key: id
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'a' AS name
 `,
 		},
@@ -333,7 +333,7 @@ SELECT 1 AS id, 'alice' AS name UNION ALL SELECT 2, 'bob'
 `,
 			`-- @kind: scd2
 -- @unique_key: id
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'alice updated' AS name UNION ALL SELECT 2, 'bob updated' UNION ALL SELECT 3, 'charlie'
 `,
 		},
@@ -345,7 +345,7 @@ SELECT 'EU' AS region, 1 AS id, 100 AS amount UNION ALL SELECT 'US', 2, 200
 `,
 			`-- @kind: partition
 -- @unique_key: region
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT 'EU' AS region, 1 AS id, 999 AS amount UNION ALL SELECT 'US', 2, 999
 `,
 		},
@@ -401,7 +401,7 @@ SELECT 1 AS id, 'baseline' AS name
 	//    Edit the model so the sandbox run picks up a new column AND
 	//    a guaranteed-failing audit.
 	prod.AddModel("staging/sb_target.sql", `-- @kind: table
--- @audit: row_count >= 999
+-- @audit: row_count(>=, 999)
 SELECT id, name, 'sandbox-only' AS extra FROM (VALUES (1, 'x'), (2, 'y')) v(id, name)
 `)
 	sandbox := testutil.NewSandboxProject(t, prod)

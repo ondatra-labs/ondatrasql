@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -335,30 +335,60 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 		r.trace(result, "cdc.refresh_snapshot", stepStart, "ok")
 
-		// Sub-step: Check for CDC changes
+		// Sub-step: Check for CDC changes using table_changes() gate.
+		// Instead of global snapshot comparison, check each source table
+		// individually. This skips when unrelated tables created new snapshots.
 		stepStart = time.Now()
-		hasChanges, err := r.sess.HasCDCChanges()
-		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("check CDC changes warning: %v", err))
+		hasChanges := false
+		insertOnly := true
+		snapshotID, snapshotErr := r.sess.GetDagStartSnapshot()
+		if snapshotErr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("get snapshot warning: %v", snapshotErr))
 		}
-		r.trace(result, "cdc.has_changes", stepStart, "ok")
+		r.trace(result, "cdc.get_snapshot", stepStart, "ok")
 
-		// v0.12.0: with the catalog-fork sandbox, sandbox source tables have
-		// inherited prod snapshot history, so CDC time-travel works against
-		// them. The old sandboxUpstreamChanged → forceBackfill guard is
-		// obsolete and would still wipe append-incremental history.
-		if hasChanges {
-			// Sub-step: Get the snapshot ID for time travel
-			stepStart = time.Now()
-			snapshotID, err := r.sess.GetDagStartSnapshot()
-			if err != nil {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("get snapshot warning: %v", err))
+		stepStart = time.Now()
+		currSnap, currSnapErr := r.sess.GetCurrentSnapshot()
+		if currSnapErr != nil {
+			// Cannot determine current snapshot — assume changes exist, use full EXCEPT
+			result.Warnings = append(result.Warnings, fmt.Sprintf("get current snapshot: %v", currSnapErr))
+			hasChanges = true
+			insertOnly = false
+		} else if snapshotID < currSnap {
+			for _, t := range cdcTables {
+				parts := strings.SplitN(t, ".", 2)
+				if len(parts) != 2 {
+					hasChanges = true
+					insertOnly = false
+					break
+				}
+				schema, table := parts[0], parts[1]
+				// Set search_path to include the source schema for table_changes()
+				// (which takes bare table name). Restore default search_path after.
+				r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
+					r.sess.CatalogAlias(), schema, r.sess.DefaultSearchPath()))
+				cnt, err := r.sess.TableHasChanges(table, snapshotID+1, currSnap)
+				if err != nil {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("table_changes gate failed for %s: %v", t, err))
+					hasChanges = true
+					insertOnly = false
+					r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+					break
+				}
+				if cnt > 0 {
+					hasChanges = true
+					isInsertOnly, ioErr := r.sess.TableChangesInsertOnly(table, snapshotID+1, currSnap)
+					if ioErr != nil || !isInsertOnly {
+						insertOnly = false
+					}
+				}
+				r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
 			}
-			r.trace(result, "cdc.get_snapshot", stepStart, "ok")
+		}
+		r.trace(result, "cdc.table_changes_gate", stepStart, "ok")
 
+		if hasChanges {
 			// Check if upstream schema changed — CDC EXCEPT requires matching column counts.
-			// Compare current vs snapshot schema for each CDC table. If any differ,
-			// skip CDC and run full query (the downstream will detect schema evolution).
 			stepStart = time.Now()
 			schemaChanged := r.cdcSchemaChanged(cdcTables, snapshotID)
 			r.trace(result, "cdc.schema_check", stepStart, "ok")
@@ -367,13 +397,24 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				result.Warnings = append(result.Warnings, "upstream schema changed, skipping CDC")
 				execSQL = model.SQL
 				needsBackfill = true
-			} else {
-				// Apply CDC to fact tables and aggregated joins via AST rewriting
+			} else if insertOnly {
+				// Phase 2: all source changes are inserts — apply CDC with
+				// the same EXCEPT approach but log the optimization.
 				var cdcErr error
 				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					execSQL = model.SQL // safe fallback
+					execSQL = model.SQL
+				} else {
+					r.trace(result, "cdc.applied_insert_only:"+strings.Join(cdcTables, ","), stepStart, "ok")
+				}
+			} else {
+				// Mixed changes (updates/deletes) — full EXCEPT
+				var cdcErr error
+				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
+				if cdcErr != nil {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
+					execSQL = model.SQL
 				} else {
 					r.trace(result, "cdc.applied:"+strings.Join(cdcTables, ","), stepStart, "ok")
 				}
@@ -484,7 +525,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()
 	if len(model.Constraints) > 0 {
-		batchSQL, parseErrors := validation.ConstraintsToBatchSQL(model.Constraints, tmpTable)
+		batchSQL, parseErrors := validation.DispatchConstraintsBatch(model.Constraints, tmpTable)
 
 		// Add any parse errors
 		for _, err := range parseErrors {
@@ -598,7 +639,7 @@ func (r *Runner) buildAuditSQL(model *parser.Model) (string, []error) {
 	if len(model.Audits) == 0 {
 		return "", nil
 	}
-	return validation.AuditsToTransactionalSQL(model.Audits, model.Target)
+	return validation.DispatchAuditsTransactional(model.Audits, model.Target)
 }
 
 // cdcSchemaChanged checks if any CDC table's schema differs between current and snapshot.
@@ -673,21 +714,30 @@ func (r *Runner) cleanup(tmpTable string) {
 // Warnings support both audit patterns (post-INSERT, history-aware) and
 // constraint patterns (row-level checks). Both are tried for each directive.
 func (r *Runner) runWarnings(model *parser.Model, table string, result *Result) {
+	// Load per-model variables (prev_model_snapshot, curr_snapshot).
+	// Errors here mean delta warnings will use stale values — log as warning.
+	configPath := filepath.Join(r.projectDir, "config")
+	if err := r.sess.LoadPerModelVars(configPath, model.Target, r.sess.CatalogAlias()); err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("load per-model variables: %v", err))
+	}
+
+	// Set search_path so delta macros can resolve table_changes() + memory macros.
+	parts := strings.SplitN(model.Target, ".", 2)
+	if len(parts) == 2 {
+		r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'", r.sess.CatalogAlias(), parts[0], r.sess.DefaultSearchPath()))
+		defer r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+	}
+
 	for _, warning := range model.Warnings {
 		var queries []string
 
-		// Try audit pattern first (aggregate checks like row_count, mean, etc.)
-		if sql, err := validation.AuditToSQL(warning, table); err == nil {
-			queries = append(queries, sql)
-		} else if sql, err := validation.ConstraintToSQL(warning, table); err == nil {
-			// Fall back to constraint pattern (row-level checks like col NOT NULL)
-			queries = append(queries, sql)
-		}
-
-		if len(queries) == 0 {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("warning parse error: unknown pattern: %s", warning))
+		// Dispatch warning via macro
+		sql, err := validation.DispatchWarning(warning, table)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("warning dispatch error: %v", err))
 			continue
 		}
+		queries = append(queries, sql)
 
 		for _, sql := range queries {
 			rows, err := r.sess.QueryRows(sql)

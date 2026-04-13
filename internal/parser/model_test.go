@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -87,9 +87,9 @@ func TestParseModel_Target(t *testing.T) {
 func TestParseModel_Constraints(t *testing.T) {
 	t.Parallel()
 	content := `-- @kind: table
--- @constraint: id PRIMARY KEY
--- @constraint: name NOT NULL
--- @constraint: amount >= 0
+-- @constraint: primary_key(id)
+-- @constraint: not_null(name)
+-- @constraint: compare(amount, >=, 0)
 
 SELECT 1 AS id, 'test' AS name, 100 AS amount`
 
@@ -108,7 +108,7 @@ SELECT 1 AS id, 'test' AS name, 100 AS amount`
 		t.Fatalf("got %d constraints, want 3", len(model.Constraints))
 	}
 
-	want := []string{"id PRIMARY KEY", "name NOT NULL", "amount >= 0"}
+	want := []string{"primary_key(id)", "not_null(name)", "compare(amount, >=, 0)"}
 	for i, c := range model.Constraints {
 		if c != want[i] {
 			t.Errorf("constraint[%d] = %q, want %q", i, c, want[i])
@@ -119,7 +119,7 @@ SELECT 1 AS id, 'test' AS name, 100 AS amount`
 func TestParseModel_Audits(t *testing.T) {
 	t.Parallel()
 	content := `-- @kind: table
--- @audit: row_count >= 1
+-- @audit: row_count(>=, 1)
 -- @audit: freshness(updated_at, 24h)
 
 SELECT 1 AS id`
@@ -143,7 +143,7 @@ SELECT 1 AS id`
 func TestParseModel_Warnings(t *testing.T) {
 	t.Parallel()
 	content := `-- @kind: table
--- @warning: mean(amount) BETWEEN 10 AND 100
+-- @warning: mean(amount, >=, 10)
 
 SELECT 1 AS id`
 
@@ -166,7 +166,7 @@ SELECT 1 AS id`
 func TestParseModel_SQL(t *testing.T) {
 	t.Parallel()
 	content := `-- @kind: table
--- @constraint: id PRIMARY KEY
+-- @constraint: primary_key(id)
 
 SELECT 1 AS id, 'hello' AS name
 FROM source_table
@@ -479,9 +479,9 @@ func TestParseModel_StarlarkDirectives(t *testing.T) {
 	content := `# @kind: append
 # @incremental: report_date
 # @incremental_initial: 2024-01-01
-# @constraint: id IS NOT NULL
-# @audit: count(*) > 0
-# @warning: count(*) < 10000
+# @constraint: not_null(id)
+# @audit: row_count(>, 0)
+# @warning: row_count(<, 10000)
 # @extension: httpfs
 
 resp = http.get("https://api.example.com/data")
@@ -1332,7 +1332,7 @@ func TestParseModel_Events_InvalidDirectives(t *testing.T) {
 		},
 		{
 			"constraint not allowed",
-			"-- @kind: events\n-- @constraint: event_name IS NOT NULL\nevent_name VARCHAR",
+			"-- @kind: events\n-- @constraint: not_null(event_name)\nevent_name VARCHAR",
 			"@constraint is not supported for events",
 		},
 		{

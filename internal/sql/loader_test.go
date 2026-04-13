@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -9,21 +9,18 @@ import (
 	"testing"
 )
 
-func TestLoadReplacesCatalogPlaceholder(t *testing.T) {
-	// Set a custom alias
-	SetCatalogAlias("my_warehouse")
-	defer SetCatalogAlias("lake") // restore default
-
+func TestLoadCommitSQL(t *testing.T) {
 	content, err := Load("execute/commit.sql")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
 	if strings.Contains(content, "{{catalog}}") {
-		t.Error("{{catalog}} placeholder was not replaced")
+		t.Error("{{catalog}} placeholder should not appear in native SQL")
 	}
-	if !strings.Contains(content, "my_warehouse.set_commit_message") {
-		t.Error("catalog alias not found in output")
+	// set_commit_message resolves via USE — no catalog prefix needed
+	if !strings.Contains(content, "CALL set_commit_message") {
+		t.Error("expected bare set_commit_message call")
 	}
 }
 
@@ -32,13 +29,12 @@ func TestSetCatalogAliasIgnoresEmpty(t *testing.T) {
 	SetCatalogAlias("")
 	defer SetCatalogAlias("lake")
 
-	content, err := Load("execute/commit.sql")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if !strings.Contains(content, "custom.set_commit_message") {
-		t.Error("empty string should not override alias")
+	// Verify empty string didn't override
+	catalogMu.RLock()
+	alias := catalogAlias
+	catalogMu.RUnlock()
+	if alias != "custom" {
+		t.Errorf("empty string should not override alias, got %q", alias)
 	}
 }
 
@@ -57,36 +53,31 @@ func TestMustFormatAppliesArgs(t *testing.T) {
 	}
 }
 
-func TestLoadQueryReplacesCatalog(t *testing.T) {
-	SetCatalogAlias("my_catalog")
-	defer SetCatalogAlias("lake")
-
+func TestLoadQueryHistory(t *testing.T) {
 	content, err := LoadQuery("history")
 	if err != nil {
 		t.Fatalf("LoadQuery: %v", err)
 	}
 
 	if strings.Contains(content, "{{catalog}}") {
-		t.Error("{{catalog}} placeholder not replaced")
+		t.Error("{{catalog}} placeholder should not appear in native SQL")
 	}
-	if !strings.Contains(content, "my_catalog") {
-		t.Error("catalog alias not found in output")
+	// snapshots() resolves via USE — no catalog prefix needed
+	if !strings.Contains(content, "FROM snapshots()") {
+		t.Error("expected bare snapshots() call")
 	}
 }
 
 func TestLoadQueryStatsBasic(t *testing.T) {
-	SetCatalogAlias("test_catalog")
-	defer SetCatalogAlias("lake")
-
 	content, err := LoadQuery("stats_basic")
 	if err != nil {
 		t.Fatalf("LoadQuery: %v", err)
 	}
 	if strings.Contains(content, "{{catalog}}") {
-		t.Error("{{catalog}} placeholder not replaced")
+		t.Error("{{catalog}} placeholder should not appear in native SQL")
 	}
-	if !strings.Contains(content, "test_catalog.snapshots()") {
-		t.Error("catalog alias not found in output")
+	if !strings.Contains(content, "FROM snapshots()") {
+		t.Error("expected bare snapshots() call")
 	}
 	if !strings.Contains(content, "COUNT(DISTINCT") {
 		t.Error("expected COUNT(DISTINCT in query")
@@ -94,15 +85,12 @@ func TestLoadQueryStatsBasic(t *testing.T) {
 }
 
 func TestLoadQueryStatsKindBreakdown(t *testing.T) {
-	SetCatalogAlias("test_catalog")
-	defer SetCatalogAlias("lake")
-
 	content, err := LoadQuery("stats_kind_breakdown")
 	if err != nil {
 		t.Fatalf("LoadQuery: %v", err)
 	}
 	if strings.Contains(content, "{{catalog}}") {
-		t.Error("{{catalog}} placeholder not replaced")
+		t.Error("{{catalog}} placeholder should not appear in native SQL")
 	}
 	if !strings.Contains(content, "GROUP BY") {
 		t.Error("expected GROUP BY in query")
@@ -110,15 +98,12 @@ func TestLoadQueryStatsKindBreakdown(t *testing.T) {
 }
 
 func TestLoadQueryStatsAllModels(t *testing.T) {
-	SetCatalogAlias("test_catalog")
-	defer SetCatalogAlias("lake")
-
 	content, err := LoadQuery("stats_all_models")
 	if err != nil {
 		t.Fatalf("LoadQuery: %v", err)
 	}
 	if strings.Contains(content, "{{catalog}}") {
-		t.Error("{{catalog}} placeholder not replaced")
+		t.Error("{{catalog}} placeholder should not appear in native SQL")
 	}
 	if !strings.Contains(content, "ROW_NUMBER()") {
 		t.Error("expected ROW_NUMBER() in query")
@@ -148,15 +133,12 @@ func TestLoadQueryStats_CaseInsensitiveModelCount(t *testing.T) {
 }
 
 func TestLoadQueryLineageAllModels(t *testing.T) {
-	SetCatalogAlias("test_catalog")
-	defer SetCatalogAlias("lake")
-
 	content, err := LoadQuery("lineage_all_models")
 	if err != nil {
 		t.Fatalf("LoadQuery: %v", err)
 	}
 	if strings.Contains(content, "{{catalog}}") {
-		t.Error("{{catalog}} placeholder not replaced")
+		t.Error("{{catalog}} placeholder should not appear in native SQL")
 	}
 	// The query now uses ROW_NUMBER() OVER (PARTITION BY LOWER(...)) instead
 	// of SELECT DISTINCT to dedup case-variant model names while keeping the

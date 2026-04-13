@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/ondatra-labs/ondatrasql/internal/output"
+	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
 func runInit() error {
@@ -37,6 +38,8 @@ func runInit() error {
 		"models/intermediate",
 		"models/mart",
 		"models/sync",
+		"config/macros",
+		"config/variables",
 		"sql",
 	}
 	for _, d := range dirs {
@@ -51,8 +54,14 @@ func runInit() error {
 		".gitignore":            initGitignore(),
 		"config/catalog.sql":    initCatalog(),
 		"config/extensions.sql": initExtensions(),
-		"config/macros.sql":     initMacros(),
-		"config/variables.sql":  initVariables(),
+		"config/macros/helpers.sql":     initMacroFile("macros_helpers.sql"),
+		"config/macros/masking.sql":     initMacroFile("macros_masking.sql"),
+		"config/macros/constraints.sql": initMacroFile("macros_constraint.sql"),
+		"config/macros/audits.sql":      initMacroFile("macros_audit.sql"),
+		"config/macros/warnings.sql":    initMacroFile("macros_warning.sql"),
+		"config/variables/constants.sql": initMacroFile("variables_constants.sql"),
+		"config/variables/global.sql":   initMacroFile("variables_global.sql"),
+		"config/variables/local.sql":    initMacroFile("variables_models.sql"),
 		"config/sources.sql":    initSources(),
 		"config/secrets.sql":    initSecrets(),
 		"config/settings.sql":   initSettings(),
@@ -210,54 +219,12 @@ func initExtensions() string {
 `
 }
 
-func initMacros() string {
-	return `-- macros.sql - User-defined DuckDB macros
--- Runs AFTER DuckLake catalog is attached, so macros can reference catalog tables.
--- Table references (e.g. mart.orders) resolve against the active catalog automatically.
--- Built-in ondatra_* macros (CDC, schema, metadata) are created automatically.
-
---------------------------------------------------------------------------------
--- EXAMPLES (uncomment to use)
---------------------------------------------------------------------------------
-
--- Helper: safe division (returns NULL instead of error on divide by zero)
--- CREATE OR REPLACE MACRO safe_divide(a, b) AS
---     CASE WHEN b = 0 THEN NULL ELSE a / b END;
-
--- Helper: cents to dollars
--- CREATE OR REPLACE MACRO cents_to_dollars(cents) AS
---     cents / 100.0;
-
--- Scalar macro referencing a catalog table
--- CREATE OR REPLACE MACRO default_currency() AS (
---     SELECT currency FROM mart.company_settings LIMIT 1
--- );
-
--- Table macro returning a filtered result set
--- CREATE OR REPLACE MACRO recent_orders(n) AS TABLE
---     SELECT * FROM mart.orders ORDER BY order_date DESC LIMIT n;
-`
+func initMacroFile(name string) string {
+	content, _ := sqlfiles.Load("init/" + name)
+	return content
 }
 
-func initVariables() string {
-	return `-- variables.sql - User-defined runtime variables
--- Add your custom variables here. Built-in variables (ondatra_run_time, ondatra_load_id,
--- curr_snapshot, prev_snapshot) are set automatically by OndatraSQL.
--- Access with: getvariable('variable_name')
 
---------------------------------------------------------------------------------
--- EXAMPLES (uncomment to use)
---------------------------------------------------------------------------------
-
--- Example: Currency and tax settings
--- SET VARIABLE default_currency = 'SEK';
--- SET VARIABLE vat_rate = 0.25;
-
--- Example: Data retention policies
--- SET VARIABLE archive_after_days = 365;
--- SET VARIABLE delete_after_days = 730;
-`
-}
 
 func initSources() string {
 	return `-- sources.sql - External data sources

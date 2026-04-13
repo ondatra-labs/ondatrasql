@@ -5,12 +5,8 @@
 <h1 align="center">OndatraSQL</h1>
 
 <p align="center">
-  <b>You don't need a data stack anymore</b><br>
-  One binary replaces ingestion, transformation, validation, serving, and reverse ETL.
-</p>
-
-<p align="center">
-  No setup. No services. No infrastructure.
+  <b>A data runtime built on DuckDB and DuckLake</b><br>
+  Ingestion, transformation, validation, and scheduling in a single binary.
 </p>
 
 <p align="center">
@@ -21,24 +17,15 @@
 
 ---
 
-No Kafka. No Airflow. No dbt. No warehouse setup.
+OndatraSQL runs data pipelines using SQL models, [DuckDB](https://duckdb.org/) for query execution, and [DuckLake](https://ducklake.select/) for catalog management, snapshots, and time-travel.
 
-Just SQL files, one binary, and your data.
+The runtime handles:
 
-OndatraSQL is a data runtime that runs directly on [DuckDB](https://duckdb.org/) and [DuckLake](https://ducklake.select/). You write SQL. OndatraSQL handles:
-
-- Execution order (no DAGs to define)
-- Change detection (no incremental logic)
-- Schema evolution (no migrations)
-- Validation and lineage (built-in)
-
-## Why
-
-Most data tools assume you already have a stack. Kafka. Airflow. dbt. A warehouse.
-
-OndatraSQL removes that assumption.
-
-It runs on a single machine, requires no services, and works in minutes.
+- **Dependency resolution** — extracted from SQL references
+- **Change detection** — via DuckLake snapshots and `table_changes()`
+- **Schema evolution** — columns added, renamed, or type-promoted automatically
+- **Validation** — constraints, audits, and warnings as part of execution
+- **Incremental processing** — Smart CDC rewrites queries to process only changed data
 
 ## Install
 
@@ -46,7 +33,7 @@ It runs on a single machine, requires no services, and works in minutes.
 curl -fsSL https://ondatra.sh/install.sh | sh
 ```
 
-Works on Linux, macOS, and Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
+Supports Linux, macOS, and Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
 
 ## Quick Start
 
@@ -68,7 +55,7 @@ SELECT * FROM (VALUES
 ) AS t(order_id, customer, amount, order_date)
 ```
 
-Run it:
+Run the pipeline:
 
 ```bash
 ondatrasql run
@@ -78,32 +65,9 @@ ondatrasql run
 [OK] staging.orders (merge, backfill, 3 rows, 180ms)
 ```
 
-You now have a versioned table in DuckLake with automatic change tracking and a reproducible pipeline. No setup beyond this.
+OndatraSQL creates a DuckLake catalog, builds the dependency graph, executes the model, and materializes the result with snapshot metadata.
 
-## Principles
-
-- **No DAGs** — dependencies are inferred from SQL
-- **No incremental logic** — change detection is automatic
-- **No infrastructure** — runs on one machine
-- **No blind runs** — preview everything with sandbox
-
-## What You Don't Have to Do
-
-**No incremental logic** — only changed data is processed automatically.
-
-**No migrations** — schema updates itself when your query changes.
-
-**No blind runs** — preview every change before committing.
-
-**No event infrastructure** — POST events directly to an HTTP endpoint.
-
-**No separate tools for quality or lineage** — built into execution.
-
-**No reverse ETL tool** — push data to APIs with `@kind: tracked`.
-
-**No BI middleware** — serve data to Power BI, Excel, and Grafana via OData v4.
-
-## Three Ways to Write Models
+## Model Types
 
 **SQL** — transformations:
 
@@ -114,19 +78,18 @@ SELECT date, SUM(total) AS revenue
 FROM staging.orders GROUP BY date
 ```
 
-**Starlark** — API ingestion and reverse ETL (no Python):
+**Starlark** — API ingestion (embedded scripting with Python-like syntax):
 
 ```python
-# @kind: tracked
-# @unique_key: customer_id
+# @kind: append
+# @incremental: updated_at
 
-rows = query("SELECT * FROM mart.customers")
-for row in rows:
-    http.post("https://api.example.com/contacts", json=row)
-    save.row(row)
+resp = http.get("https://api.example.com/users")
+for user in resp.json:
+    save.row(user)
 ```
 
-**YAML** — declarative config:
+**YAML** — declarative configuration for reusable source functions:
 
 ```yaml
 kind: append
@@ -135,50 +98,38 @@ config:
   base_url: https://api.example.com
 ```
 
-## Mental Model
+All model types execute in the same pipeline and share the same dependency graph.
 
-Files are tables.
-SQL is the pipeline.
-Runs are deterministic.
+## Key Capabilities
 
-You don't build pipelines. You run data.
+| Capability | How it works |
+|---|---|
+| SQL transformation | SQL models with automatic materialization and CDC |
+| API ingestion | Built-in HTTP, OAuth, pagination via Starlark |
+| Event collection | Embedded HTTP endpoint with durable buffering |
+| Outbound sync | Tracked models with content-hash change detection |
+| Validation | 30 constraint macros, 18 audit macros, 14 warning macros |
+| Schema evolution | Automatic via ALTER TABLE (metadata-only in DuckLake) |
+| Sandbox preview | Full DAG simulation before committing |
+| Scheduling | OS-native cron via systemd (Linux) or launchd (macOS) |
+| OData serving | Built-in OData v4 server for Power BI, Excel, Grafana |
+| Column lineage | Extracted from SQL AST |
 
-## Compared to the Modern Data Stack
+## Design
 
-**Traditional:**
-
-- dbt for transforms
-- Airbyte for ingestion
-- Airflow for orchestration
-- Kafka for events
-- Snowflake for storage
-- Census for reverse ETL
-
-**OndatraSQL:**
-
-- One binary
-- One runtime
-- One execution model
-
-## When Not to Use OndatraSQL
-
-- You need a distributed system
-- You process petabytes across clusters
-- You require real-time streaming
-
-OndatraSQL is designed for simplicity over horizontal scale.
+OndatraSQL executes on a single machine using DuckDB. It is not a distributed system. For workloads that fit on one machine — batch ETL, reporting, analytics, internal tooling — this approach provides the full pipeline lifecycle with minimal operational overhead.
 
 ## Commands
 
 ```text
-run [model]          Run pipeline or specific model
-sandbox [model]      Preview changes safely
-schedule [cron]      Install/show/remove OS scheduler
-odata <port>         Serve data via OData v4
-events <port>        Start event collection
+run [model]          Execute pipeline or specific model
+sandbox [model]      Preview changes before committing
+schedule [cron]      Install OS-native scheduler
+odata <port>         Start OData v4 server
+events <port>        Start event collection endpoint
 auth [provider]      Authenticate with OAuth2 providers
-sql "SELECT ..."     Query your data
-lineage overview     See all dependencies
+sql "SELECT ..."     Query DuckLake catalog
+lineage overview     View dependencies and column lineage
 ```
 
 [Full CLI reference →](https://ondatra.sh/cli/)
@@ -186,12 +137,6 @@ lineage overview     See all dependencies
 ## Documentation
 
 **[ondatra.sh](https://ondatra.sh)**
-
-## Philosophy
-
-The best data system is the one that runs now.
-
-Not the one you finish setting up next week.
 
 ## License
 

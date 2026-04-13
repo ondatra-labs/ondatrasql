@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -430,7 +430,7 @@ func TestRun_Sandbox_SingleModel_FailedRun_CleansUpDir(t *testing.T) {
 	// returning a non-nil err from runner.Run, which under the old code
 	// would skip the cleanup branch entirely.
 	p.AddModel("staging/sbox_fail.sql", `-- @kind: table
--- @audit: amount > 0
+-- @audit: min(amount, >, 0)
 SELECT 1 AS id, 100 AS amount`)
 
 	_ = captureOutput(t, func() {
@@ -457,7 +457,7 @@ func TestRun_Sandbox_NoParquetLeak(t *testing.T) {
 	defer os.Chdir(oldWd)
 
 	p.AddModel("staging/leak.sql", `-- @kind: table
--- @audit: row_count >= 1
+-- @audit: row_count(>=, 1)
 SELECT 1 AS id`)
 
 	// Materialize prod once.

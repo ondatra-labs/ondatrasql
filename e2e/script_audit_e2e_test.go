@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -46,7 +46,7 @@ save.row({"id": 5, "name": "Eve"})
 
 	// Run 2: add audit row_count >= 3, but only produce 1 row → audit fails
 	p.AddModel("staging/script_audited.star", `# @kind: table
-# @audit: row_count >= 3
+# @audit: row_count(>=, 3)
 save.row({"id": 1, "name": "OnlyOne"})
 `)
 	result2, err := runModelErr(t, p, "staging/script_audited.star")
@@ -84,7 +84,7 @@ save.row({"id": 1, "name": "OnlyOne"})
 
 	// Run 3: fix the script to produce enough rows, audit passes
 	p.AddModel("staging/script_audited.star", `# @kind: table
-# @audit: row_count >= 3
+# @audit: row_count(>=, 3)
 save.row({"id": 1, "name": "Alice"})
 save.row({"id": 2, "name": "Bob"})
 save.row({"id": 3, "name": "Charlie"})
@@ -135,7 +135,7 @@ SELECT 2, 'Gadget', 200
 
 	// Script reads via query(), transforms, has audit (row_count >= 1)
 	p.AddModel("mart/product_summary.star", `# @kind: table
-# @audit: row_count >= 1
+# @audit: row_count(>=, 1)
 rows = query("SELECT id, name, price FROM staging.products")
 for row in rows:
     save.row({"product_id": row["id"], "product_name": row["name"], "price": int(row["price"])})

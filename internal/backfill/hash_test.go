@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -274,6 +274,87 @@ func TestConfigHash(t *testing.T) {
 		h2 := ConfigHash(dir)
 		if h1 != h2 {
 			t.Error("non-sql files should not affect hash")
+		}
+	})
+}
+
+func TestConfigHash_Subdirectories(t *testing.T) {
+	t.Parallel()
+
+	t.Run("includes macros subdirectory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "catalog.sql"), []byte("ATTACH 'lake';"), 0o644)
+		h1 := ConfigHash(dir)
+
+		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
+		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
+		h2 := ConfigHash(dir)
+
+		if h1 == h2 {
+			t.Error("adding macros/audits.sql must change config hash")
+		}
+	})
+
+	t.Run("includes variables subdirectory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "catalog.sql"), []byte("ATTACH 'lake';"), 0o644)
+		h1 := ConfigHash(dir)
+
+		os.MkdirAll(filepath.Join(dir, "variables"), 0o755)
+		os.WriteFile(filepath.Join(dir, "variables", "local.sql"), []byte("SET VARIABLE x = 1;"), 0o644)
+		h2 := ConfigHash(dir)
+
+		if h1 == h2 {
+			t.Error("adding variables/local.sql must change config hash")
+		}
+	})
+
+	t.Run("change in subdirectory file changes hash", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
+		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("v1"), 0o644)
+		h1 := ConfigHash(dir)
+
+		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("v2"), 0o644)
+		h2 := ConfigHash(dir)
+
+		if h1 == h2 {
+			t.Error("changing macros/audits.sql must change config hash")
+		}
+	})
+
+	t.Run("subdirectory deterministic across runs", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
+		os.MkdirAll(filepath.Join(dir, "variables"), 0o755)
+		os.WriteFile(filepath.Join(dir, "catalog.sql"), []byte("ATTACH 'lake';"), 0o644)
+		os.WriteFile(filepath.Join(dir, "macros", "a.sql"), []byte("a"), 0o644)
+		os.WriteFile(filepath.Join(dir, "macros", "b.sql"), []byte("b"), 0o644)
+		os.WriteFile(filepath.Join(dir, "variables", "local.sql"), []byte("x"), 0o644)
+
+		h1 := ConfigHash(dir)
+		h2 := ConfigHash(dir)
+		if h1 != h2 {
+			t.Error("same content must produce same hash across calls")
+		}
+	})
+
+	t.Run("ignores non-sql in subdirectories", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
+		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("m"), 0o644)
+		h1 := ConfigHash(dir)
+
+		os.WriteFile(filepath.Join(dir, "macros", "README.md"), []byte("ignore"), 0o644)
+		h2 := ConfigHash(dir)
+
+		if h1 != h2 {
+			t.Error("non-sql files in subdirectories should not affect hash")
 		}
 	})
 }

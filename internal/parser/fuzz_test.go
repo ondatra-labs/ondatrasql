@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -19,10 +19,10 @@ SELECT 1 AS id, 'hello' AS name`)
 	f.Add(`-- @kind: append
 -- @incremental: updated_at
 -- @unique_key: id
--- @constraint: id NOT NULL
--- @constraint: amount >= 0
--- @audit: row_count >= 1
--- @warning: email NULL_PERCENT < 10
+-- @constraint: not_null(id)
+-- @constraint: compare(amount, >=, 0)
+-- @audit: row_count(>=, 1)
+-- @warning: null_percent(email, 10)
 SELECT * FROM raw.events WHERE updated_at > '{{ last_value }}'`)
 
 	f.Add(`-- @kind: merge

@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -116,7 +116,7 @@ func TestRun_AuditFailure_TriggersRollback(t *testing.T) {
 	// error() call inside the materialize BEGIN/COMMIT, which aborts
 	// the whole transaction atomically — no separate rollback() helper.
 	p.AddModel("staging/audited.sql", `-- @kind: table
--- @audit: row_count = 0
+-- @audit: row_count(=, 0)
 SELECT 1 AS id, 100 AS amount
 `)
 	result, err := runModelErr(t, p, "staging/audited.sql")
@@ -140,7 +140,7 @@ func TestRun_ConstraintFailure(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/constrained.sql", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 SELECT NULL AS id, 'test' AS name
 `)
 	result, err := runModelErr(t, p, "staging/constrained.sql")
@@ -227,7 +227,7 @@ func TestRun_AuditFailure_RollbackError(t *testing.T) {
 	// fires inside BEGIN/COMMIT, the transaction rolls back, and the
 	// caller surfaces an error containing "audit failed".
 	p.AddModel("staging/audit_rollback.sql", `-- @kind: table
--- @audit: row_count < 0
+-- @audit: row_count(<, 0)
 SELECT 1 AS id
 `)
 	result, err := runModelErr(t, p, "staging/audit_rollback.sql")
@@ -509,7 +509,7 @@ func TestRun_Script_WithConstraintFailure(t *testing.T) {
 	p := testutil.NewProject(t)
 	// Script that saves data but has a constraint that will fail
 	p.AddModel("staging/constrained_script.star", `-- @kind: table
--- @constraint: id NOT NULL
+-- @constraint: not_null(id)
 save([{"id": None, "name": "test"}])
 `)
 	_, err := runModelErr(t, p, "staging/constrained_script.star")
@@ -567,7 +567,7 @@ func TestRun_Script_ConstraintFailure(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 	p.AddModel("staging/script_constraint.star", `# @kind: table
-# @constraint: id NOT NULL
+# @constraint: not_null(id)
 save.row({"id": None, "name": "test"})
 `)
 	_, err := runModelErr(t, p, "staging/script_constraint.star")
@@ -591,7 +591,7 @@ func TestRun_Script_AuditFailure(t *testing.T) {
 	// path goes through script.go's runScript which uses the same
 	// audit-inside-transaction mechanism as the SQL path.
 	p.AddModel("staging/script_audit.star", `# @kind: table
-# @audit: row_count < 0
+# @audit: row_count(<, 0)
 save.row({"id": 1, "val": "test"})
 `)
 	result, err := runModelErr(t, p, "staging/script_audit.star")

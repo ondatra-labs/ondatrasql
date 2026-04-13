@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -861,10 +861,21 @@ func TestSession_InitWithCatalog_InvalidConfigFiles(t *testing.T) {
 		})
 	}
 
-	// Post-catalog files: macros, schemas, variables, sources need a valid catalog first
-	postCatalogFiles := []string{"macros.sql", "schemas.sql", "variables.sql", "sources.sql"}
-	for _, file := range postCatalogFiles {
-		t.Run(file, func(t *testing.T) {
+	// Post-catalog files: schemas and sources as flat files, macros as directory.
+	type postCatalogCase struct {
+		name  string
+		setup func(configPath string)
+	}
+	postCatalogCases := []postCatalogCase{
+		{"schemas.sql", func(p string) { os.WriteFile(filepath.Join(p, "schemas.sql"), []byte("INVALID SQL;"), 0o644) }},
+		{"sources.sql", func(p string) { os.WriteFile(filepath.Join(p, "sources.sql"), []byte("INVALID SQL;"), 0o644) }},
+		{"macros/bad.sql", func(p string) {
+			os.MkdirAll(filepath.Join(p, "macros"), 0o755)
+			os.WriteFile(filepath.Join(p, "macros", "bad.sql"), []byte("INVALID SQL;"), 0o644)
+		}},
+	}
+	for _, tc := range postCatalogCases {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config")
 			os.MkdirAll(configPath, 0o755)
@@ -873,7 +884,7 @@ func TestSession_InitWithCatalog_InvalidConfigFiles(t *testing.T) {
 			dataPath := filepath.Join(dir, "data")
 			os.WriteFile(filepath.Join(configPath, "catalog.sql"),
 				[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
-			os.WriteFile(filepath.Join(configPath, file), []byte("INVALID SQL;"), 0o644)
+			tc.setup(configPath)
 
 			s, err := NewSession(":memory:")
 			if err != nil {
@@ -883,10 +894,7 @@ func TestSession_InitWithCatalog_InvalidConfigFiles(t *testing.T) {
 
 			err = s.InitWithCatalog(configPath)
 			if err == nil {
-				t.Fatalf("expected error from invalid %s", file)
-			}
-			if !strings.Contains(err.Error(), file) {
-				t.Errorf("error should mention %s: %v", file, err)
+				t.Fatalf("expected error from invalid %s", tc.name)
 			}
 		})
 	}
@@ -1259,16 +1267,28 @@ func TestSession_InitSandbox_InvalidPostCatalogFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	// macros, schemas, variables, sources need a valid prod catalog first
-	for _, file := range []string{"macros.sql", "schemas.sql", "variables.sql", "sources.sql"} {
-		t.Run(file, func(t *testing.T) {
+	// schemas, sources as flat files; macros as directory.
+	type testCase struct {
+		name string
+		setup func(configPath string)
+	}
+	cases := []testCase{
+		{"schemas.sql", func(p string) { os.WriteFile(filepath.Join(p, "schemas.sql"), []byte("INVALID SQL;"), 0o644) }},
+		{"sources.sql", func(p string) { os.WriteFile(filepath.Join(p, "sources.sql"), []byte("INVALID SQL;"), 0o644) }},
+		{"macros/bad.sql", func(p string) {
+			os.MkdirAll(filepath.Join(p, "macros"), 0o755)
+			os.WriteFile(filepath.Join(p, "macros", "bad.sql"), []byte("INVALID SQL;"), 0o644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			prodCatalogPath, prodDataPath := createProdCatalogForSession(t)
 
 			sandboxDir := t.TempDir()
 			sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 			sandboxConfigPath := filepath.Join(sandboxDir, "config")
 			os.MkdirAll(sandboxConfigPath, 0o755)
-			os.WriteFile(filepath.Join(sandboxConfigPath, file), []byte("INVALID SQL;"), 0o644)
+			tc.setup(sandboxConfigPath)
 
 			s, err := NewSession(":memory:")
 			if err != nil {
@@ -1278,10 +1298,7 @@ func TestSession_InitSandbox_InvalidPostCatalogFiles(t *testing.T) {
 
 			err = s.InitSandbox(sandboxConfigPath, "ducklake:sqlite:"+prodCatalogPath, prodDataPath, sandboxCatalog, "lake")
 			if err == nil {
-				t.Fatalf("expected error from invalid %s in sandbox", file)
-			}
-			if !strings.Contains(err.Error(), file) {
-				t.Errorf("error should mention %s: %v", file, err)
+				t.Fatalf("expected error from invalid %s in sandbox", tc.name)
 			}
 		})
 	}
@@ -1451,7 +1468,7 @@ func TestSession_InitWithCatalog_ExpandsEnvVars(t *testing.T) {
 		}
 	})
 
-	t.Run("variables.sql expands env vars", func(t *testing.T) {
+	t.Run("variables/global.sql expands env vars", func(t *testing.T) {
 		dir := t.TempDir()
 		configPath := filepath.Join(dir, "config")
 		os.MkdirAll(configPath, 0o755)
@@ -1462,7 +1479,8 @@ func TestSession_InitWithCatalog_ExpandsEnvVars(t *testing.T) {
 			[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
 
 		t.Setenv("ONDATRA_TEST_VAR", "hello_from_env")
-		os.WriteFile(filepath.Join(configPath, "variables.sql"),
+		os.MkdirAll(filepath.Join(configPath, "variables"), 0o755)
+		os.WriteFile(filepath.Join(configPath, "variables", "global.sql"),
 			[]byte("SET VARIABLE test_env_var = '${ONDATRA_TEST_VAR}';\n"), 0o644)
 
 		s, err := NewSession(":memory:")
@@ -1484,7 +1502,7 @@ func TestSession_InitWithCatalog_ExpandsEnvVars(t *testing.T) {
 		}
 	})
 
-	t.Run("macros.sql expands env vars", func(t *testing.T) {
+	t.Run("macros/custom.sql expands env vars", func(t *testing.T) {
 		dir := t.TempDir()
 		configPath := filepath.Join(dir, "config")
 		os.MkdirAll(configPath, 0o755)
@@ -1495,7 +1513,8 @@ func TestSession_InitWithCatalog_ExpandsEnvVars(t *testing.T) {
 			[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+dataPath+"');\n"), 0o644)
 
 		t.Setenv("ONDATRA_TEST_DEFAULT", "42")
-		os.WriteFile(filepath.Join(configPath, "macros.sql"),
+		os.MkdirAll(filepath.Join(configPath, "macros"), 0o755)
+		os.WriteFile(filepath.Join(configPath, "macros", "custom.sql"),
 			[]byte("CREATE MACRO test_env_macro() AS ${ONDATRA_TEST_DEFAULT};\n"), 0o644)
 
 		s, err := NewSession(":memory:")
@@ -1529,7 +1548,8 @@ func TestSession_InitWithCatalog_ExpandsEnvVars(t *testing.T) {
 
 		// Unset variable should expand to empty string
 		os.Unsetenv("ONDATRA_TEST_UNDEFINED_VAR_XYZ")
-		os.WriteFile(filepath.Join(configPath, "variables.sql"),
+		os.MkdirAll(filepath.Join(configPath, "variables"), 0o755)
+		os.WriteFile(filepath.Join(configPath, "variables", "global.sql"),
 			[]byte("SET VARIABLE test_undef = '${ONDATRA_TEST_UNDEFINED_VAR_XYZ}';\n"), 0o644)
 
 		s, err := NewSession(":memory:")
@@ -1798,5 +1818,246 @@ func TestEnsureReadOnly_RejectsMultiStatement(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "one statement at a time") {
 		t.Errorf("expected error to mention multi-statement guidance, got %q", err.Error())
+	}
+}
+
+// --- DefaultSearchPath tests ---
+
+func TestDefaultSearchPath_NormalMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
+		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n"), 0o644)
+
+	if err := s.InitWithCatalog(configDir); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.DefaultSearchPath()
+	if got != "lake,memory" {
+		t.Errorf("DefaultSearchPath() = %q, want %q", got, "lake,memory")
+	}
+}
+
+func TestDefaultSearchPath_SandboxMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	prodCatalogPath, prodDataPath := createProdCatalogForSession(t)
+
+	sandboxDir := t.TempDir()
+	sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
+	configDir := filepath.Join(sandboxDir, "config")
+	os.MkdirAll(configDir, 0o755)
+
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.InitSandbox(configDir, "ducklake:sqlite:"+prodCatalogPath, prodDataPath, sandboxCatalog, "lake"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.DefaultSearchPath()
+	if got != "sandbox,lake,memory" {
+		t.Errorf("DefaultSearchPath() = %q, want %q", got, "sandbox,lake,memory")
+	}
+}
+
+// --- loadMacroDir iterative dependency resolution ---
+
+func TestLoadMacroDir_CrossFileDependency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
+		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n"), 0o644)
+
+	// Create macro files with dependency chain: c depends on b, b depends on a.
+	// Alphabetical order (a, b, c) would succeed, but we name them so
+	// z_top.sql loads first alphabetically and depends on m_mid.sql which depends on a_base.sql.
+	macroDir := filepath.Join(configDir, "macros")
+	os.MkdirAll(macroDir, 0o755)
+
+	// a_base.sql — no dependencies
+	os.WriteFile(filepath.Join(macroDir, "a_base.sql"),
+		[]byte("CREATE OR REPLACE MACRO base_helper(x) AS x * 10;\n"), 0o644)
+	// m_mid.sql — depends on a_base
+	os.WriteFile(filepath.Join(macroDir, "m_mid.sql"),
+		[]byte("CREATE OR REPLACE MACRO mid_helper(x) AS base_helper(x) + 1;\n"), 0o644)
+	// z_top.sql — depends on m_mid
+	os.WriteFile(filepath.Join(macroDir, "z_top.sql"),
+		[]byte("CREATE OR REPLACE MACRO top_helper(x) AS mid_helper(x) + 2;\n"), 0o644)
+
+	if err := s.InitWithCatalog(configDir); err != nil {
+		t.Fatalf("InitWithCatalog failed with cross-file deps: %v", err)
+	}
+
+	// Verify the top-level macro works (means the whole chain resolved)
+	val, err := s.QueryValue("SELECT top_helper(5)")
+	if err != nil {
+		t.Fatalf("top_helper(5) query failed: %v", err)
+	}
+	if val != "53" { // 5*10 + 1 + 2 = 53
+		t.Errorf("top_helper(5) = %q, want 53", val)
+	}
+}
+
+// --- I/O error propagation tests ---
+
+func TestLoadMacroDir_PermissionError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("skipping as root — permission errors don't apply")
+	}
+
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
+		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n"), 0o644)
+
+	// Create macros dir with no read permission
+	macroDir := filepath.Join(configDir, "macros")
+	os.MkdirAll(macroDir, 0o755)
+	os.WriteFile(filepath.Join(macroDir, "test.sql"), []byte("CREATE MACRO test_m() AS 1;\n"), 0o644)
+	os.Chmod(macroDir, 0o000)
+	t.Cleanup(func() { os.Chmod(macroDir, 0o755) })
+
+	err = s.InitWithCatalog(configDir)
+	if err == nil {
+		t.Fatal("expected error from unreadable macros directory")
+	}
+	if !strings.Contains(err.Error(), "macro dir") {
+		t.Errorf("error should mention macro dir: %v", err)
+	}
+}
+
+func TestLoadMacroFile_PermissionError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("skipping as root — permission errors don't apply")
+	}
+
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
+		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n"), 0o644)
+
+	// Create macro file with no read permission
+	macroDir := filepath.Join(configDir, "macros")
+	os.MkdirAll(macroDir, 0o755)
+	unreadable := filepath.Join(macroDir, "secret.sql")
+	os.WriteFile(unreadable, []byte("CREATE MACRO s() AS 1;\n"), 0o000)
+	t.Cleanup(func() { os.Chmod(unreadable, 0o644) })
+
+	err = s.InitWithCatalog(configDir)
+	if err == nil {
+		t.Fatal("expected error from unreadable macro file")
+	}
+	if !strings.Contains(err.Error(), "secret.sql") {
+		t.Errorf("error should mention file name: %v", err)
+	}
+}
+
+func TestLoadConfigSQL_PermissionError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("skipping as root — permission errors don't apply")
+	}
+
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
+		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n"), 0o644)
+
+	// Create variables/constants.sql with no read permission
+	varDir := filepath.Join(configDir, "variables")
+	os.MkdirAll(varDir, 0o755)
+	unreadable := filepath.Join(varDir, "constants.sql")
+	os.WriteFile(unreadable, []byte("SET VARIABLE x = 1;\n"), 0o000)
+	t.Cleanup(func() { os.Chmod(unreadable, 0o644) })
+
+	err = s.InitWithCatalog(configDir)
+	if err == nil {
+		t.Fatal("expected error from unreadable config SQL file")
+	}
+	if !strings.Contains(err.Error(), "constants.sql") {
+		t.Errorf("error should mention file name: %v", err)
+	}
+}
+
+func TestLoadConfigSQL_MissingFileIsOK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	s, err := NewSession(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	os.WriteFile(filepath.Join(configDir, "catalog.sql"),
+		[]byte("ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n"), 0o644)
+
+	// No variables/ or macros/ — should succeed silently
+	if err := s.InitWithCatalog(configDir); err != nil {
+		t.Fatalf("expected success with missing optional files: %v", err)
 	}
 }

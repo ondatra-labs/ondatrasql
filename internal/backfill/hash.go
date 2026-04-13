@@ -1,4 +1,4 @@
-// OndatraSQL - You don't need a data stack anymore
+// OndatraSQL - A data pipeline runtime for DuckDB and DuckLake
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
@@ -99,33 +99,34 @@ func normalize(sql string) string {
 }
 
 // ConfigHash computes a SHA256 hash over all .sql files in the config
-// directory. Changes to macros.sql, variables.sql, secrets.sql, sources.sql,
-// or any other config SQL file will change the hash and trigger re-runs for
-// every model (Bug S21 fix). Files are sorted by name for determinism.
+// directory and its subdirectories (config/macros/, config/variables/).
+// Changes to any config SQL file will change the hash and trigger re-runs
+// for every model (Bug S21 fix). Files are sorted by path for determinism.
 // Returns "" if the directory doesn't exist or contains no .sql files.
 func ConfigHash(configDir string) string {
-	entries, err := os.ReadDir(configDir)
-	if err != nil {
-		return ""
-	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
+	var paths []string
+	filepath.WalkDir(configDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-	}
-	if len(names) == 0 {
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".sql") {
+			rel, _ := filepath.Rel(configDir, path)
+			paths = append(paths, rel)
+		}
+		return nil
+	})
+	if len(paths) == 0 {
 		return ""
 	}
-	sort.Strings(names)
+	sort.Strings(paths)
 
 	h := sha256.New()
-	for _, name := range names {
-		content, err := os.ReadFile(filepath.Join(configDir, name))
+	for _, rel := range paths {
+		content, err := os.ReadFile(filepath.Join(configDir, rel))
 		if err != nil {
 			continue
 		}
-		h.Write([]byte(name))
+		h.Write([]byte(rel))
 		h.Write([]byte{0})
 		h.Write(content)
 		h.Write([]byte{0})
