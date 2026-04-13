@@ -2341,14 +2341,14 @@ func TestRun_WarningUnknownPattern_Error(t *testing.T) {
 SELECT 1 AS id
 `)
 	result := runModel(t, p, "staging/warn_unknown2.sql")
-	hasParseErr := false
+	hasDispatchErr := false
 	for _, w := range result.Warnings {
-		if strings.Contains(w, "warning parse error") {
-			hasParseErr = true
+		if strings.Contains(w, "warning dispatch error") {
+			hasDispatchErr = true
 		}
 	}
-	if !hasParseErr {
-		t.Errorf("expected warning parse error, got warnings: %v", result.Warnings)
+	if !hasDispatchErr {
+		t.Errorf("expected warning dispatch error, got warnings: %v", result.Warnings)
 	}
 }
 

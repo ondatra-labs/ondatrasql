@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
 

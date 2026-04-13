@@ -6,8 +6,8 @@ env EDITOR=true
 # Edit special config targets
 exec ondatrasql edit catalog
 exec ondatrasql edit settings
-exec ondatrasql edit variables
-exec ondatrasql edit macros
+exec ondatrasql edit variables/constants
+exec ondatrasql edit macros/helpers
 exec ondatrasql edit sources
 exec ondatrasql edit secrets
 exec ondatrasql edit extensions
