@@ -17,12 +17,12 @@ import (
 // Tags like "PII" or "sensitive" are metadata-only (no masking).
 // Tags like "mask", "mask_email", "hash_pii" map to DuckDB macros.
 // The convention: if a tag starts with "mask", "hash", or "redact", it's a masking macro.
-var maskingPrefixes = []string{"mask", "hash", "redact"}
+var maskingTagPrefixes = []string{"mask", "hash", "redact"}
 
 // isMaskingTag returns true if the tag maps to a masking macro.
 func isMaskingTag(tag string) bool {
 	lower := strings.ToLower(tag)
-	for _, prefix := range maskingPrefixes {
+	for _, prefix := range maskingTagPrefixes {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"_") {
 			return true
 		}
@@ -40,14 +40,27 @@ func getMaskingMacro(tags []string) string {
 	return ""
 }
 
-// applyColumnMasking wraps a model's SQL with masking macros based on @column tags.
-// Tags that match masking prefixes (mask, hash, redact) are applied as DuckDB macro calls.
-// The unique_key column is never masked (needed for merge matching).
+// parseColumnList splits a comma-separated column list, trimming whitespace.
+func parseColumnList(s string) []string {
+	var cols []string
+	for _, col := range strings.Split(s, ",") {
+		col = strings.TrimSpace(col)
+		if col != "" {
+			cols = append(cols, col)
+		}
+	}
+	return cols
+}
+
+// applyColumnMasking rewrites a model SQL using DuckDB SELECT * REPLACE to apply
+// masking macros for tagged columns.
 //
-// Input:  SELECT id, name, email, ssn FROM raw.customers
-// Tags:  name|mask, email|mask_email, ssn|mask_ssn
-// Output: SELECT id, mask(name) AS name, mask_email(email) AS email, mask_ssn(ssn) AS ssn
-//         FROM (SELECT id, name, email, ssn FROM raw.customers)
+//   - Tags matching masking prefixes (mask, hash, redact) are treated as macro names.
+//   - unique_key columns are never masked (required for merge/partition matching).
+//   - If no applicable masking tags are found, the input SQL is returned unchanged.
+//   - Complex SQL (CTEs, subqueries) is wrapped as a derived table: FROM (<original_sql>).
+//   - REPLACE overrides are sorted by column name for deterministic output.
+//   - Invalid SQL or missing macros surface at execution time, not here.
 func applyColumnMasking(sql string, model *parser.Model) string {
 	if len(model.ColumnTags) == 0 {
 		return sql
@@ -60,11 +73,8 @@ func applyColumnMasking(sql string, model *parser.Model) string {
 	}
 	// Build set of unique key columns (may be comma-separated for partition kind)
 	uniqueKeyCols := make(map[string]bool)
-	for _, col := range strings.Split(model.UniqueKey, ",") {
-		col = strings.TrimSpace(col)
-		if col != "" {
-			uniqueKeyCols[col] = true
-		}
+	for _, col := range parseColumnList(model.UniqueKey) {
+		uniqueKeyCols[col] = true
 	}
 
 	for colName, tags := range model.ColumnTags {

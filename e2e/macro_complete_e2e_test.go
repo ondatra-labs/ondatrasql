@@ -63,14 +63,14 @@ func TestE2E_Macro_Constraint_NotConstant(t *testing.T) {
 
 func TestE2E_Macro_Constraint_Like(t *testing.T) {
 	p := testutil.NewProject(t)
-	p.AddModel("staging/bad.sql", "-- @kind: table\n-- @constraint: like(email, %@%)\nSELECT 'no-at-sign' AS email\n")
+	p.AddModel("staging/bad.sql", "-- @kind: table\n-- @constraint: like(email, '%@%')\nSELECT 'no-at-sign' AS email\n")
 	_, err := runModelErr(t, p, "staging/bad.sql")
 	if err == nil { t.Fatal("like should reject missing @") }
 }
 
 func TestE2E_Macro_Constraint_NotLike(t *testing.T) {
 	p := testutil.NewProject(t)
-	p.AddModel("staging/bad.sql", "-- @kind: table\n-- @constraint: not_like(name, %test%)\nSELECT 'test_user' AS name\n")
+	p.AddModel("staging/bad.sql", "-- @kind: table\n-- @constraint: not_like(name, '%test%')\nSELECT 'test_user' AS name\n")
 	_, err := runModelErr(t, p, "staging/bad.sql")
 	if err == nil { t.Fatal("not_like should reject 'test_user'") }
 }
