@@ -113,9 +113,12 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 			continue
 		}
 
-		// Show what we're executing (truncated)
-		displayStmt := truncateSQL(stmt, 55)
-		printPaddedLine(displayStmt)
+		// Strip leading comments for display
+		displayStmt := stripLeadingComments(stmt)
+		if displayStmt == "" {
+			continue
+		}
+		printPaddedLine(truncateSQL(displayStmt, 55))
 
 		// Execute
 		result, err := sess.Query(stmt)
@@ -215,6 +218,20 @@ func truncateSQL(sql string, maxLen int) string {
 		return sql
 	}
 	return sql[:maxLen-3] + "..."
+}
+
+// stripLeadingComments removes leading comment lines from SQL for display.
+func stripLeadingComments(sql string) string {
+	lines := strings.Split(sql, "\n")
+	for len(lines) > 0 {
+		line := strings.TrimSpace(lines[0])
+		if line == "" || strings.HasPrefix(line, "--") {
+			lines = lines[1:]
+		} else {
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // isOnlyComments checks if SQL contains only comments.

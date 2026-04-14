@@ -8,6 +8,7 @@ package duckdb
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,59 +80,66 @@ func TestInitSandbox(t *testing.T) {
 	}
 }
 
-// TestInitSandbox_SetOptionFailurePropagates is a regression test for the
-// silently-swallowed error on the data_inlining disable call inside
-// InitSandbox. The fix changed `s.Exec(...)` (return value ignored) to
-// `if err := s.Exec(...); err != nil { return ... }`.
-//
-// We pin the contract by swapping the option name for one that DuckLake
-// rejects ("Not implemented Error: Unsupported option"), which makes the
-// underlying Exec return an error. InitSandbox MUST surface that error
-// instead of silently proceeding with inlining still enabled — the whole
-// reason the workaround exists is that ALTER + inlined data corrupts the
-// sandbox catalog (see ducklake-inlined-data-alter-bug.md).
-func TestInitSandbox_SetOptionFailurePropagates(t *testing.T) {
+// TestInliningSchemaEvolution verifies that DuckLake's data inlining
+// does NOT corrupt data during schema evolution (ALTER ADD COLUMN + INSERT).
+// This was a known bug (DuckLake PR #495, fixed October 2025). We removed
+// the workaround (data_inlining_row_limit = 0) in v0.15.x after verifying
+// the fix. This test ensures the fix holds across DuckLake upgrades.
+func TestInliningSchemaEvolution(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
+
 	dir := t.TempDir()
-	configDir := filepath.Join(dir, "config")
-	os.MkdirAll(configDir, 0o755)
+	catalogPath := filepath.Join(dir, "lake.sqlite")
+	dataPath := filepath.Join(dir, "data")
 
-	prodCatalogPath := filepath.Join(dir, "prod_ducklake.sqlite")
-	prodDataPath := filepath.Join(dir, "prod_data")
-	prodConnStr := "ducklake:sqlite:" + prodCatalogPath
-
-	// Materialize the prod catalog so the sandbox attach succeeds.
-	setupSess, err := NewSession(":memory:")
-	if err != nil {
-		t.Fatalf("create setup session: %v", err)
-	}
-	if err := setupSess.Exec("ATTACH 'ducklake:sqlite:" + prodCatalogPath + "' AS lake (DATA_PATH '" + prodDataPath + "')"); err != nil {
-		setupSess.Close()
-		t.Fatalf("create prod catalog: %v", err)
-	}
-	setupSess.Close()
-
-	// Swap the option name for one DuckLake rejects. The defer ensures
-	// the global is restored even if t.Fatal short-circuits the test.
-	originalOption := sandboxDataInliningOptionName
-	sandboxDataInliningOptionName = "definitely_not_a_real_option_xyz"
-	defer func() { sandboxDataInliningOptionName = originalOption }()
-
-	sandboxCatalog := filepath.Join(dir, "sandbox_ducklake.sqlite")
 	sess, err := NewSession(":memory:")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { sess.Close() })
+	defer sess.Close()
 
-	err = sess.InitSandbox(configDir, prodConnStr, prodDataPath, sandboxCatalog, "lake")
-	if err == nil {
-		t.Fatal("InitSandbox: expected error from rejected set_option, got nil — the data inlining disable error is being silently swallowed (regression of the v0.11.x sandbox fix)")
+	// Attach with inlining enabled (default)
+	if err := sess.Exec(fmt.Sprintf(
+		"ATTACH 'ducklake:sqlite:%s' AS lake (DATA_PATH '%s')", catalogPath, dataPath)); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "data inlining") {
-		t.Errorf("InitSandbox error should be wrapped with 'data inlining' context, got: %v", err)
+	if err := sess.Exec("USE lake"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create table with small data (will be inlined)
+	if err := sess.Exec("CREATE TABLE test (id INT, name VARCHAR)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Exec("INSERT INTO test VALUES (1, 'hello')"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Schema evolution: add column + insert
+	if err := sess.Exec("ALTER TABLE test ADD COLUMN new_col INT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Exec("INSERT INTO test VALUES (2, 'world', 42)"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify: the old row should have NULL for new_col, new row should have 42
+	rows, err := sess.QueryRowsMap("SELECT id, new_col FROM test ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	// Row 1: new_col should be NULL (empty string from QueryRowsMap)
+	if rows[0]["new_col"] != "" {
+		t.Errorf("row 1 new_col = %q, want empty (NULL)", rows[0]["new_col"])
+	}
+	// Row 2: new_col should be 42
+	if rows[1]["new_col"] != "42" {
+		t.Errorf("row 2 new_col = %q, want '42' — DuckLake inlining + ALTER bug may have regressed (see PR #495)", rows[1]["new_col"])
 	}
 }
 

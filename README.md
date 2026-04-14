@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="https://ondatra.sh/images/ondatra.png" alt="OndatraSQL" width="200">
+  <img src="https://ondatra.sh/images/ondatra_hex.png" alt="OndatraSQL" width="200">
 </p>
 
 <h1 align="center">OndatraSQL</h1>
 
 <p align="center">
-  <b>A data runtime built on DuckDB and DuckLake</b><br>
+  <b>A data pipeline runtime for DuckDB and DuckLake</b><br>
   Ingestion, transformation, validation, and scheduling in a single binary.
 </p>
 
@@ -42,17 +42,45 @@ mkdir my-pipeline && cd my-pipeline
 ondatrasql init
 ```
 
-Create `models/staging/orders.sql`:
+Ingest data from an API:
+
+```bash
+ondatrasql new raw.countries.star
+ondatrasql edit raw.countries.star
+```
+
+```python
+# @kind: table
+
+resp = http.get("https://restcountries.com/v3.1/region/europe")
+
+for c in resp.json:
+    save.row({
+        "name": c["name"]["common"],
+        "capital": c["capital"][0],
+        "population": c["population"],
+    })
+```
+
+Transform with SQL:
+
+```bash
+ondatrasql new staging.countries.sql
+ondatrasql edit staging.countries.sql
+```
 
 ```sql
--- @kind: merge
--- @unique_key: order_id
+-- @kind: table
+-- @constraint: not_null(name)
 
-SELECT * FROM (VALUES
-    (1, 'Alice', 100, '2026-01-15'),
-    (2, 'Bob',   200, '2026-02-20'),
-    (3, 'Charlie', 150, '2026-03-10')
-) AS t(order_id, customer, amount, order_date)
+SELECT
+    name, capital, population,
+    CASE
+        WHEN population > 50000000 THEN 'large'
+        WHEN population > 10000000 THEN 'medium'
+        ELSE 'small'
+    END AS size
+FROM raw.countries
 ```
 
 Run the pipeline:
@@ -62,10 +90,12 @@ ondatrasql run
 ```
 
 ```
-[OK] staging.orders (merge, backfill, 3 rows, 180ms)
-```
+Running 2 models...
+[OK] raw.countries      (table, backfill, 53 rows, 1.1s)
+[OK] staging.countries  (table, backfill, 53 rows, 250ms — first run)
 
-OndatraSQL creates a DuckLake catalog, builds the dependency graph, executes the model, and materializes the result with snapshot metadata.
+Done: 2 ran, 0 skipped, 0 failed (106 rows, 1.4s)
+```
 
 ## Model Types
 
@@ -128,8 +158,15 @@ schedule [cron]      Install OS-native scheduler
 odata <port>         Start OData v4 server
 events <port>        Start event collection endpoint
 auth [provider]      Authenticate with OAuth2 providers
+new <model>          Create a model file
+edit <target>        Open file in $EDITOR
 sql "SELECT ..."     Query DuckLake catalog
+stats                Project overview
+describe <model>     Model details and schema
+history [model]      Run history
 lineage overview     View dependencies and column lineage
+flush                Flush inlined data to Parquet
+checkpoint           Run all maintenance
 ```
 
 [Full CLI reference →](https://ondatra.sh/cli/)

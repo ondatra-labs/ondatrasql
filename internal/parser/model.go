@@ -247,8 +247,8 @@ func ParseModel(path, projectDir string) (*Model, error) {
 
 		case partitionedByRe.MatchString(trimmed):
 			matches := partitionedByRe.FindStringSubmatch(trimmed)
-			// Parse comma-separated partition columns
-			cols := strings.Split(matches[1], ",")
+			// Parse comma-separated partition expressions (paren-aware to support bucket(N, col))
+			cols := splitParenAware(matches[1])
 			for _, col := range cols {
 				col = strings.TrimSpace(col)
 				if col != "" {
@@ -518,10 +518,10 @@ func validateModel(m *Model) error {
 		return fmt.Errorf("@partitioned_by is not supported for partition kind (use @unique_key for partition columns)")
 	}
 
-	// Validate partitioned_by columns if present (column names, no dots allowed)
+	// Validate partitioned_by expressions (column names or transforms like bucket(N, col))
 	for _, col := range m.PartitionedBy {
-		if err := ValidateColumnName(col); err != nil {
-			return fmt.Errorf("invalid partitioned_by column: %w", err)
+		if err := ValidatePartitionExpr(col); err != nil {
+			return fmt.Errorf("invalid partitioned_by expression: %w", err)
 		}
 	}
 
@@ -610,6 +610,51 @@ func ValidateColumnName(s string) error {
 	}
 
 	return nil
+}
+
+// ValidatePartitionExpr checks that a partition expression is safe.
+// Allows column names (e.g. "region") or known DuckLake transform functions
+// (year, month, day, hour, bucket).
+func ValidatePartitionExpr(s string) error {
+	if s == "" {
+		return fmt.Errorf("partition expression cannot be empty")
+	}
+	// Known DuckLake partition transforms (case-insensitive — DuckDB treats function names as case-insensitive)
+	knownTransforms := regexp.MustCompile(`(?i)^(year|month|day|hour|bucket)\(.+\)$`)
+	if knownTransforms.MatchString(s) {
+		return nil
+	}
+	// Unknown transform function — reject
+	unknownTransform := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\(.+\)$`)
+	if unknownTransform.MatchString(s) {
+		return fmt.Errorf("unsupported partition transform %q: supported transforms are year(), month(), day(), hour(), bucket()", s)
+	}
+	// Plain column name
+	return ValidateColumnName(s)
+}
+
+// splitParenAware splits a string on commas, but ignores commas inside parentheses.
+func splitParenAware(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 // parseColumnDefs parses DDL-style column definitions from an events model body.

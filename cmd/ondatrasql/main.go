@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.15.1"
+var version = "0.16.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -249,6 +249,7 @@ Auth:
   auth <provider>         Authenticate with an OAuth2 provider
 
 SQL Commands (from sql/ folder, supports prod and sandbox modes):
+  flush                   Flush inlined data to Parquet (ducklake_flush_inlined_data)
   merge                   Merge small files (ducklake_merge_adjacent_files)
   expire                  Expire old snapshots (ducklake_expire_snapshots)
   cleanup                 Delete old files (ducklake_cleanup_old_files)

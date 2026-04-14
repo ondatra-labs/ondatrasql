@@ -7,6 +7,7 @@ package execute
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -371,13 +372,25 @@ func (r *Runner) applyStorageHints(model *parser.Model) {
 	if len(model.SortedBy) > 0 {
 		cols := quoteIdentifiers(model.SortedBy)
 		sortSQL := fmt.Sprintf("ALTER TABLE %s SET SORTED BY (%s)", model.Target, cols)
-		r.sess.Exec(sortSQL)
+		if err := r.sess.Exec(sortSQL); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN: sorted_by on %s: %v\n", model.Target, err)
+		}
 	}
 
 	if len(model.PartitionedBy) > 0 {
-		cols := quoteIdentifiers(model.PartitionedBy)
-		partSQL := fmt.Sprintf("ALTER TABLE %s SET PARTITIONED BY (%s)", model.Target, cols)
-		r.sess.Exec(partSQL)
+		// Partition expressions may be transforms like bucket(16, col) — don't quote those
+		parts := make([]string, len(model.PartitionedBy))
+		for i, p := range model.PartitionedBy {
+			if strings.Contains(p, "(") {
+				parts[i] = p // transform expression, pass through as-is
+			} else {
+				parts[i] = duckdb.QuoteIdentifier(p)
+			}
+		}
+		partSQL := fmt.Sprintf("ALTER TABLE %s SET PARTITIONED BY (%s)", model.Target, strings.Join(parts, ", "))
+		if err := r.sess.Exec(partSQL); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN: partitioned_by on %s: %v\n", model.Target, err)
+		}
 	}
 }
 

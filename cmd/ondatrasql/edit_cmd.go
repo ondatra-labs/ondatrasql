@@ -137,8 +137,16 @@ func findModelSourceFile(cfg *config.Config, target string) (string, error) {
 	return "", fmt.Errorf("source file for model %q not found", target)
 }
 
-// splitTarget splits "schema.table" into ["schema", "table"].
+// splitTarget splits "schema.table" or "schema.table.sql" into ["schema", "table"].
+// Known extensions (.sql, .star, .yaml, .yml) are stripped before splitting.
 func splitTarget(target string) []string {
+	lower := strings.ToLower(target)
+	for _, ext := range []string{".sql", ".star", ".yaml", ".yml"} {
+		if strings.HasSuffix(lower, ext) {
+			target = target[:len(target)-len(ext)]
+			break
+		}
+	}
 	for i := len(target) - 1; i >= 0; i-- {
 		if target[i] == '.' {
 			return []string{target[:i], target[i+1:]}

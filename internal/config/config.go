@@ -174,11 +174,7 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 		}
 
 		var connStr string
-		if catType == "duckdb" {
-			connStr = "ducklake:" + catPath
-		} else {
-			connStr = "ducklake:" + catType + ":" + catPath
-		}
+		connStr = "ducklake:" + catType + ":" + catPath
 
 		info := CatalogInfo{
 			Type:    catType,

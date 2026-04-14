@@ -34,6 +34,11 @@ type ProjectStats struct {
 
 	// All models
 	AllModels []ModelStats
+
+	// DuckLake info
+	CatalogType string `json:",omitempty"`
+	DataPath    string `json:",omitempty"`
+	DuckLakeVer string `json:",omitempty"`
 }
 
 // KindCount holds count for a kind.
@@ -157,6 +162,18 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 		}
 	}
 
+	// Get DuckLake settings
+	alias := sess.CatalogAlias()
+	if alias == "" {
+		alias = "lake"
+	}
+	dlRows, err := sess.QueryRowsMap(fmt.Sprintf("SELECT * FROM ducklake_settings('%s')", alias))
+	if err == nil && len(dlRows) > 0 {
+		stats.CatalogType = dlRows[0]["catalog_type"]
+		stats.DataPath = dlRows[0]["data_path"]
+		stats.DuckLakeVer = dlRows[0]["extension_version"]
+	}
+
 	return stats, nil
 }
 
@@ -198,6 +215,12 @@ func printStatsBox(stats *ProjectStats) {
 	printTwoColumns("Models", fmt.Sprintf("%d", stats.ModelCount), "Snapshots", fmt.Sprintf("%d", stats.Snapshots))
 	printTwoColumns("Total Runs", fmt.Sprintf("%d", stats.TotalRuns), "Avg Duration", fmt.Sprintf("%.0fms", stats.AvgDuration))
 	printTwoColumns("Rows Processed", formatNumber(stats.TotalRows), "Last Run", stats.LastRun)
+	if stats.CatalogType != "" {
+		printTwoColumns("Catalog", stats.CatalogType, "DuckLake", stats.DuckLakeVer)
+		if stats.DataPath != "" {
+			printPaddedLine(fmt.Sprintf("Data Path: %s", stats.DataPath))
+		}
+	}
 	printEmptyLine()
 
 	// Kind breakdown section

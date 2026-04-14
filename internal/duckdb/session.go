@@ -26,13 +26,6 @@ import (
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
-// sandboxDataInliningOptionName is the DuckLake catalog option that disables
-// row-level data inlining on the sandbox catalog. Held as a var (not a const)
-// so a regression test can swap it for a known-bad value to verify that the
-// error from CALL sandbox.set_option(...) is propagated rather than swallowed.
-// Production code paths must NOT mutate this.
-var sandboxDataInliningOptionName = "data_inlining_row_limit"
-
 // Session represents an embedded DuckDB connection.
 type Session struct {
 	db           *sql.DB
@@ -840,11 +833,6 @@ func (s *Session) InitWithCatalog(configPath string) error {
 	s.catalogAlias = catalogAlias
 	sqlfiles.SetCatalogAlias(catalogAlias) // Set for SQL file loading
 
-	// Disable data inlining to work around DuckLake bug where ALTER ADD COLUMN
-	// + INSERT produces NULL values for the new column with inlined data.
-	// See: ducklake-inlined-data-alter-bug.md
-	s.Exec(fmt.Sprintf("CALL %s.set_option('data_inlining_row_limit', 0)", catalogAlias))
-
 	// CDC macros (still in memory context, before USE)
 	if cdcMacros, err := sqlfiles.Load("macros/cdc.sql"); err == nil {
 		if err := s.Exec(cdcMacros); err != nil {
@@ -1119,19 +1107,13 @@ func (s *Session) validateCatalogBackend() error {
 	for _, db := range attached {
 		backend := backendFromDuckLakePath(db.path)
 		switch backend {
-		case "sqlite", "postgres":
-			// supported
+		case "sqlite", "postgres", "duckdb":
+			// supported — sqlite and duckdb use file copy for sandbox, postgres uses CREATE DATABASE TEMPLATE
 		case "mysql":
 			return fmt.Errorf(
-				"catalog %q is a DuckLake-on-mysql catalog (path %q), but OndatraSQL only supports sqlite and postgres backends. "+
-					"The sandbox feature uses backend-native fork primitives (cp for sqlite, CREATE DATABASE TEMPLATE for postgres) and there is no equivalent for mysql. "+
-					"Migrate your catalog to postgres or sqlite, or open an issue if mysql support is critical for your use case.",
-				db.name, db.path)
-		case "duckdb":
-			return fmt.Errorf(
-				"catalog %q is a DuckLake-on-duckdb catalog (path %q), but OndatraSQL only supports sqlite and postgres backends. "+
-					"DuckDB-as-catalog stores metadata in a duckdb file, which collides with our sqlite-fork sandbox strategy. "+
-					"Use sqlite instead: ATTACH 'ducklake:sqlite:lake.sqlite' AS lake (DATA_PATH '...');",
+				"catalog %q is a DuckLake-on-mysql catalog (path %q), but OndatraSQL only supports sqlite, duckdb, and postgres backends. "+
+					"The sandbox feature uses backend-native fork primitives (cp for sqlite/duckdb, CREATE DATABASE TEMPLATE for postgres) and there is no equivalent for mysql. "+
+					"Migrate your catalog to postgres, sqlite, or duckdb, or open an issue if mysql support is critical for your use case.",
 				db.name, db.path)
 		default:
 			return fmt.Errorf(
@@ -1188,6 +1170,31 @@ func (s *Session) forkSqliteCatalog(prodConnStr, sandboxCatalog string) (string,
 		return "", fmt.Errorf("fork prod catalog: write %s: %w", sandboxCatalog, err)
 	}
 	return "ducklake:sqlite:" + sandboxCatalog, nil
+}
+
+// forkDuckDBCatalog implements sandbox v2 fork for duckdb-backed DuckLake
+// using a simple file copy — identical strategy to SQLite.
+func (s *Session) forkDuckDBCatalog(prodConnStr, sandboxCatalog string) (string, error) {
+	prodCatalogPath := strings.TrimPrefix(prodConnStr, "ducklake:duckdb:")
+
+	if _, err := os.Stat(prodCatalogPath); os.IsNotExist(err) {
+		return "", fmt.Errorf(
+			"sandbox needs an existing prod catalog to fork from, but %s does not exist yet. "+
+				"Run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` "+
+				"can validate changes against it.", prodCatalogPath)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(sandboxCatalog), 0o755); err != nil {
+		return "", fmt.Errorf("fork prod catalog: ensure dir: %w", err)
+	}
+	src, err := os.ReadFile(prodCatalogPath)
+	if err != nil {
+		return "", fmt.Errorf("fork prod catalog: read %s: %w", prodCatalogPath, err)
+	}
+	if err := os.WriteFile(sandboxCatalog, src, 0o644); err != nil {
+		return "", fmt.Errorf("fork prod catalog: write %s: %w", sandboxCatalog, err)
+	}
+	return "ducklake:duckdb:" + sandboxCatalog, nil
 }
 
 // forkPostgresCatalog implements sandbox v2 fork for postgres-backed DuckLake
@@ -1487,7 +1494,7 @@ func (s *Session) GetDagStartSnapshot() (int64, error) {
 // that prod's catalog cannot see (file references live per-catalog).
 //
 //   - prodConnStr: full DuckLake connection string (e.g. "ducklake:sqlite:/path/to/catalog.sqlite").
-//     Only sqlite and postgres backends are supported; mysql/duckdb are rejected.
+//     Supported backends: sqlite, duckdb, postgres. MySQL is not supported.
 //   - prodDataPath: DATA_PATH for the prod catalog. Sandbox shares this path.
 //   - sandboxCatalog: filesystem path where the forked sqlite catalog will live.
 //     For postgres prod (TODO), this is used as a marker file inside .sandbox/.
@@ -1554,6 +1561,13 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		if err != nil {
 			return err
 		}
+	case strings.HasPrefix(prodConnStr, "ducklake:duckdb:"):
+		// DuckDB catalog files can be copied like SQLite files
+		var err error
+		sandboxConnStr, err = s.forkDuckDBCatalog(prodConnStr, sandboxCatalog)
+		if err != nil {
+			return err
+		}
 	case strings.HasPrefix(prodConnStr, "ducklake:postgres:"):
 		var err error
 		sandboxConnStr, err = s.forkPostgresCatalog(prodConnStr)
@@ -1561,7 +1575,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 			return err
 		}
 	default:
-		return fmt.Errorf("sandbox v2 supports sqlite and postgres catalog backends (got %q)", prodConnStr)
+		return fmt.Errorf("sandbox v2 supports sqlite, duckdb, and postgres catalog backends (got %q)", prodConnStr)
 	}
 
 	prodAttach := fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY", prodConnStr, prodAlias)
@@ -1588,14 +1602,11 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 	s.sandboxDataPath = prodDataPath
 	sqlfiles.SetCatalogAlias("sandbox")
 
-	// Disable data inlining on sandbox catalog (workaround for DuckLake ALTER + inlined data bug).
-	// Failing here is not silently recoverable: with inlining still on, schema-evolution
-	// scenarios on sandbox tables can corrupt state. See ducklake-inlined-data-alter-bug.md.
-	//
-	// The option name is held in a package var (not a literal) so a regression
-	// test can swap it for a known-bad value and verify the error path is wired
-	// up. Production code paths never mutate it.
-	if err := s.Exec(fmt.Sprintf("CALL sandbox.set_option('%s', 0)", sandboxDataInliningOptionName)); err != nil {
+	// Disable data inlining on sandbox catalog. Sandbox writes small batches
+	// across separate transactions (schema evolution + insert), which can still
+	// produce incorrect results with inlined data. Prod is safe (single-txn fix
+	// in DuckLake PR #495), but sandbox's cross-transaction pattern requires this.
+	if err := s.Exec("CALL sandbox.set_option('data_inlining_row_limit', 0)"); err != nil {
 		return fmt.Errorf("disable sandbox data inlining: %w", err)
 	}
 

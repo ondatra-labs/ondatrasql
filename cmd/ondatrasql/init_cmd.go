@@ -65,6 +65,7 @@ func runInit() error {
 		"config/sources.sql":    initSources(),
 		"config/secrets.sql":    initSecrets(),
 		"config/settings.sql":   initSettings(),
+		"sql/flush.sql":         initFlush(),
 		"sql/merge.sql":         initMerge(),
 		"sql/expire.sql":        initExpire(),
 		"sql/cleanup.sql":       initCleanup(),
@@ -161,6 +162,7 @@ ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.fil
 -- CALL lake.set_option('parquet_compression', 'zstd');          -- default: snappy
 -- CALL lake.set_option('target_file_size', '256MB');             -- default: 512MB
 -- CALL lake.set_option('rewrite_delete_threshold', 0.5);        -- default: 0.95
+-- CALL lake.set_option('write_deletion_vectors', true);          -- default: false
 
 --------------------------------------------------------------------------------
 -- CLOUD STORAGE (S3)
@@ -169,6 +171,14 @@ ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.fil
 -- Example: SQLite catalog with S3 data storage
 -- Requires: extensions.sql to load httpfs
 -- ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 's3://my-bucket/data/');
+-- USE lake;
+
+--------------------------------------------------------------------------------
+-- DUCKDB CATALOG
+--------------------------------------------------------------------------------
+
+-- Example: DuckDB file as catalog backend (alternative to SQLite)
+-- ATTACH 'ducklake:duckdb:ducklake_catalog.duckdb' AS lake (DATA_PATH 'ducklake.duckdb.files');
 -- USE lake;
 
 --------------------------------------------------------------------------------
@@ -307,6 +317,19 @@ func initSettings() string {
 `
 }
 
+func initFlush() string {
+	return `-- flush.sql - Flush inlined data to Parquet files
+-- Run with: ondatrasql flush
+--
+-- Moves small writes stored in the catalog database to Parquet files.
+-- DuckLake inlines small inserts (up to 10 rows) in the catalog metadata.
+-- This command flushes all inlined data to object storage.
+-- Run before merge for best results.
+
+CALL ducklake_flush_inlined_data('lake');
+`
+}
+
 func initMerge() string {
 	return `-- merge.sql - Merge small files for better performance
 -- Run with: ondatrasql merge
@@ -378,12 +401,14 @@ func initCheckpoint() string {
 -- Preview with: ondatrasql checkpoint sandbox
 --
 -- Runs all maintenance operations in the correct order:
--- 1. Expire old snapshots (30 days)
--- 2. Merge small adjacent files
--- 3. Rewrite files with many deletes
--- 4. Clean up old files (7 days)
--- 5. Delete orphaned files (7 days)
+-- 1. Flush inlined data to Parquet files
+-- 2. Expire old snapshots (30 days)
+-- 3. Merge small adjacent files
+-- 4. Rewrite files with many deletes
+-- 5. Clean up old files (7 days)
+-- 6. Delete orphaned files (7 days)
 
+CALL ducklake_flush_inlined_data('lake');
 CALL ducklake_expire_snapshots('lake', older_than => now() - INTERVAL '30 days');
 CALL ducklake_merge_adjacent_files('lake');
 CALL ducklake_rewrite_data_files('lake');
