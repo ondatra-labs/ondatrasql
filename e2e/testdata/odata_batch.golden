@@ -1,0 +1,4 @@
+batch_responses: 3
+  id=1 status=200
+  id=2 status=200
+  id=3 status=404

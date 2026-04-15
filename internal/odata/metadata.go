@@ -18,8 +18,9 @@ type EntitySchema struct {
 	ODataName string       // "mart_daily_revenue" (OData-safe, dots replaced)
 	Schema  string         // "mart"
 	Table   string         // "daily_revenue"
-	Columns []ColumnSchema // from INFORMATION_SCHEMA
-	KeyColumn string       // optional primary key column for OData Key
+	Columns       []ColumnSchema       // from INFORMATION_SCHEMA
+	KeyColumn     string               // optional primary key column for OData Key
+	NavProperties []NavigationProperty // relationships to other entities
 }
 
 // ColumnSchema describes a column in an entity.
@@ -27,6 +28,15 @@ type ColumnSchema struct {
 	Name    string // "revenue"
 	Type    string // "DOUBLE"
 	EdmType string // "Edm.Double"
+}
+
+// NavigationProperty describes a relationship between two OData entities.
+type NavigationProperty struct {
+	Name         string // "orders" (navigation property name)
+	TargetEntity string // "raw_orders" (OData entity name)
+	SourceColumn string // "order_id" (FK in this entity)
+	TargetColumn string // "order_id" (PK/column in target entity)
+	IsCollection bool   // true = one-to-many, false = many-to-one
 }
 
 // ExposeTarget pairs a target with its optional key column.
@@ -97,6 +107,78 @@ func DiscoverSchemas(sess *duckdb.Session, targets []ExposeTarget) ([]EntitySche
 	return schemas, nil
 }
 
+// DiscoverNavigationProperties finds relationships between exposed entities
+// based on key columns. Two patterns are detected:
+//
+//   - FK→PK: source has a column matching target's KeyColumn (many-to-one)
+//     Example: orders.customer_id → customers.customer_id (key)
+//
+//   - PK→FK: target has a column matching source's KeyColumn (one-to-many)
+//     Example: customers.customer_id (key) ← orders.customer_id
+func DiscoverNavigationProperties(schemas []EntitySchema) {
+	for i := range schemas {
+		colsI := make(map[string]bool)
+		for _, c := range schemas[i].Columns {
+			colsI[c.Name] = true
+		}
+
+		for j := range schemas {
+			if i == j {
+				continue
+			}
+
+			colsJ := make(map[string]bool)
+			for _, c := range schemas[j].Columns {
+				colsJ[c.Name] = true
+			}
+
+			var nav *NavigationProperty
+
+			// Pattern 1: FK→PK — source has target's key column (many-to-one)
+			// Example: orders has customer_id, customers has key customer_id
+			if schemas[j].KeyColumn != "" && colsI[schemas[j].KeyColumn] &&
+				schemas[i].KeyColumn != schemas[j].KeyColumn {
+				nav = &NavigationProperty{
+					Name:         schemas[j].ODataName,
+					TargetEntity: schemas[j].ODataName,
+					SourceColumn: schemas[j].KeyColumn,
+					TargetColumn: schemas[j].KeyColumn,
+					IsCollection: false, // many-to-one
+				}
+			}
+
+			// Pattern 2: PK→FK — target has source's key column (one-to-many)
+			// Example: customers has key customer_id, orders has customer_id
+			if nav == nil && schemas[i].KeyColumn != "" && colsJ[schemas[i].KeyColumn] &&
+				schemas[j].KeyColumn != schemas[i].KeyColumn {
+				nav = &NavigationProperty{
+					Name:         schemas[j].ODataName,
+					TargetEntity: schemas[j].ODataName,
+					SourceColumn: schemas[i].KeyColumn,
+					TargetColumn: schemas[i].KeyColumn,
+					IsCollection: true, // one-to-many
+				}
+			}
+
+			if nav == nil {
+				continue
+			}
+
+			// Avoid duplicates
+			exists := false
+			for _, existing := range schemas[i].NavProperties {
+				if existing.Name == nav.Name {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				schemas[i].NavProperties = append(schemas[i].NavProperties, *nav)
+			}
+		}
+	}
+}
+
 func duckDBToEdm(duckType string) string {
 	upper := strings.ToUpper(duckType)
 	switch {
@@ -148,9 +230,15 @@ type schemaElement struct {
 }
 
 type entityType struct {
-	Name       string        `xml:"Name,attr"`
-	Key        *entityKey    `xml:"Key,omitempty"`
-	Properties []property    `xml:"Property"`
+	Name           string           `xml:"Name,attr"`
+	Key            *entityKey       `xml:"Key,omitempty"`
+	Properties     []property       `xml:"Property"`
+	NavProperties  []navProperty    `xml:"NavigationProperty,omitempty"`
+}
+
+type navProperty struct {
+	Name string `xml:"Name,attr"`
+	Type string `xml:"Type,attr"`
 }
 
 type entityKey struct {
@@ -218,6 +306,18 @@ func GenerateMetadata(schemas []EntitySchema) ([]byte, error) {
 			}
 			et.Properties = append(et.Properties, p)
 		}
+		// Navigation properties
+		for _, nav := range es.NavProperties {
+			npType := "ondatra." + nav.TargetEntity
+			if nav.IsCollection {
+				npType = "Collection(" + npType + ")"
+			}
+			et.NavProperties = append(et.NavProperties, navProperty{
+				Name: nav.Name,
+				Type: npType,
+			})
+		}
+
 		doc.DataServices.Schema.Types = append(doc.DataServices.Schema.Types, et)
 		doc.DataServices.Schema.Container.Sets = append(doc.DataServices.Schema.Container.Sets, entitySet{
 			Name:       es.ODataName,

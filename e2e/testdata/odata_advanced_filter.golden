@@ -1,0 +1,44 @@
+--- contains → 1 rows ---
+  [0] active=true, amount=150, big_num=100, created_at="2026-01-01T08:30:00Z", customer="Alice", double_val=2.71, float_val=3.140000104904175, order_date="2026-01-01", order_id=1
+--- startswith → 1 rows ---
+  [0] active=false, amount=250.5, big_num=200, created_at="2026-01-02T14:15:30Z", customer="Bob", double_val=9.99, float_val=1.5, order_date="2026-01-02", order_id=2
+--- endswith → 1 rows ---
+  [0] active=true, amount=0, big_num=0, created_at="2026-01-03T00:00:00Z", customer="Carol", double_val=0, float_val=0, order_date="2026-01-03", order_id=3
+--- tolower → 0 rows ---
+400 Bad Request
+--- toupper → 0 rows ---
+400 Bad Request
+--- length → 0 rows ---
+400 Bad Request
+--- trim → 0 rows ---
+400 Bad Request
+--- indexof → 0 rows ---
+400 Bad Request
+--- substring → 0 rows ---
+400 Bad Request
+--- concat → 0 rows ---
+400 Bad Request
+--- nested_contains_tolower → 1 rows ---
+  [0] active=true, amount=150, big_num=100, created_at="2026-01-01T08:30:00Z", customer="Alice", double_val=2.71, float_val=3.140000104904175, order_date="2026-01-01", order_id=1
+--- year → 0 rows ---
+400 Bad Request
+--- month → 0 rows ---
+400 Bad Request
+--- day → 0 rows ---
+400 Bad Request
+--- round → 0 rows ---
+400 Bad Request
+--- floor → 0 rows ---
+400 Bad Request
+--- ceiling → 0 rows ---
+400 Bad Request
+--- add → 0 rows ---
+400 Bad Request
+--- sub → 0 rows ---
+400 Bad Request
+--- mul → 0 rows ---
+400 Bad Request
+--- in → 0 rows ---
+400 Bad Request
+--- func_and_arith → 0 rows ---
+400 Bad Request

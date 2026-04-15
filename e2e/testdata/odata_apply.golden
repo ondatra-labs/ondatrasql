@@ -1,0 +1,20 @@
+--- sum → 1 rows ---
+  [0] total=1375.24
+--- avg → 1 rows ---
+  [0] avg_amount=229.20666666666668
+--- min → 1 rows ---
+  [0] min_amount=-75.25
+--- max → 1 rows ---
+  [0] max_amount=999.99
+--- count → 1 rows ---
+  [0] total=6
+--- groupby_sum → 6 rows ---
+  [0] customer="", total=50
+  [1] customer="Alice", total=150
+  [2] customer="Bob", total=250.5
+  [3] customer="Carol", total=0
+  [4] customer="Dave", total=999.99
+  [5] customer="Frank", total=-75.25
+--- apply_count → rows=6 count=6 ---
+--- apply_select → 1 rows ---
+  [0] total=1375.24

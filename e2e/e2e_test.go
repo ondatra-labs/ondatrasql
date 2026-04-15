@@ -3510,10 +3510,10 @@ SELECT * FROM (VALUES
 	}
 	resp.Body.Close()
 
-	// Test entity-by-key → 501 Not Implemented
+	// Test entity-by-key → 200 OK (implemented)
 	resp, _ = http.Get(srv.URL + "/odata/mart_revenue(1)")
-	if resp.StatusCode != 501 {
-		t.Errorf("entity-by-key status = %d, want 501", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Errorf("entity-by-key status = %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
 

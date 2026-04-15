@@ -100,6 +100,10 @@ func toODataValue(v any, colType string) any {
 		}
 		return val.Format(time.RFC3339)
 
+	// Already-converted values (from $expand pre-conversion)
+	case json.Number:
+		return val
+
 	// String → JSON string
 	case string:
 		return val
@@ -108,9 +112,37 @@ func toODataValue(v any, colType string) any {
 	case []byte:
 		return string(val)
 
+	// Nested entities from $expand — already pre-converted by server, pass through
+	case []map[string]any:
+		return val
+	case map[string]any:
+		return val
+
 	default:
 		return fmt.Sprintf("%v", val)
 	}
+}
+
+// FormatSingleEntityResponse builds an OData JSON response for a single entity (no value array).
+func FormatSingleEntityResponse(baseURL, entity string, row map[string]any, schema EntitySchema) ([]byte, error) {
+	colTypes := make(map[string]string, len(schema.Columns))
+	for _, c := range schema.Columns {
+		colTypes[c.Name] = strings.ToUpper(c.Type)
+	}
+
+	m := map[string]interface{}{
+		"@odata.context": baseURL + "/odata/$metadata#" + entity + "/$entity",
+	}
+	for k, v := range row {
+		m[k] = toODataValue(v, colTypes[k])
+	}
+
+	return json.Marshal(m)
+}
+
+// convertODataValue is an exported wrapper for toODataValue.
+func convertODataValue(v any, colType string) any {
+	return toODataValue(v, colType)
 }
 
 // ServiceDocument is the OData service root response.

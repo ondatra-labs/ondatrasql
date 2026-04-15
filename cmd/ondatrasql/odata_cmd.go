@@ -60,6 +60,9 @@ func runOData(ctx context.Context, cfg *config.Config, port string) error {
 		return fmt.Errorf("discover schemas: %w", err)
 	}
 
+	// Discover navigation properties between exposed entities
+	odata.DiscoverNavigationProperties(schemas)
+
 	addr := "127.0.0.1:" + port
 	baseURL := "http://" + addr
 

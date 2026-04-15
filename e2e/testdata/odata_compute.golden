@@ -1,0 +1,13 @@
+--- basic → 2 rows ---
+  has_doubled: true
+--- select_without_alias → 6 rows ---
+  has_doubled: false
+--- filter_alias_select_other → 2 rows ---
+  [0] customer="Bob"
+  [1] customer="Dave"
+--- select_with_alias → 6 rows ---
+  has_doubled: true
+--- multiple_aliases → 1 rows ---
+  has_doubled: true has_plus_ten: true
+--- count_with_compute: 2 ---
+--- alias_collision: true ---

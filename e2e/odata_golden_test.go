@@ -470,3 +470,328 @@ func TestE2E_OData_Headers(t *testing.T) {
 
 	assertGolden(t, "odata_headers", snap)
 }
+
+// TestE2E_OData_AdvancedFilter tests string/date/math functions, arithmetic, in operator.
+func TestE2E_OData_AdvancedFilter(t *testing.T) {
+	url, _ := odataSetup(t)
+	snap := newSnapshot()
+
+	tests := []struct {
+		label string
+		query string
+	}{
+		// String functions
+		{"contains", "$filter=contains(customer,'Ali')"},
+		{"startswith", "$filter=startswith(customer,'Bo')"},
+		{"endswith", "$filter=endswith(customer,'ol')"},
+		{"tolower", "$filter=tolower(customer) eq 'alice'"},
+		{"toupper", "$filter=toupper(customer) eq 'ALICE'"},
+		{"length", "$filter=length(customer) gt 4"},
+		{"trim", "$filter=trim(customer) eq 'Carol'"},
+		{"indexof", "$filter=indexof(customer,'ob') gt 0"},
+		{"substring", "$filter=substring(customer,0,3) eq 'Ali'"},
+		{"concat", "$filter=concat(customer,'!') eq 'Carol!'"},
+		{"nested_contains_tolower", "$filter=contains(tolower(customer),'alice')"},
+
+		// Date functions
+		{"year", "$filter=year(order_date) eq 2026"},
+		{"month", "$filter=month(order_date) eq 1"},
+		{"day", "$filter=day(order_date) eq 1"},
+
+		// Math functions
+		{"round", "$filter=round(amount) eq 150"},
+		{"floor", "$filter=floor(amount) eq 250"},
+		{"ceiling", "$filter=ceiling(amount) eq 251"},
+
+		// Arithmetic
+		{"add", "$filter=amount add 50 gt 1000"},
+		{"sub", "$filter=amount sub 100 gt 100"},
+		{"mul", "$filter=amount mul 2 gt 500"},
+
+		// In operator
+		{"in", "$filter=customer in ('Alice','Carol')"},
+
+		// Combined
+		{"func_and_arith", "$filter=length(customer) add 1 gt 5"},
+	}
+
+	for _, tt := range tests {
+		body := odataGet(t, url+"/odata/mart_revenue?"+tt.query)
+		var resp odata.ODataResponse
+		json.Unmarshal([]byte(body), &resp)
+		snap.addLine(fmt.Sprintf("--- %s → %d rows ---", tt.label, len(resp.Value)))
+		snap.addLine(formatJSONRows(body))
+	}
+
+	assertGolden(t, "odata_advanced_filter", snap)
+}
+
+// TestE2E_OData_Compute tests $compute combinations.
+func TestE2E_OData_Compute(t *testing.T) {
+	url, _ := odataSetup(t)
+	snap := newSnapshot()
+
+	// Basic compute
+	body := odataGet(t, url+"/odata/mart_revenue?$compute=amount%20mul%202%20as%20doubled&$top=2")
+	var resp odata.ODataResponse
+	json.Unmarshal([]byte(body), &resp)
+	snap.addLine(fmt.Sprintf("--- basic → %d rows ---", len(resp.Value)))
+	if len(resp.Value) > 0 {
+		snap.addLine(fmt.Sprintf("  has_doubled: %v", resp.Value[0]["doubled"] != nil))
+	}
+
+	// Compute + $select (only customer, doubled excluded from output)
+	body = odataGet(t, url+"/odata/mart_revenue?$compute=amount%20mul%202%20as%20doubled&$select=customer")
+	var selectResp2 odata.ODataResponse
+	json.Unmarshal([]byte(body), &selectResp2)
+	resp = selectResp2
+	snap.addLine(fmt.Sprintf("--- select_without_alias → %d rows ---", len(resp.Value)))
+	if len(resp.Value) > 0 {
+		_, hasDoubled := resp.Value[0]["doubled"]
+		snap.addLine(fmt.Sprintf("  has_doubled: %v", hasDoubled))
+	}
+
+	// Compute + $filter on alias + $select without alias
+	body = odataGet(t, url+"/odata/mart_revenue?$compute=amount%20mul%202%20as%20doubled&$filter=doubled%20gt%20400&$select=customer")
+	var filterResp odata.ODataResponse
+	json.Unmarshal([]byte(body), &filterResp)
+	snap.addLine(fmt.Sprintf("--- filter_alias_select_other → %d rows ---", len(filterResp.Value)))
+	snap.addLine(formatJSONRows(body))
+
+	// Compute + $select including alias
+	body = odataGet(t, url+"/odata/mart_revenue?$compute=amount%20mul%202%20as%20doubled&$select=customer,doubled")
+	var withAliasResp odata.ODataResponse
+	json.Unmarshal([]byte(body), &withAliasResp)
+	snap.addLine(fmt.Sprintf("--- select_with_alias → %d rows ---", len(withAliasResp.Value)))
+	if len(withAliasResp.Value) > 0 {
+		_, hasDoubled := withAliasResp.Value[0]["doubled"]
+		snap.addLine(fmt.Sprintf("  has_doubled: %v", hasDoubled))
+	}
+
+	// Multiple compute aliases
+	body = odataGet(t, url+"/odata/mart_revenue?$compute=amount%20mul%202%20as%20doubled,amount%20add%2010%20as%20plus_ten&$top=1")
+	var multiResp odata.ODataResponse
+	json.Unmarshal([]byte(body), &multiResp)
+	snap.addLine(fmt.Sprintf("--- multiple_aliases → %d rows ---", len(multiResp.Value)))
+	if len(multiResp.Value) > 0 {
+		_, d := multiResp.Value[0]["doubled"]
+		_, p := multiResp.Value[0]["plus_ten"]
+		snap.addLine(fmt.Sprintf("  has_doubled: %v has_plus_ten: %v", d, p))
+	}
+
+	// /$count with compute + filter on alias
+	countBody := odataGet(t, url+"/odata/mart_revenue/$count?$compute=amount%20mul%202%20as%20doubled&$filter=doubled%20gt%20400")
+	snap.addLine(fmt.Sprintf("--- count_with_compute: %s ---", strings.TrimSpace(countBody)))
+
+	// Compute alias collision
+	body = odataGet(t, url+"/odata/mart_revenue?$compute=amount%20mul%202%20as%20customer")
+	snap.addLine(fmt.Sprintf("--- alias_collision: %v ---", strings.Contains(body, "error")))
+
+	assertGolden(t, "odata_compute", snap)
+}
+
+// TestE2E_OData_Search tests $search full-text search.
+func TestE2E_OData_Search(t *testing.T) {
+	url, _ := odataSetup(t)
+	snap := newSnapshot()
+
+	tests := []struct {
+		label  string
+		search string
+	}{
+		{"match_name", "Alice"},
+		{"match_tier", "Premium"},
+		{"no_match", "zzzzz"},
+		{"empty_search", ""},
+	}
+
+	for _, tt := range tests {
+		q := ""
+		if tt.search != "" {
+			q = "?$search=" + tt.search
+		}
+		body := odataGet(t, url+"/odata/mart_customers"+q)
+		var resp odata.ODataResponse
+		json.Unmarshal([]byte(body), &resp)
+		snap.addLine(fmt.Sprintf("--- %s → %d rows ---", tt.label, len(resp.Value)))
+	}
+
+	assertGolden(t, "odata_search", snap)
+}
+
+// TestE2E_OData_Apply tests $apply aggregation.
+func TestE2E_OData_Apply(t *testing.T) {
+	url, _ := odataSetup(t)
+	snap := newSnapshot()
+
+	tests := []struct {
+		label string
+		apply string
+	}{
+		{"sum", "aggregate(amount with sum as total)"},
+		{"avg", "aggregate(amount with avg as avg_amount)"},
+		{"min", "aggregate(amount with min as min_amount)"},
+		{"max", "aggregate(amount with max as max_amount)"},
+		{"count", "aggregate($count as total)"},
+		{"groupby_sum", "groupby((customer),aggregate(amount with sum as total))&$orderby=customer asc"},
+	}
+
+	for _, tt := range tests {
+		body := odataGet(t, url+"/odata/mart_revenue?$apply="+strings.ReplaceAll(tt.apply, " ", "%20"))
+		var resp odata.ODataResponse
+		json.Unmarshal([]byte(body), &resp)
+		snap.addLine(fmt.Sprintf("--- %s → %d rows ---", tt.label, len(resp.Value)))
+		snap.addLine(formatJSONRows(body))
+	}
+
+	// $apply + $count=true
+	countBody := odataGet(t, url+"/odata/mart_revenue?$apply="+strings.ReplaceAll("groupby((customer),aggregate(amount with sum as total))", " ", "%20")+"&$count=true")
+	var countResp odata.ODataResponse
+	json.Unmarshal([]byte(countBody), &countResp)
+	countVal := 0
+	if countResp.Count != nil {
+		countVal = *countResp.Count
+	}
+	snap.addLine(fmt.Sprintf("--- apply_count → rows=%d count=%d ---", len(countResp.Value), countVal))
+
+	// $apply + $select
+	selectBody := odataGet(t, url+"/odata/mart_revenue?$apply="+strings.ReplaceAll("aggregate(amount with sum as total)", " ", "%20")+"&$select=total")
+	var selectResp odata.ODataResponse
+	json.Unmarshal([]byte(selectBody), &selectResp)
+	snap.addLine(fmt.Sprintf("--- apply_select → %d rows ---", len(selectResp.Value)))
+	snap.addLine(formatJSONRows(selectBody))
+
+	assertGolden(t, "odata_apply", snap)
+}
+
+// TestE2E_OData_Batch tests $batch JSON batch requests.
+func TestE2E_OData_Batch(t *testing.T) {
+	url, _ := odataSetup(t)
+	snap := newSnapshot()
+
+	batchBody := `{"requests":[
+		{"id":"1","method":"GET","url":"mart_revenue?$top=2"},
+		{"id":"2","method":"GET","url":"mart_customers/$count"},
+		{"id":"3","method":"GET","url":"nonexistent"}
+	]}`
+
+	resp, err := http.Post(url+"/odata/$batch", "application/json", strings.NewReader(batchBody))
+	if err != nil {
+		t.Fatalf("POST $batch: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var batch struct {
+		Responses []struct {
+			ID     string          `json:"id"`
+			Status int             `json:"status"`
+			Body   json.RawMessage `json:"body"`
+		} `json:"responses"`
+	}
+	json.Unmarshal(body, &batch)
+
+	snap.addLine(fmt.Sprintf("batch_responses: %d", len(batch.Responses)))
+	for _, r := range batch.Responses {
+		snap.addLine(fmt.Sprintf("  id=%s status=%d", r.ID, r.Status))
+	}
+
+	assertGolden(t, "odata_batch", snap)
+}
+
+// TestE2E_OData_Expand tests $expand navigation properties.
+func TestE2E_OData_Expand(t *testing.T) {
+	url, _ := odataExpandSetup(t)
+	snap := newSnapshot()
+
+	// Basic expand
+	body := odataGet(t, url+"/odata/raw_parents?$expand=raw_children")
+	var resp odata.ODataResponse
+	json.Unmarshal([]byte(body), &resp)
+	snap.addLine(fmt.Sprintf("expand_rows: %d", len(resp.Value)))
+	for i, row := range resp.Value {
+		children, _ := json.Marshal(row["raw_children"])
+		snap.addLine(fmt.Sprintf("  [%d] name=%v children=%s", i, row["name"], string(children)))
+	}
+
+	// Expand with $select (FK not in select — should auto-inject)
+	body = odataGet(t, url+"/odata/raw_parents?$select=name&$expand=raw_children")
+	json.Unmarshal([]byte(body), &resp)
+	snap.addLine(fmt.Sprintf("expand_select_rows: %d", len(resp.Value)))
+	for i, row := range resp.Value {
+		children, _ := json.Marshal(row["raw_children"])
+		hasParentID := row["parent_id"] != nil
+		snap.addLine(fmt.Sprintf("  [%d] name=%v has_fk=%v children=%s", i, row["name"], hasParentID, string(children)))
+	}
+
+	// Many-to-one: child → parent
+	body = odataGet(t, url+"/odata/raw_children?$expand=raw_parents")
+	json.Unmarshal([]byte(body), &resp)
+	snap.addLine(fmt.Sprintf("expand_many_to_one: %d", len(resp.Value)))
+	for i, row := range resp.Value {
+		parent, _ := json.Marshal(row["raw_parents"])
+		snap.addLine(fmt.Sprintf("  [%d] child_id=%v parent=%s", i, row["child_id"], string(parent)))
+	}
+
+	// Expand on unknown nav
+	status := odataGetStatus(t, url+"/odata/raw_parents?$expand=fake")
+	snap.addLine(fmt.Sprintf("expand_unknown: %d", status))
+
+	assertGolden(t, "odata_expand", snap)
+}
+
+// odataExpandSetup creates two related @expose models for $expand testing.
+func odataExpandSetup(t *testing.T) (string, *testutil.Project) {
+	t.Helper()
+	p := testutil.NewProject(t)
+
+	p.AddModel("raw/parents.sql", `-- @kind: table
+-- @expose parent_id
+SELECT * FROM (VALUES (1, 'Alice'), (2, 'Bob')) AS t(parent_id, name)
+`)
+	p.AddModel("raw/children.sql", `-- @kind: table
+-- @expose child_id
+SELECT * FROM (VALUES (101, 1, 'X'), (102, 1, 'Y'), (103, 2, 'Z')) AS t(child_id, parent_id, name)
+`)
+
+	runModel(t, p, "raw/parents.sql")
+	runModel(t, p, "raw/children.sql")
+
+	schemas, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "raw.parents", KeyColumn: "parent_id"},
+		{Target: "raw.children", KeyColumn: "child_id"},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverSchemas: %v", err)
+	}
+
+	odata.DiscoverNavigationProperties(schemas)
+
+	handler := odata.NewServer(p.Sess, schemas, "http://testhost")
+	srv := newTestServer(t, handler)
+	t.Cleanup(func() { srv.Close() })
+
+	return srv.URL, p
+}
+
+// TestE2E_OData_SingleEntity tests entity-by-key access.
+func TestE2E_OData_SingleEntity(t *testing.T) {
+	url, _ := odataSetup(t)
+	snap := newSnapshot()
+
+	// Valid key
+	body := odataGet(t, url+"/odata/mart_revenue(1)")
+	var entity map[string]any
+	json.Unmarshal([]byte(body), &entity)
+	snap.addLine(fmt.Sprintf("entity_1: customer=%v", entity["customer"]))
+
+	// Not found
+	status := odataGetStatus(t, url+"/odata/mart_revenue(99)")
+	snap.addLine(fmt.Sprintf("entity_99: %d", status))
+
+	// No key on entity
+	status = odataGetStatus(t, url+"/odata/mart_customers(1)")
+	snap.addLine(fmt.Sprintf("entity_no_key: %d", status))
+
+	assertGolden(t, "odata_single_entity", snap)
+}

@@ -1,0 +1,11 @@
+expand_rows: 2
+  [0] name=Alice children=[{"child_id":101,"name":"X","parent_id":1},{"child_id":102,"name":"Y","parent_id":1}]
+  [1] name=Bob children=[{"child_id":103,"name":"Z","parent_id":2}]
+expand_select_rows: 2
+  [0] name=Alice has_fk=true children=[{"child_id":101,"name":"X","parent_id":1},{"child_id":102,"name":"Y","parent_id":1}]
+  [1] name=Bob has_fk=true children=[{"child_id":103,"name":"Z","parent_id":2}]
+expand_many_to_one: 3
+  [0] child_id=101 parent={"name":"Alice","parent_id":1}
+  [1] child_id=102 parent={"name":"Alice","parent_id":1}
+  [2] child_id=103 parent={"name":"Bob","parent_id":2}
+expand_unknown: 400
