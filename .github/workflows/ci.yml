@@ -61,7 +61,7 @@ jobs:
         env:
           CGO_ENABLED: 1
           CC: gcc
-        run: go test -p 1 -tags "integration e2e" ./...
+        run: go test -p 1 -race -timeout 30m -tags "integration e2e" ./...
 
   # ----------------------------------------------------------------------
   # Release jobs — only run on tag pushes (v*) and ONLY after every test

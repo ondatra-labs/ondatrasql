@@ -147,3 +147,108 @@ func TestExpandFKValue_UnknownTypeSafe(t *testing.T) {
 		t.Error("unknown types should be wrapped in quotes")
 	}
 }
+
+// --- $filter: numeric literal validation (code-scanning #3, #4) ---
+
+func TestBuildQuery_Filter_RejectsInvalidNumericLiteral(t *testing.T) {
+	t.Parallel()
+	entity := EntitySchema{
+		Schema: "mart", Table: "users", ODataName: "mart_users",
+		Columns: []ColumnSchema{
+			{Name: "id", EdmType: "Edm.Int64"},
+			{Name: "amount", EdmType: "Edm.Double"},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		filter string
+	}{
+		{"sql injection via int", "id eq 1; DROP TABLE users--"},
+		{"sql injection via float", "amount gt 1.0; DROP TABLE users--"},
+		{"string in int position", "id eq abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := url.Values{"$filter": {tt.filter}}
+			_, err := BuildQuery(entity, params)
+			if err == nil {
+				t.Errorf("expected error for filter %q, got nil", tt.filter)
+			}
+		})
+	}
+}
+
+func TestBuildQuery_Filter_AcceptsValidNumericLiteral(t *testing.T) {
+	t.Parallel()
+	entity := EntitySchema{
+		Schema: "mart", Table: "users", ODataName: "mart_users",
+		Columns: []ColumnSchema{
+			{Name: "id", EdmType: "Edm.Int64"},
+			{Name: "amount", EdmType: "Edm.Double"},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		filter string
+	}{
+		{"integer eq", "id eq 42"},
+		{"float gt", "amount gt 9.99"},
+		{"negative int", "id eq -1"},
+		{"negative float", "amount lt -0.5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := url.Values{"$filter": {tt.filter}}
+			sql, err := BuildQuery(entity, params)
+			if err != nil {
+				t.Errorf("filter %q: unexpected error: %v", tt.filter, err)
+			}
+			if sql == "" {
+				t.Errorf("filter %q: empty SQL", tt.filter)
+			}
+		})
+	}
+}
+
+// --- $filter contains/startswith/endswith: LIKE wildcard escaping ---
+
+func TestBuildQuery_Filter_ContainsEscapesWildcards(t *testing.T) {
+	t.Parallel()
+	entity := EntitySchema{
+		Schema: "mart", Table: "users", ODataName: "mart_users",
+		Columns: []ColumnSchema{
+			{Name: "name", EdmType: "Edm.String"},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		filter string
+		must   string // SQL must contain this
+		mustNot string // SQL must NOT contain this
+	}{
+		{"percent in contains", "contains(name, '100%')", `\%`, ""},
+		{"underscore in contains", "contains(name, 'a_b')", `\_`, ""},
+		{"percent in startswith", "startswith(name, '100%')", `\%`, ""},
+		{"percent in endswith", "endswith(name, '100%')", `\%`, ""},
+		{"no wildcards passes through", "contains(name, 'hello')", "hello", ""},
+		{"backslash escaped", "contains(name, 'a\\b')", `\\`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := url.Values{"$filter": {tt.filter}}
+			sql, err := BuildQuery(entity, params)
+			if err != nil {
+				t.Fatalf("filter %q: %v", tt.filter, err)
+			}
+			if tt.must != "" && !strings.Contains(sql, tt.must) {
+				t.Errorf("filter %q: SQL %q should contain %q", tt.filter, sql, tt.must)
+			}
+			if tt.mustNot != "" && strings.Contains(sql, tt.mustNot) {
+				t.Errorf("filter %q: SQL %q should NOT contain %q", tt.filter, sql, tt.mustNot)
+			}
+		})
+	}
+}

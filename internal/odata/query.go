@@ -518,7 +518,16 @@ func filterNodeToSQL(node *godata.ParseNode, validCols map[string]bool) (string,
 		val = strings.ReplaceAll(val, "'", "''")
 		return "'" + val + "'", nil
 
-	case godata.ExpressionTokenInteger, godata.ExpressionTokenFloat:
+	case godata.ExpressionTokenInteger:
+		if _, err := strconv.ParseInt(node.Token.Value, 10, 64); err != nil {
+			return "", fmt.Errorf("invalid integer in $filter: %s", node.Token.Value)
+		}
+		return node.Token.Value, nil
+
+	case godata.ExpressionTokenFloat:
+		if _, err := strconv.ParseFloat(node.Token.Value, 64); err != nil {
+			return "", fmt.Errorf("invalid float in $filter: %s", node.Token.Value)
+		}
 		return node.Token.Value, nil
 
 	case godata.ExpressionTokenBoolean:
@@ -617,17 +626,17 @@ func funcToSQL(node *godata.ParseNode, validCols map[string]bool) (string, error
 		if len(args) != 2 {
 			return "", fmt.Errorf("contains() requires 2 arguments")
 		}
-		return fmt.Sprintf("(%s ILIKE '%%' || %s || '%%')", args[0], args[1]), nil
+		return fmt.Sprintf("(%s ILIKE '%%' || %s || '%%' ESCAPE '\\')", args[0], escapeLikeArg(args[1])), nil
 	case "startswith":
 		if len(args) != 2 {
 			return "", fmt.Errorf("startswith() requires 2 arguments")
 		}
-		return fmt.Sprintf("(%s LIKE %s || '%%')", args[0], args[1]), nil
+		return fmt.Sprintf("(%s LIKE %s || '%%' ESCAPE '\\')", args[0], escapeLikeArg(args[1])), nil
 	case "endswith":
 		if len(args) != 2 {
 			return "", fmt.Errorf("endswith() requires 2 arguments")
 		}
-		return fmt.Sprintf("(%s LIKE '%%' || %s)", args[0], args[1]), nil
+		return fmt.Sprintf("(%s LIKE '%%' || %s ESCAPE '\\')", args[0], escapeLikeArg(args[1])), nil
 	case "tolower":
 		if len(args) != 1 {
 			return "", fmt.Errorf("tolower() requires 1 argument")
@@ -1138,6 +1147,20 @@ func odataOpToSQL(op string) string {
 
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// escapeLikeArg escapes LIKE/ILIKE wildcards (% and _) inside a SQL string literal.
+// Input is a SQL-quoted string like 'foo%bar'. Returns 'foo\%bar'.
+// Column references (quoted identifiers) pass through unchanged.
+func escapeLikeArg(sqlArg string) string {
+	if len(sqlArg) < 2 || sqlArg[0] != '\'' || sqlArg[len(sqlArg)-1] != '\'' {
+		return sqlArg // not a string literal (e.g. column reference) — pass through
+	}
+	inner := sqlArg[1 : len(sqlArg)-1]
+	inner = strings.ReplaceAll(inner, `\`, `\\`)
+	inner = strings.ReplaceAll(inner, `%`, `\%`)
+	inner = strings.ReplaceAll(inner, `_`, `\_`)
+	return "'" + inner + "'"
 }
 
 func validColumns(entity EntitySchema) map[string]bool {
