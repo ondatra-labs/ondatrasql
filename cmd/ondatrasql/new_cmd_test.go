@@ -37,19 +37,6 @@ func TestRunNew_TwoParts_SQL(t *testing.T) {
 	}
 }
 
-func TestRunNew_TwoParts_Star(t *testing.T) {
-	t.Parallel()
-	cfg := testConfig(t)
-
-	if err := runNew(cfg, "raw.api_data.star"); err != nil {
-		t.Fatal(err)
-	}
-
-	path := filepath.Join(cfg.ModelsPath, "raw", "api_data.star")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected file at %s", path)
-	}
-}
 
 func TestRunNew_ThreeParts_SQL(t *testing.T) {
 	t.Parallel()
@@ -65,19 +52,6 @@ func TestRunNew_ThreeParts_SQL(t *testing.T) {
 	}
 }
 
-func TestRunNew_ThreeParts_Star(t *testing.T) {
-	t.Parallel()
-	cfg := testConfig(t)
-
-	if err := runNew(cfg, "raw.api.orders.star"); err != nil {
-		t.Fatal(err)
-	}
-
-	path := filepath.Join(cfg.ModelsPath, "raw", "api", "orders.star")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected file at %s", path)
-	}
-}
 
 func TestRunNew_FourParts(t *testing.T) {
 	t.Parallel()
@@ -184,17 +158,6 @@ func TestRunNew_UppercaseExtension_SQL(t *testing.T) {
 	}
 }
 
-func TestRunNew_MixedCaseExtension_Star(t *testing.T) {
-	t.Parallel()
-	cfg := testConfig(t)
-	if err := runNew(cfg, "raw.api_data.Star"); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(cfg.ModelsPath, "raw", "api_data.star")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected file at %s", path)
-	}
-}
 
 func TestRunNew_ErrorUnsupportedExtension(t *testing.T) {
 	t.Parallel()
@@ -269,19 +232,3 @@ func TestGenerateTemplate(t *testing.T) {
 	}
 }
 
-func TestGenerateStarlarkTemplate(t *testing.T) {
-	t.Parallel()
-	got := generateStarlarkTemplate("raw", "api_data")
-	if !strings.Contains(got, "raw.api_data") {
-		t.Errorf("template missing target name, got:\n%s", got)
-	}
-	if !strings.Contains(got, "@kind: append") {
-		t.Errorf("template missing @kind directive, got:\n%s", got)
-	}
-	if !strings.Contains(got, "http.get") {
-		t.Errorf("template missing http.get call, got:\n%s", got)
-	}
-	if !strings.Contains(got, "save.row") {
-		t.Errorf("template missing save.row call, got:\n%s", got)
-	}
-}

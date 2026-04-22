@@ -1,0 +1,1 @@
+/home/marcus/go/pkg/mod/github.com/duckdb/duckdb-go-bindings@v0.10502.0/include/duckdb.h

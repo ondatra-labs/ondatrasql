@@ -1,0 +1,4 @@
+rows_received: 2
+temp_table_rows: 2
+  email: alice@example.com
+  email: bob@example.com

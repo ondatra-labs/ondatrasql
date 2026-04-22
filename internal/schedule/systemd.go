@@ -60,16 +60,17 @@ func (s *systemdBackend) Install(projectName, projectDir, cronExpr, binaryPath s
 	servicePath := filepath.Join(unitDir, unit+".service")
 	timerPath := filepath.Join(unitDir, unit+".timer")
 
-	service := fmt.Sprintf(`[Unit]
-Description=OndatraSQL run — %s
+	// Sanitize project name (no newlines that could inject directives)
+	safeName := strings.ReplaceAll(projectName, "\n", " ")
 
-[Service]
-Type=oneshot
-WorkingDirectory=%s
-ExecStart="%s" run
-StandardOutput=journal
-StandardError=journal
-`, projectName, projectDir, binaryPath)
+	// Build service unit file. Use string concatenation instead of fmt.Sprintf
+	// because systemd requires % to be escaped as %%, but Sprintf would
+	// consume the %% escaping.
+	service := "[Unit]\nDescription=OndatraSQL run — " + safeName + "\n\n" +
+		"[Service]\nType=oneshot\n" +
+		"WorkingDirectory=" + systemdEscape(projectDir) + "\n" +
+		"ExecStart=" + systemdEscape(binaryPath) + " run\n" +
+		"StandardOutput=journal\nStandardError=journal\n"
 
 	timer := fmt.Sprintf(`[Unit]
 Description=OndatraSQL schedule — %s (%s)
@@ -197,4 +198,10 @@ func sanitize(name string) string {
 		return "project"
 	}
 	return b.String()
+}
+
+// systemdEscape escapes % as %% for systemd unit files.
+// systemd interprets % followed by a letter as a specifier (e.g. %n, %i).
+func systemdEscape(s string) string {
+	return strings.ReplaceAll(s, "%", "%%")
 }

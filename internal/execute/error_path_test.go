@@ -86,7 +86,6 @@ func TestRapid_Run_ClosedSession_NeverPanics(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		runner := NewRunner(sess, ModeRun, "test-rapid")
@@ -105,7 +104,6 @@ func TestRapid_ComputeSingleRunType_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		model := genErrModel().Draw(rt, "model")
@@ -123,7 +121,6 @@ func TestRapid_ComputeRunTypeDecisions_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		n := rapid.IntRange(1, 5).Draw(rt, "n_models")
@@ -145,7 +142,6 @@ func TestRapid_Materialize_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		runner := NewRunner(sess, ModeRun, "test-rapid")
@@ -165,7 +161,6 @@ func TestRapid_MaterializeSCD2_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		runner := NewRunner(sess, ModeRun, "test-rapid")
@@ -187,7 +182,6 @@ func TestRapid_MaterializePartition_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		runner := NewRunner(sess, ModeRun, "test-rapid")
@@ -209,7 +203,6 @@ func TestRapid_LoadExtension_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		runner := NewRunner(sess, ModeRun, "test-rapid")
@@ -236,7 +229,6 @@ func TestRapid_ExtractLineage_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		sess := mustClosedSession()
 		runner := NewRunner(sess, ModeRun, "test-rapid")

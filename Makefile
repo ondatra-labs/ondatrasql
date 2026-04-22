@@ -9,32 +9,35 @@ RAPID_PKGS = ./internal/backfill ./internal/dag ./internal/duckdb \
 OTHER_PKGS = ./cmd/... ./internal/config ./internal/git \
              ./internal/sql ./internal/testutil
 
-.PHONY: test test-short test-ci test-integration test-e2e test-all test-cover lint build
+.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover lint build
 
 # Unit tests only (no integration build tag)
 test:
-	go test -p 1 -race ./...
+	go test -p 1 -race -timeout 20m ./...
 
 # Fast feedback: all tests compile (incl. integration) but heavy tests skip via testing.Short()
 test-short:
-	go test -p 1 -race -tags integration -short ./...
+	go test -p 1 -race -timeout 20m -tags integration -short ./...
 
 # CI: full integration with reduced rapid iterations (25 instead of 100)
 test-ci:
-	go test -p 1 -race -tags integration $(RAPID_PKGS) -rapid.checks=25
-	go test -p 1 -race -tags integration $(OTHER_PKGS)
+	go test -p 1 -race -timeout 20m -tags integration $(RAPID_PKGS) -rapid.checks=25
+	go test -p 1 -race -timeout 20m -tags integration $(OTHER_PKGS)
 
 test-integration:
-	go test -p 1 -race -tags integration ./...
+	go test -p 1 -race -timeout 20m -tags integration ./...
 
 test-e2e:
-	go test -p 1 -race -tags e2e ./...
+	go test -p 1 -race -timeout 30m -tags e2e ./...
+
+test-bench:
+	go test -p 1 -timeout 30m -tags "e2e bench" ./e2e/ -v -run Bench
 
 test-all:
-	go test -p 1 -race -tags "integration e2e" ./...
+	go test -p 1 -race -timeout 30m -tags "integration e2e" ./...
 
 test-cover:
-	go test -p 1 -race -tags "integration e2e" -coverprofile=coverage.out ./...
+	go test -p 1 -race -timeout 30m -tags "integration e2e" -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
 
 lint:

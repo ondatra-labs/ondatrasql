@@ -118,8 +118,12 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	var incrState *backfill.IncrementalState
 	if model.Incremental != "" {
 		stepStart = time.Now()
-		incrState, _ = backfill.GetIncrementalState(
+		var incrErr error
+		incrState, incrErr = backfill.GetIncrementalState(
 			r.sess, model.Target, model.Incremental, model.IncrementalInitial)
+		if incrErr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("incremental state: %v", incrErr))
+		}
 		r.trace(result, "incremental.get_state", stepStart, "ok")
 
 		// Force is_backfill when the runner decided on backfill (e.g. hash changed).
@@ -147,13 +151,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	stepStart = time.Now()
 	var scriptResult *script.Result
-	if model.Source != "" {
-		// YAML model: load source function and call it directly
-		scriptResult, err = rt.RunSource(ctx, model.Target, model.Source, model.SourceConfig)
-	} else {
-		// Starlark model: execute script code
-		scriptResult, err = rt.Run(ctx, model.Target, model.SQL)
-	}
+	scriptResult, err = rt.Run(ctx, model.Target, model.SQL)
 	if err != nil {
 		// Check if this is a clean abort (no message) — early exit, not an error
 		var abortErr *script.AbortError
@@ -188,14 +186,14 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	tmpTable := scriptResult.TempTable
 
-	// Deduplicate temp table by unique_key for kinds that may have Badger duplicates.
+	// Deduplicate temp table by key column for kinds that may have Badger duplicates.
 	// When a script crashes after save.row() but before materialization, Badger retains
 	// the rows. On the next run, the script produces the same rows again, resulting in
-	// duplicates in the temp table. Dedup keeps only the last row per unique_key.
+	// duplicates in the temp table. Dedup keeps only the last row per key column.
 	if model.UniqueKey != "" {
 		switch model.Kind {
 		case "merge", "tracked", "scd2", "partition":
-			// Handle composite unique_key (comma-separated, used by partition kind)
+			// Handle composite key (comma-separated, used by partition kind)
 			var groupByCols string
 			if strings.Contains(model.UniqueKey, ",") {
 				var parts []string

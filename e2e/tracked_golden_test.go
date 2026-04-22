@@ -201,26 +201,3 @@ SELECT * FROM (VALUES (1), (2), (3)) AS t(id)
 	assertGolden(t, "tracked_unique_key_only", snap)
 }
 
-func TestE2E_TrackedKind_Starlark(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/script_tracked.star", `# @kind: tracked
-# @unique_key: origin
-
-save.row({"origin": "api", "name": "Alice", "score": 100})
-save.row({"origin": "api", "name": "Bob", "score": 200})
-save.row({"origin": "file", "name": "Carol", "score": 300})
-`)
-
-	r1 := runModel(t, p, "raw/script_tracked.star")
-	r2 := runModel(t, p, "raw/script_tracked.star")
-
-	snap := newSnapshot()
-	snap.addLine("--- run 1 (backfill) ---")
-	snap.addResult(r1)
-	snap.addLine("--- run 2 (skip) ---")
-	snap.addResult(r2)
-	snap.addQuery(p.Sess, "row_count", "SELECT COUNT(*) FROM raw.script_tracked")
-	snap.addQuery(p.Sess, "has_hash", "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='script_tracked' AND column_name='_content_hash'")
-	assertGolden(t, "tracked_starlark", snap)
-}

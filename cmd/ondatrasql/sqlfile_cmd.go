@@ -169,28 +169,76 @@ func splitStatements(sql string) []string {
 	var statements []string
 	var current strings.Builder
 	inString := false
-	stringChar := rune(0)
+	stringChar := byte(0)
+	inLineComment := false
+	inBlockComment := false
 
-	for _, r := range sql {
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+
+		// Block comment
+		if inBlockComment {
+			current.WriteByte(ch)
+			if ch == '*' && i+1 < len(sql) && sql[i+1] == '/' {
+				current.WriteByte(sql[i+1])
+				i++
+				inBlockComment = false
+			}
+			continue
+		}
+
+		// Line comment
+		if inLineComment {
+			current.WriteByte(ch)
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		// String/identifier literal
 		if inString {
-			current.WriteRune(r)
-			if r == stringChar {
-				inString = false
-			}
-		} else {
-			if r == '\'' || r == '"' {
-				inString = true
-				stringChar = r
-				current.WriteRune(r)
-			} else if r == ';' {
-				stmt := strings.TrimSpace(current.String())
-				if stmt != "" {
-					statements = append(statements, stmt)
+			current.WriteByte(ch)
+			if ch == stringChar {
+				if i+1 < len(sql) && sql[i+1] == stringChar {
+					current.WriteByte(sql[i+1])
+					i++ // escaped quote
+				} else {
+					inString = false
 				}
-				current.Reset()
-			} else {
-				current.WriteRune(r)
 			}
+			continue
+		}
+
+		// Start of line comment
+		if ch == '-' && i+1 < len(sql) && sql[i+1] == '-' {
+			inLineComment = true
+			current.WriteByte(ch)
+			continue
+		}
+
+		// Start of block comment
+		if ch == '/' && i+1 < len(sql) && sql[i+1] == '*' {
+			inBlockComment = true
+			current.WriteByte(ch)
+			current.WriteByte(sql[i+1])
+			i++
+			continue
+		}
+
+		// String or double-quoted identifier
+		if ch == '\'' || ch == '"' {
+			inString = true
+			stringChar = ch
+			current.WriteByte(ch)
+		} else if ch == ';' {
+			stmt := strings.TrimSpace(current.String())
+			if stmt != "" {
+				statements = append(statements, stmt)
+			}
+			current.Reset()
+		} else {
+			current.WriteByte(ch)
 		}
 	}
 

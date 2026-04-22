@@ -7,6 +7,7 @@ package collect
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,14 +90,25 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	var serverErr error
 	select {
-	case err := <-errCh:
-		return err
+	case serverErr = <-errCh:
+		// One server failed — shut down the other
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return s.Shutdown(shutdownCtx)
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	shutdownErr := s.Shutdown(shutdownCtx)
+
+	// Drain second error if available
+	select {
+	case err2 := <-errCh:
+		serverErr = errors.Join(serverErr, err2)
+	default:
+	}
+
+	return errors.Join(serverErr, shutdownErr)
 }
 
 // Shutdown gracefully shuts down both servers.

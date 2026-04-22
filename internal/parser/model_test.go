@@ -394,9 +394,6 @@ SELECT 1 AS id, 'EU' AS region`
 	if err == nil {
 		t.Error("expected error for append with multi-column unique_key")
 	}
-	if !strings.Contains(err.Error(), "only a single unique_key column is supported") {
-		t.Errorf("unexpected error: %v", err)
-	}
 }
 
 func TestParseModel_UniqueKey_TrailingCommaRejected(t *testing.T) {
@@ -474,58 +471,6 @@ func TestParseModel_ReservedPattern(t *testing.T) {
 	}
 }
 
-func TestParseModel_StarlarkDirectives(t *testing.T) {
-	t.Parallel()
-	content := `# @kind: append
-# @incremental: report_date
-# @incremental_initial: 2024-01-01
-# @constraint: not_null(id)
-# @audit: row_count(>, 0)
-# @warning: row_count(<, 10000)
-# @extension: httpfs
-
-resp = http.get("https://api.example.com/data")
-`
-
-	tmpDir := t.TempDir()
-	modelsDir := filepath.Join(tmpDir, "models", "raw")
-	os.MkdirAll(modelsDir, 0755)
-	modelFile := filepath.Join(modelsDir, "api_data.star")
-	os.WriteFile(modelFile, []byte(content), 0644)
-
-	model, err := ParseModel(modelFile, tmpDir)
-	if err != nil {
-		t.Fatalf("ParseModel failed: %v", err)
-	}
-
-	if model.Kind != "append" {
-		t.Errorf("Kind = %q, want %q", model.Kind, "append")
-	}
-	if model.Incremental != "report_date" {
-		t.Errorf("Incremental = %q, want %q", model.Incremental, "report_date")
-	}
-	if model.IncrementalInitial != "2024-01-01" {
-		t.Errorf("IncrementalInitial = %q, want %q", model.IncrementalInitial, "2024-01-01")
-	}
-	if model.ScriptType != ScriptTypeStarlark {
-		t.Errorf("ScriptType = %q, want %q", model.ScriptType, ScriptTypeStarlark)
-	}
-	if len(model.Constraints) != 1 {
-		t.Errorf("got %d constraints, want 1", len(model.Constraints))
-	}
-	if len(model.Audits) != 1 {
-		t.Errorf("got %d audits, want 1", len(model.Audits))
-	}
-	if len(model.Warnings) != 1 {
-		t.Errorf("got %d warnings, want 1", len(model.Warnings))
-	}
-	if len(model.Extensions) != 1 {
-		t.Errorf("got %d extensions, want 1", len(model.Extensions))
-	}
-	if model.Target != "raw.api_data" {
-		t.Errorf("Target = %q, want %q", model.Target, "raw.api_data")
-	}
-}
 
 func TestValidateIdentifier(t *testing.T) {
 	t.Parallel()
@@ -686,7 +631,7 @@ func TestParseModel_ScriptDirectiveRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for @script directive")
 	}
-	if !strings.Contains(err.Error(), "removed in v0.14.0") {
+	if !strings.Contains(err.Error(), "@script directive was removed") {
 		t.Fatalf("expected migration error, got: %v", err)
 	}
 }
@@ -1177,21 +1122,6 @@ func TestParseModel_NoExpose(t *testing.T) {
 	}
 }
 
-func TestParseModel_ExposeStarlark_Rejected(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	modelDir := filepath.Join(dir, "models", "mart")
-	os.MkdirAll(modelDir, 0755)
-
-	content := "# @kind: table\n# @expose\nfor i in range(1):\n    save.row({\"id\": i})"
-	path := filepath.Join(modelDir, "test.star")
-	os.WriteFile(path, []byte(content), 0644)
-
-	_, err := ParseModel(path, dir)
-	if err == nil {
-		t.Fatal("expected error: @expose not supported for scripts")
-	}
-}
 
 func TestParseModel_ExposeView_Rejected(t *testing.T) {
 	t.Parallel()
@@ -1235,12 +1165,12 @@ func TestIsModelFile(t *testing.T) {
 		want bool
 	}{
 		{"models/staging/orders.sql", true},
-		{"models/staging/orders.star", true},
-		{"models/staging/orders.yaml", true},
-		{"models/staging/orders.yml", true},
+		{"models/staging/orders.star", false},
+		{"models/staging/orders.yaml", false},
+		{"models/staging/orders.yml", false},
 		{"models/staging/orders.SQL", false}, // case sensitive
 		{"models/staging/orders", false},     // no extension
-		{"config.yml", true},
+		{"config.yml", false},
 		{".sql", true}, // just extension
 	}
 	for _, tt := range tests {

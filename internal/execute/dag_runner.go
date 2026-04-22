@@ -10,6 +10,7 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
@@ -41,14 +42,23 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	gitCommit, gitBranch, gitRepoURL string,
 	adminPort string,
 	projectDir string,
+	libReg *libregistry.Registry,
 	callback DAGCallback,
 ) (map[string]*Result, map[string]error) {
+
+	// Validate model + sink compatibility before any execution
+	if err := ValidateModelSinkCompat(sorted, libReg); err != nil {
+		errors := make(map[string]error)
+		errors["_validation"] = err
+		return nil, errors
+	}
 
 	cfgHash := backfill.ConfigHash(filepath.Join(projectDir, "config"))
 	decisions, _ := ComputeRunTypeDecisions(sess, sorted, cfgHash)
 
 	results := make(map[string]*Result, len(sorted))
 	errors := make(map[string]error, len(sorted))
+	failed := make(map[string]bool) // targets that failed or were skipped due to upstream failure
 
 	for _, model := range sorted {
 		// Check context cancellation
@@ -56,6 +66,24 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		case <-ctx.Done():
 			return results, errors
 		default:
+		}
+
+		// Skip if any upstream dependency failed
+		if hasFailedUpstream(model, dependents, failed) {
+			result := &Result{
+				Target:  model.Target,
+				Kind:    model.Kind,
+				RunType: "skip",
+			}
+			result.Warnings = append(result.Warnings, "skipped: upstream model failed")
+			results[model.Target] = result
+			failed[model.Target] = true
+			if callback != nil {
+				if !callback(model, result, nil) {
+					break
+				}
+			}
+			continue
 		}
 
 		runner := NewRunner(sess, ModeRun, dagRunID)
@@ -69,11 +97,15 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		if projectDir != "" {
 			runner.SetProjectDir(projectDir)
 		}
+		if libReg != nil {
+			runner.SetLibRegistry(libReg)
+		}
 
 		result, err := runner.Run(ctx, model)
 		results[model.Target] = result
 		if err != nil {
 			errors[model.Target] = err
+			failed[model.Target] = true
 		}
 
 		// Callback
@@ -97,4 +129,18 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	}
 
 	return results, errors
+}
+
+// hasFailedUpstream checks if any upstream dependency of this model has failed.
+// dependents maps target → its downstream models. We check if model.Target
+// appears as a downstream of any failed target.
+func hasFailedUpstream(model *parser.Model, dependents map[string][]string, failed map[string]bool) bool {
+	for failedTarget := range failed {
+		for _, dep := range dependents[failedTarget] {
+			if dep == model.Target {
+				return true
+			}
+		}
+	}
+	return false
 }

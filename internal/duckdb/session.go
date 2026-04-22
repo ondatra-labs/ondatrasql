@@ -184,6 +184,12 @@ func (s *Session) GetVersion() string {
 	return s.version
 }
 
+// SqlConn returns the underlying *sql.Conn for direct driver access.
+// Use sparingly — prefer Exec/Query for normal operations.
+func (s *Session) SqlConn() *sql.Conn {
+	return s.conn
+}
+
 // RawConn provides access to the underlying driver.Conn for low-level
 // operations like the Appender API. The callback runs under the session mutex.
 func (s *Session) RawConn(fn func(any) error) error {
@@ -708,12 +714,20 @@ func (s *Session) captureSandboxOrphansLocked() []string {
 //
 // Caller holds s.mu.
 func (s *Session) queryDataFilePathsLocked(alias string) ([]string, error) {
+	// Sanitize alias for use as part of system schema name
+	// (QuoteIdentifier can't be used here since it's part of __ducklake_metadata_<alias>)
+	safeAlias := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
+		}
+		return '_'
+	}, alias)
 	q := fmt.Sprintf(`
 		SELECT sch.schema_name || '/' || tbl.table_name || '/' || df.path AS rel_path
 		FROM __ducklake_metadata_%s.ducklake_data_file df
 		JOIN __ducklake_metadata_%s.ducklake_table tbl USING (table_id)
 		JOIN __ducklake_metadata_%s.ducklake_schema sch USING (schema_id)`,
-		alias, alias, alias)
+		safeAlias, safeAlias, safeAlias)
 	rows, err := s.conn.QueryContext(context.Background(), q)
 	if err != nil {
 		return nil, err
@@ -1336,12 +1350,51 @@ func SandboxPgActiveConnections(prodConnStr string) int {
 // connection string into a map. Whitespace inside quoted values is preserved.
 func parsePostgresConnString(s string) (map[string]string, error) {
 	result := make(map[string]string)
-	for _, field := range strings.Fields(s) {
-		eq := strings.IndexByte(field, '=')
+	s = strings.TrimSpace(s)
+	for len(s) > 0 {
+		// Find key
+		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			return nil, fmt.Errorf("invalid postgres conn token %q", field)
+			return nil, fmt.Errorf("invalid postgres conn token at %q", s)
 		}
-		result[field[:eq]] = field[eq+1:]
+		key := strings.TrimSpace(s[:eq])
+		s = s[eq+1:]
+
+		// Parse value — may be quoted with single quotes
+		var val string
+		if len(s) > 0 && s[0] == '\'' {
+			// Quoted value: find closing quote ('' is escaped quote)
+			end := 1
+			var buf strings.Builder
+			for end < len(s) {
+				if s[end] == '\'' {
+					if end+1 < len(s) && s[end+1] == '\'' {
+						buf.WriteByte('\'')
+						end += 2
+					} else {
+						end++
+						break
+					}
+				} else {
+					buf.WriteByte(s[end])
+					end++
+				}
+			}
+			val = buf.String()
+			s = s[end:]
+		} else {
+			// Unquoted: read until whitespace
+			end := strings.IndexAny(s, " \t")
+			if end < 0 {
+				val = s
+				s = ""
+			} else {
+				val = s[:end]
+				s = s[end:]
+			}
+		}
+		result[key] = val
+		s = strings.TrimSpace(s)
 	}
 	return result, nil
 }
@@ -1390,7 +1443,11 @@ func (s *Session) DefaultSearchPath() string {
 	if s.prodAlias != "" {
 		return fmt.Sprintf("sandbox,%s,memory", s.prodAlias)
 	}
-	return fmt.Sprintf("%s,memory", s.catalogAlias)
+	alias := s.catalogAlias
+	if alias == "" {
+		alias = "lake"
+	}
+	return fmt.Sprintf("%s,memory", alias)
 }
 
 // RefreshSnapshot updates curr_snapshot. current_snapshot() resolves via
@@ -1507,7 +1564,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		if err != nil || len(content) == 0 {
 			return nil
 		}
-		if err := s.Exec(string(content)); err != nil {
+		if err := s.Exec(os.ExpandEnv(string(content))); err != nil {
 			return fmt.Errorf("load %s: %w", name, err)
 		}
 		return nil
@@ -1578,9 +1635,9 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		return fmt.Errorf("sandbox v2 supports sqlite, duckdb, and postgres catalog backends (got %q)", prodConnStr)
 	}
 
-	prodAttach := fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY", prodConnStr, prodAlias)
+	prodAttach := fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY", EscapeSQL(prodConnStr), QuoteIdentifier(prodAlias))
 	if prodDataPath != "" {
-		prodAttach += fmt.Sprintf(", DATA_PATH '%s', OVERRIDE_DATA_PATH true", prodDataPath)
+		prodAttach += fmt.Sprintf(", DATA_PATH '%s', OVERRIDE_DATA_PATH true", EscapeSQL(prodDataPath))
 	}
 	prodAttach += ");"
 	if err := s.Exec(prodAttach); err != nil {
@@ -1592,7 +1649,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 	// they are isolated from prod by virtue of being in sandbox's catalog only.
 	// OVERRIDE_DATA_PATH is required because the catalog stores its data path
 	// as a relative string and we want the absolute prod data path to win.
-	if err := s.Exec(fmt.Sprintf("ATTACH '%s' AS sandbox (DATA_PATH '%s', OVERRIDE_DATA_PATH true);", sandboxConnStr, prodDataPath)); err != nil {
+	if err := s.Exec(fmt.Sprintf("ATTACH '%s' AS sandbox (DATA_PATH '%s', OVERRIDE_DATA_PATH true);", EscapeSQL(sandboxConnStr), EscapeSQL(prodDataPath))); err != nil {
 		return fmt.Errorf("attach sandbox: %w", err)
 	}
 

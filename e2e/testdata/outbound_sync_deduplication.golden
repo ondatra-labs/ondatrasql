@@ -1,0 +1,8 @@
+raw_table_changes_count: 7
+--- deduplicated delta ---
+id,name,email,_operation
+1,Alice,alice@co.com,upsert
+2,Bob,bob_new@co.com,upsert
+3,Carol,carol@co.com,delete
+4,Dave,dave@co.com,upsert
+dedup_total: 4

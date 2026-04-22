@@ -244,24 +244,6 @@ if d.hours != 1.5:
 	}
 }
 
-func TestMathModule(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-if math.ceil(1.5) != 2:
-    fail("ceil")
-if math.floor(1.5) != 1:
-    fail("floor")
-if math.round(1.5) != 2:
-    fail("round")
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestJsonModule(t *testing.T) {
 	t.Parallel()
@@ -280,23 +262,6 @@ if decoded["name"] != "test":
 	}
 }
 
-func TestReModule(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-m = re.search(r"(\d+)-(\d+)", "order-123-456")
-if m.group(1) != "123":
-    fail("group 1: " + m.group(1))
-if m.group(2) != "456":
-    fail("group 2: " + m.group(2))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestAbortRejectsArgs(t *testing.T) {
 	t.Parallel()
@@ -896,40 +861,7 @@ if len(h) != 64:
 	}
 }
 
-func TestCryptoUUIDFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-u = crypto.uuid()
-if len(u) != 36:
-    fail("expected UUID length 36, got " + str(len(u)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoRandomStringFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-s = crypto.random_string()
-if len(s) != 32:
-    fail("expected 32 chars, got " + str(len(s)))
-s16 = crypto.random_string(length=16)
-if len(s16) != 16:
-    fail("expected 16 chars, got " + str(len(s16)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// --- HTTP module edge cases ---
 
 func TestHTTPDataFormPost(t *testing.T) {
 	t.Parallel()
@@ -1716,35 +1648,7 @@ func TestCryptoBase64DecodeInvalid(t *testing.T) {
 	}
 }
 
-func TestCryptoRandomStringZeroLength(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = crypto.random_string(length=0)
-if result != "":
-    fail("expected empty string for length 0")
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoRandomStringCustomLength(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = crypto.random_string(length=10)
-if len(result) != 10:
-    fail("expected length 10, got " + str(len(result)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestSaveRowConversionError(t *testing.T) {
 	t.Parallel()
@@ -2257,7 +2161,7 @@ func TestHTTPAuthBasicViaTuple(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	authTuple := starlark.Tuple{starlark.String("user"), starlark.String("pass")}
@@ -2289,7 +2193,7 @@ func TestHTTPAuthDigestViaTuple(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	authTuple := starlark.Tuple{starlark.String("user"), starlark.String("pass"), starlark.String("digest")}
@@ -2310,7 +2214,7 @@ func TestHTTPAuthDigestViaTuple(t *testing.T) {
 func TestHTTPAuthEmptyUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	authTuple := starlark.Tuple{starlark.String(""), starlark.String("pass")}
@@ -2331,7 +2235,7 @@ func TestHTTPAuthEmptyUser(t *testing.T) {
 func TestHTTPAuthInvalidScheme(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	authTuple := starlark.Tuple{starlark.String("user"), starlark.String("pass"), starlark.String("ntlm")}
@@ -2352,7 +2256,7 @@ func TestHTTPAuthInvalidScheme(t *testing.T) {
 func TestHTTPAuthWrongTupleLength(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	authTuple := starlark.Tuple{starlark.String("user")}
@@ -2370,7 +2274,7 @@ func TestHTTPAuthWrongTupleLength(t *testing.T) {
 func TestHTTPInvalidURL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	paramsDict := starlark.NewDict(1)
@@ -2389,7 +2293,7 @@ func TestHTTPInvalidURL(t *testing.T) {
 func TestHTTPJsonInvalidTypeGo(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fn := httpRequest(ctx, "POST")
+	fn := httpRequest(ctx, "POST", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	kwargs := []starlark.Tuple{
@@ -2421,7 +2325,7 @@ func TestHTTPRetryOn5xx(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	kwargs := []starlark.Tuple{
@@ -2597,18 +2501,6 @@ func TestCryptoHMACWrongArgs(t *testing.T) {
 	}
 }
 
-func TestCryptoRandomStringWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := cryptoModule()
-	fn := mod.Members["random_string"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, nil, []starlark.Tuple{
-		{starlark.String("length"), starlark.String("notanint")},
-	})
-	if err == nil {
-		t.Error("expected error for string arg to random_string length")
-	}
-}
 
 func TestCSVDecodeWrongArgs(t *testing.T) {
 	t.Parallel()
@@ -2824,7 +2716,7 @@ if "a" not in result:
 func TestHTTPWithClientCert(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	// cert and key provided (but files don't exist - will fail on DoHTTP)
@@ -2879,7 +2771,7 @@ func TestHTTPBackoffInt(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	fn := httpRequest(ctx, "GET")
+	fn := httpRequest(ctx, "GET", nil)
 	thread := &starlark.Thread{Name: "test"}
 
 	kwargs := []starlark.Tuple{

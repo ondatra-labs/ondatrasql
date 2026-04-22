@@ -257,9 +257,10 @@ func formatArg(arg string) string {
 		return "''"
 	}
 
-	// Already quoted
+	// Already quoted — escape inner content to prevent SQL injection
 	if len(arg) >= 2 && arg[0] == '\'' && arg[len(arg)-1] == '\'' {
-		return arg
+		inner := arg[1 : len(arg)-1]
+		return "'" + strings.ReplaceAll(inner, "'", "''") + "'"
 	}
 
 	// Operators → quote as strings
@@ -297,6 +298,7 @@ func isNumeric(s string) bool {
 		return false
 	}
 	hasDot := false
+	hasDigit := false
 	for i, c := range s {
 		if c == '-' || c == '+' {
 			if i != 0 {
@@ -314,8 +316,9 @@ func isNumeric(s string) bool {
 		if c < '0' || c > '9' {
 			return false
 		}
+		hasDigit = true
 	}
-	return true
+	return hasDigit
 }
 
 // escapeSQL doubles single quotes for SQL string literals.

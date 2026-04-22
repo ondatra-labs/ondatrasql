@@ -75,7 +75,8 @@ func normalize(sql string) string {
 
 	for _, line := range lines {
 		// Remove single-line SQL comments (--)
-		if idx := strings.Index(line, "--"); idx != -1 {
+		// Respect string literals: don't strip -- inside '...'
+		if idx := indexCommentOutsideString(line); idx != -1 {
 			line = line[:idx]
 		}
 
@@ -96,6 +97,20 @@ func normalize(sql string) string {
 	}
 
 	return strings.ToLower(normalized)
+}
+
+// indexCommentOutsideString finds the first "--" that is not inside a
+// single-quoted SQL string literal. Returns -1 if none found.
+func indexCommentOutsideString(line string) int {
+	inString := false
+	for i := 0; i < len(line); i++ {
+		if line[i] == '\'' {
+			inString = !inString
+		} else if !inString && i+1 < len(line) && line[i] == '-' && line[i+1] == '-' {
+			return i
+		}
+	}
+	return -1
 }
 
 // ConfigHash computes a SHA256 hash over all .sql files in the config
@@ -124,7 +139,7 @@ func ConfigHash(configDir string) string {
 	for _, rel := range paths {
 		content, err := os.ReadFile(filepath.Join(configDir, rel))
 		if err != nil {
-			continue
+			return ""
 		}
 		h.Write([]byte(rel))
 		h.Write([]byte{0})

@@ -367,15 +367,18 @@ func TestCaptureSchema_SinglePart(t *testing.T) {
 	}
 }
 
-func TestCaptureSchema_TooManyParts(t *testing.T) {
-	// 3+ parts are not supported (only table and schema.table)
-	_, err := backfill.CaptureSchema(nil, "a.b.c")
-	if err == nil {
-		t.Error("expected error for 3+ parts")
+func TestCaptureSchema_ThreePartName(t *testing.T) {
+	// 3-part names (catalog.schema.table) use the last two parts
+	p := testutil.NewProject(t)
+	p.Sess.Exec("CREATE SCHEMA IF NOT EXISTS test_schema")
+	p.Sess.Exec("CREATE TABLE test_schema.three_part AS SELECT 1 AS id, 'a' AS val")
+
+	cols, err := backfill.CaptureSchema(p.Sess, "anything.test_schema.three_part")
+	if err != nil {
+		t.Fatalf("CaptureSchema 3-part: %v", err)
 	}
-	_, err = backfill.CaptureSchema(nil, "a.b.c.d")
-	if err == nil {
-		t.Error("expected error for 4+ parts")
+	if len(cols) != 2 {
+		t.Errorf("columns = %d, want 2", len(cols))
 	}
 }
 

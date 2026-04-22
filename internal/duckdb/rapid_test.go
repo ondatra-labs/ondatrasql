@@ -23,7 +23,6 @@ func TestRapid_Session_StateMachine(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		s, err := NewSession(":memory:")
 		if err != nil {
@@ -128,7 +127,6 @@ func TestRapid_InitWithCatalog_StateMachine(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		dir := t.TempDir()
 		configDir := filepath.Join(dir, "config")
@@ -236,7 +234,6 @@ func TestRapid_InitWithCatalog_ClosedSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		dir := t.TempDir()
 		configDir := filepath.Join(dir, "config")
@@ -275,7 +272,6 @@ func TestRapid_InitWithCatalog_InvalidCatalog(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		dir := t.TempDir()
 		configDir := filepath.Join(dir, "config")
@@ -314,7 +310,6 @@ func TestRapid_InitWithCatalog_InvalidMacros(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		dir := t.TempDir()
 		configDir := filepath.Join(dir, "config")
@@ -352,7 +347,6 @@ func TestRapid_QuoteIdentifier_Wrapped(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		s := rapid.String().Draw(t, "s")
 		result := QuoteIdentifier(s)
@@ -367,7 +361,6 @@ func TestRapid_QuoteIdentifier_Recoverable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		s := rapid.String().Draw(t, "s")
 		result := QuoteIdentifier(s)
@@ -384,7 +377,6 @@ func TestRapid_QuoteIdentifier_NoUnescapedQuotes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		s := rapid.String().Draw(t, "s")
 		result := QuoteIdentifier(s)
@@ -401,7 +393,6 @@ func TestRapid_QuoteIdentifier_DoubleQuoteRecoverable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		s := rapid.String().Draw(t, "s")
 		q1 := QuoteIdentifier(s)

@@ -22,6 +22,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/git"
+	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -59,14 +60,10 @@ func loadModelsFromDir(cfg *config.Config) ([]*parser.Model, error) {
 
 // findModel finds a model by target name or file path.
 func findModel(cfg *config.Config, target string) (*parser.Model, error) {
-	// Check if it's a file path with a model extension.
+	// Check if it's a file path with a model extension (.sql)
 	if parser.IsModelFile(target) {
 		if _, err := os.Stat(target); err == nil {
-			// For .yaml/.yml files, only treat as model if under models/ directory —
-			// prevents config.yml and other non-model YAML from being parsed as models.
-			if isYAMLModelPath(target, cfg.ModelsPath) || !isYAMLExt(target) {
-				return parser.ParseModel(target, cfg.ProjectDir)
-			}
+			return parser.ParseModel(target, cfg.ProjectDir)
 		}
 	}
 
@@ -116,6 +113,16 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	}
 	defer sess.Close()
 
+	// Scan lib/ and register dummy macros for FROM lib_func() syntax
+	libReg, err := libregistry.Scan(cfg.ProjectDir)
+	if err != nil {
+		return fmt.Errorf("scan lib/: %w", err)
+	}
+	if err := libReg.RegisterMacros(sess); err != nil {
+		return fmt.Errorf("register lib macros: %w", err)
+	}
+	// Outbound sync is handled via @sink directive + executeSink in runner.go.
+	// The legacy COPY TO integration (copyfunc.RegisterSink) has been removed.
 	// Initialize session with DuckLake catalog
 	if sandboxMode {
 		// Postgres backend: warn if other sessions will be terminated
@@ -149,6 +156,12 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	runner.SetGitInfo(gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL)
 	runner.SetAdminPort(resolveAdminPort(cfg))
 	runner.SetProjectDir(cfg.ProjectDir)
+	runner.SetLibRegistry(libReg)
+
+	// Validate model + sink compatibility before execution
+	if err := execute.ValidateModelSinkCompat([]*parser.Model{model}, libReg); err != nil {
+		return err
+	}
 
 	result, err := runner.Run(ctx, model)
 
@@ -637,21 +650,3 @@ func showValidationStatus(model *parser.Model, result *execute.Result) {
 	}
 }
 
-// isYAMLExt returns true if the file has a .yaml or .yml extension.
-func isYAMLExt(path string) bool {
-	ext := filepath.Ext(path)
-	return ext == ".yaml" || ext == ".yml"
-}
-
-// isYAMLModelPath returns true if a YAML file is under the models directory.
-func isYAMLModelPath(path, modelsPath string) bool {
-	absTarget, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	absModels, err := filepath.Abs(modelsPath)
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(absTarget, absModels+string(filepath.Separator))
-}

@@ -62,9 +62,10 @@ func GetIncrementalState(sess *duckdb.Session, target, cursor, initial string) (
 
 	existsResult, err := sess.QueryValue(tableExistsExpr)
 	if err != nil {
-		state.IsBackfill = true
-		state.LastValue = state.InitialValue
-		return state, nil
+		// Propagate query errors — a transient DB error should NOT trigger
+		// a destructive full backfill. Only a missing table (existsResult != "true")
+		// should trigger backfill.
+		return nil, fmt.Errorf("check table exists for incremental: %w", err)
 	}
 	state.IsBackfill = existsResult != "true"
 

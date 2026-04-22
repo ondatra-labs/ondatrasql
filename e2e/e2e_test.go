@@ -693,7 +693,7 @@ func runDAGSandbox(t *testing.T, p *testutil.Project, modelPaths []string) map[s
 	sorted, dependents := buildDAG(t, p, modelPaths)
 
 	results, errors := execute.RunDAG(context.Background(), p.Sess, sorted, dependents,
-		dag.GenerateRunID(), "", "", "", "", p.Dir, nil)
+		dag.GenerateRunID(), "", "", "", "", p.Dir, nil, nil)
 
 	for target, err := range errors {
 		t.Fatalf("run %s: %v", target, err)
@@ -1194,7 +1194,7 @@ func runDAGSandboxAllowErrors(t *testing.T, p *testutil.Project, modelPaths []st
 	sorted, dependents := buildDAG(t, p, modelPaths)
 
 	return execute.RunDAG(context.Background(), p.Sess, sorted, dependents,
-		dag.GenerateRunID(), "", "", "", "", p.Dir, nil)
+		dag.GenerateRunID(), "", "", "", "", p.Dir, nil, nil)
 }
 
 // =============================================================================
@@ -2060,137 +2060,6 @@ SELECT COUNT(*) AS total FROM staging.with_warning
 	assertGolden(t, "sandbox_warning_in_dag", snap)
 }
 
-// TestE2E_Sandbox_StarlarkModel verifies that Starlark (.star) script models
-// work correctly in sandbox mode with dual-catalog.
-func TestE2E_Sandbox_StarlarkModel(t *testing.T) {
-	prod := testutil.NewProject(t)
-
-	// Create Starlark model in prod
-	prod.AddModel("staging/script_data.star", `# @kind: table
-save.row({"id": 1, "name": "Alice", "score": 100})
-save.row({"id": 2, "name": "Bob", "score": 200})
-`)
-	runModel(t, prod, "staging/script_data.star")
-
-	// Verify prod data
-	val, _ := prod.Sess.QueryValue("SELECT COUNT(*) FROM staging.script_data")
-	if val != "2" {
-		t.Fatalf("prod count = %s, want 2", val)
-	}
-
-	// Sandbox: change script to add more data
-	sbox := testutil.NewSandboxProject(t, prod)
-	sbox.AddModel("staging/script_data.star", `# @kind: table
-save.row({"id": 1, "name": "Alice", "score": 100})
-save.row({"id": 2, "name": "Bob", "score": 200})
-save.row({"id": 3, "name": "Charlie", "score": 300})
-`)
-
-	result := runModel(t, sbox, "staging/script_data.star")
-
-	// Script changed → backfill
-	if result.RunType != "backfill" {
-		t.Errorf("run_type = %q, want backfill", result.RunType)
-	}
-	if result.RowsAffected != 3 {
-		t.Errorf("rows = %d, want 3", result.RowsAffected)
-	}
-
-	// Verify sandbox has new data
-	val, err := sbox.Sess.QueryValue("SELECT COUNT(*) FROM sandbox.staging.script_data")
-	if err != nil {
-		t.Fatalf("query sandbox: %v", err)
-	}
-	if val != "3" {
-		t.Errorf("sandbox count = %s, want 3", val)
-	}
-
-	// Verify prod still has 2 rows
-	val, _ = sbox.Sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.staging.script_data", sbox.Sess.ProdAlias()))
-	if val != "2" {
-		t.Errorf("prod count = %s, want 2 (unchanged)", val)
-	}
-
-	snap := newSnapshot()
-	snap.addResult(result)
-	snap.addQuery(sbox.Sess, "sandbox_count", "SELECT COUNT(*) FROM sandbox.staging.script_data")
-	snap.addQuery(sbox.Sess, "prod_count", fmt.Sprintf("SELECT COUNT(*) FROM %s.staging.script_data", sbox.Sess.ProdAlias()))
-	assertGolden(t, "sandbox_starlark_model", snap)
-}
-
-// TestE2E_Sandbox_StarlarkInDAG verifies that Starlark models work in a DAG
-// with SQL models in sandbox mode. The Starlark model generates data via save.row(),
-// and a downstream SQL model reads from it.
-// Note: This test uses save.row() without query(), so no upstream deps are detected
-// from the Starlark AST. Downstream SQL models that reference the Starlark target
-// still have that dependency detected via DuckDB AST.
-func TestE2E_Sandbox_StarlarkInDAG(t *testing.T) {
-	prod := testutil.NewProject(t)
-
-	// Starlark model generates data
-	prod.AddModel("staging/scores.star", `# @kind: table
-save.row({"id": 1, "name": "Alice", "score": 10})
-save.row({"id": 2, "name": "Bob", "score": 20})
-`)
-
-	// SQL mart depends on staging.scores (DAG detects this dep)
-	prod.AddModel("mart/summary.sql", `-- @kind: table
-SELECT COUNT(*) AS total, SUM(score) AS score_sum FROM staging.scores
-`)
-
-	starDAGPaths := []string{"staging/scores.star", "mart/summary.sql"}
-	runDAGSandbox(t, prod, starDAGPaths)
-
-	// Verify prod data
-	val, _ := prod.Sess.QueryValue("SELECT score_sum FROM mart.summary")
-	if val != "30" {
-		t.Logf("prod score_sum = %s (expected 30)", val)
-	}
-
-	// Sandbox: change Starlark to add more data → mart should propagate
-	sbox := testutil.NewSandboxProject(t, prod)
-	sbox.AddModel("staging/scores.star", `# @kind: table
-save.row({"id": 1, "name": "Alice", "score": 10})
-save.row({"id": 2, "name": "Bob", "score": 20})
-save.row({"id": 3, "name": "Charlie", "score": 30})
-`)
-	sbox.AddModel("mart/summary.sql", `-- @kind: table
-SELECT COUNT(*) AS total, SUM(score) AS score_sum FROM staging.scores
-`)
-
-	results := runDAGSandbox(t, sbox, starDAGPaths)
-
-	// staging.scores (Starlark): script changed → backfill
-	if results["staging.scores"].RunType != "backfill" {
-		t.Errorf("staging.scores: run_type = %q, want backfill", results["staging.scores"].RunType)
-	}
-	if results["staging.scores"].RowsAffected != 3 {
-		t.Errorf("staging.scores: rows = %d, want 3", results["staging.scores"].RowsAffected)
-	}
-
-	// mart.summary: staging.scores changed → should propagate
-	if results["mart.summary"].RunType == "skip" {
-		t.Errorf("mart.summary: should not skip when staging.scores changed")
-	}
-
-	// Verify data: 3 rows, score_sum = 10+20+30 = 60
-	val, _ = sbox.Sess.QueryValue("SELECT total FROM sandbox.mart.summary")
-	if val != "3" {
-		t.Errorf("total = %s, want 3", val)
-	}
-	val, _ = sbox.Sess.QueryValue("SELECT score_sum FROM sandbox.mart.summary")
-	if val != "60" {
-		t.Errorf("score_sum = %s, want 60", val)
-	}
-
-	assertDAGAccountsForAll(t, 2, results)
-	snap := newSnapshot()
-	snap.addDAGResults(results)
-	snap.addQuery(sbox.Sess, "total", "SELECT total FROM sandbox.mart.summary")
-	snap.addQuery(sbox.Sess, "score_sum", "SELECT score_sum FROM sandbox.mart.summary")
-	assertGolden(t, "sandbox_starlark_in_dag", snap)
-}
-
 // TestE2E_Sandbox_ExtensionModel verifies that @extension works in sandbox mode.
 func TestE2E_Sandbox_ExtensionModel(t *testing.T) {
 	prod := testutil.NewProject(t)
@@ -2914,227 +2783,6 @@ SELECT id, name, email, ssn FROM raw.customers
 	assertGolden(t, "column_masking", snap)
 }
 
-// =============================================================================
-// Starlark load() Tests
-// =============================================================================
-
-// TestE2E_StarlarkLoad verifies that Starlark models can load shared libraries
-// from lib/ using the load() builtin.
-func TestE2E_StarlarkLoad(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	// Create a shared library module
-	testutil.WriteFile(t, p.Dir, "lib/helpers.star", `
-def make_rows(n):
-    rows = []
-    for i in range(1, n + 1):
-        rows.append({"id": i, "name": "user_" + str(i)})
-    return rows
-`)
-
-	// Create a Starlark model that uses load()
-	p.AddModel("staging/users.star", `# @kind: table
-load("lib/helpers.star", "make_rows")
-for row in make_rows(3):
-    save.row(row)
-`)
-
-	result := runModel(t, p, "staging/users.star")
-
-	if result.RowsAffected != 3 {
-		t.Errorf("rows = %d, want 3", result.RowsAffected)
-	}
-
-	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.users")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if val != "3" {
-		t.Errorf("count = %s, want 3", val)
-	}
-
-	snap := newSnapshot()
-	snap.addResult(result)
-	snap.addQuery(p.Sess, "count", "SELECT COUNT(*) FROM staging.users")
-	snap.addQueryRows(p.Sess, "data", "SELECT * FROM staging.users ORDER BY id")
-	assertGolden(t, "starlark_load", snap)
-}
-
-// TestE2E_StarlarkLoad_Nested verifies that nested load() works (A loads B loads C).
-func TestE2E_StarlarkLoad_Nested(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	testutil.WriteFile(t, p.Dir, "lib/base.star", `
-def base_value():
-    return 100
-`)
-
-	testutil.WriteFile(t, p.Dir, "lib/middle.star", `
-load("lib/base.star", "base_value")
-def computed_value():
-    return base_value() + 50
-`)
-
-	p.AddModel("staging/computed.star", `# @kind: table
-load("lib/middle.star", "computed_value")
-save.row({"id": 1, "value": computed_value()})
-`)
-
-	result := runModel(t, p, "staging/computed.star")
-
-	if result.RowsAffected != 1 {
-		t.Errorf("rows = %d, want 1", result.RowsAffected)
-	}
-
-	val, err := p.Sess.QueryValue("SELECT value FROM staging.computed")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if val != "150" {
-		t.Errorf("value = %s, want 150", val)
-	}
-}
-
-// =============================================================================
-// YAML Model Tests
-// =============================================================================
-
-// TestE2E_YAMLModel_Integration is an end-to-end test: YAML → lib → DuckLake.
-func TestE2E_YAMLModel_Integration(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	// Create a source library function (save is passed as first argument)
-	testutil.WriteFile(t, p.Dir, "lib/test_source.star", `
-def test_source(save, prefix="item", count=2):
-    for i in range(1, count + 1):
-        save.row({"id": i, "name": prefix + "_" + str(i)})
-`)
-
-	// Create a YAML model that references the source
-	p.AddModel("staging/items.yaml", `kind: table
-source: test_source
-config:
-  prefix: "product"
-  count: 3
-`)
-
-	result := runModel(t, p, "staging/items.yaml")
-
-	if result.RowsAffected != 3 {
-		t.Errorf("rows = %d, want 3", result.RowsAffected)
-	}
-	if result.Kind != "table" {
-		t.Errorf("kind = %q, want table", result.Kind)
-	}
-
-	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.items")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if val != "3" {
-		t.Errorf("count = %s, want 3", val)
-	}
-
-	// Verify actual data
-	name, err := p.Sess.QueryValue("SELECT name FROM staging.items WHERE id = 2")
-	if err != nil {
-		t.Fatalf("query name: %v", err)
-	}
-	if name != "product_2" {
-		t.Errorf("name = %s, want product_2", name)
-	}
-
-	snap := newSnapshot()
-	snap.addResult(result)
-	snap.addQuery(p.Sess, "count", "SELECT COUNT(*) FROM staging.items")
-	snap.addQueryRows(p.Sess, "data", "SELECT * FROM staging.items ORDER BY id")
-	assertGolden(t, "yaml_model_integration", snap)
-}
-
-// TestE2E_YAMLModel_Append verifies YAML model with append kind and incremental.
-func TestE2E_YAMLModel_Append(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	testutil.WriteFile(t, p.Dir, "lib/batch_source.star", `
-def batch_source(save, batch_id=1):
-    for i in range(1, 4):
-        save.row({"id": batch_id * 100 + i, "batch": batch_id})
-`)
-
-	p.AddModel("staging/batches.yaml", `kind: append
-source: batch_source
-config:
-  batch_id: 1
-`)
-
-	result := runModel(t, p, "staging/batches.yaml")
-
-	if result.RowsAffected != 3 {
-		t.Errorf("rows = %d, want 3", result.RowsAffected)
-	}
-	if result.Kind != "append" {
-		t.Errorf("kind = %q, want append", result.Kind)
-	}
-
-	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.batches")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if val != "3" {
-		t.Errorf("count = %s, want 3", val)
-	}
-}
-
-// TestE2E_YAMLModel_InDAG verifies YAML models work correctly in a DAG
-// with downstream SQL models.
-func TestE2E_YAMLModel_InDAG(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	// Source library
-	testutil.WriteFile(t, p.Dir, "lib/score_source.star", `
-def score_source(save, multiplier=1):
-    save.row({"id": 1, "name": "Alice", "score": 10 * multiplier})
-    save.row({"id": 2, "name": "Bob", "score": 20 * multiplier})
-`)
-
-	// YAML model produces raw data
-	p.AddModel("staging/scores.yaml", `kind: table
-source: score_source
-config:
-  multiplier: 5
-`)
-
-	// SQL model depends on staging.scores
-	p.AddModel("mart/summary.sql", `-- @kind: table
-SELECT COUNT(*) AS total, SUM(score) AS total_score FROM staging.scores
-`)
-
-	results := runDAGSandbox(t, p, []string{
-		"staging/scores.yaml",
-		"mart/summary.sql",
-	})
-
-	// Check staging.scores
-	if results["staging.scores"].RowsAffected != 2 {
-		t.Errorf("staging.scores rows = %d, want 2", results["staging.scores"].RowsAffected)
-	}
-
-	// Check mart.summary uses the multiplied scores
-	val, err := p.Sess.QueryValue("SELECT total_score FROM mart.summary")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	// (10*5) + (20*5) = 50 + 100 = 150
-	if val != "150" {
-		t.Errorf("total_score = %s, want 150", val)
-	}
-
-	snap := newSnapshot()
-	snap.addDAGResults(results)
-	snap.addQuery(p.Sess, "total_score", "SELECT total_score FROM mart.summary")
-	assertGolden(t, "yaml_model_in_dag", snap)
-}
-
 func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -3149,10 +2797,6 @@ func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
-// TestE2E_OAuthProviderFlow tests the OAuth2 provider flow at the package level:
-// oauth2host (register, poll, refresh, token storage) and oauth.token("provider") in Starlark.
-// This does NOT test the CLI command (runAuth, runAuthList, browser opening, auth URL building)
-// — those are covered by unit tests in cmd/ondatrasql/auth_cmd_test.go.
 func TestE2E_OAuthProviderFlow(t *testing.T) {
 	// --- Mock OAuth2 provider (e.g. Fortnox) ---
 	provider := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3353,32 +2997,6 @@ func TestE2E_OAuthProviderFlow(t *testing.T) {
 		t.Errorf("rotated refresh_token = %q, want RT_rotated", tf2.RefreshToken)
 	}
 
-	// --- Step 8: Use oauth.token("mock-provider") in Starlark ---
-	libDir := filepath.Join(p.Dir, "lib")
-	os.MkdirAll(libDir, 0755)
-	os.WriteFile(filepath.Join(libDir, "api.star"), []byte(`
-def api_fetch(save):
-    token = oauth.token(provider="mock-provider")
-    save.row({"access_token": token.access_token})
-`), 0644)
-	p.AddModel("raw/oauth_test.star", `# @kind: table
-load("lib/api.star", "api_fetch")
-api_fetch(save)
-`)
-
-	runResult := runModel(t, p, "raw/oauth_test.star")
-	if runResult.RowsAffected != 1 {
-		t.Errorf("rows = %d, want 1", runResult.RowsAffected)
-	}
-
-	// Verify the access token was fetched via the provider flow
-	tok, err := p.Sess.QueryValue("SELECT access_token FROM raw.oauth_test")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if tok != "AT_refreshed" {
-		t.Errorf("access_token in table = %q, want AT_refreshed", tok)
-	}
 }
 
 // TestE2E_ODataServer tests the OData server with a real DuckDB session.

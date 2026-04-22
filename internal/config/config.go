@@ -102,7 +102,13 @@ func LoadEnvFile(path string) error {
 				}
 			}
 
-			os.Setenv(key, value)
+			// Handle escaped quotes inside values
+			value = strings.ReplaceAll(value, `\'`, `'`)
+			value = strings.ReplaceAll(value, `\"`, `"`)
+
+			if _, exists := os.LookupEnv(key); !exists {
+				os.Setenv(key, value)
+			}
 		}
 	}
 
@@ -145,7 +151,10 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 	// happens to work because session.go expands env vars at SQL execution
 	// time on the original file content, but the parsed config struct never
 	// sees the resolved values without this.
-	lines := strings.Split(os.ExpandEnv(string(content)), "\n")
+	// Collapse multi-line ATTACH statements into single lines so the regex
+	// can match ATTACH ... AS ... that spans multiple lines in catalog.sql.
+	collapsed := strings.ReplaceAll(string(content), "\n", " ")
+	lines := strings.Split(os.ExpandEnv(collapsed), ";")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "--") {

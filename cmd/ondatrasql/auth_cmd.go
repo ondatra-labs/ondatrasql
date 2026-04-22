@@ -195,7 +195,20 @@ func runAuthLocal(ctx context.Context, cfg *config.Config, provider string) erro
 	errCh := make(chan error, 1)
 
 	mux := http.NewServeMux()
+	// Generate random state for CSRF protection
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return fmt.Errorf("generate state: %w", err)
+	}
+	expectedState := fmt.Sprintf("%x", stateBytes)
+
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		// Validate state parameter to prevent CSRF
+		if r.URL.Query().Get("state") != expectedState {
+			errCh <- fmt.Errorf("state mismatch in callback (possible CSRF)")
+			fmt.Fprint(w, "<h1>Error</h1><p>State mismatch — possible CSRF attack.</p>")
+			return
+		}
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errCh <- fmt.Errorf("no code in callback")
@@ -208,7 +221,11 @@ func runAuthLocal(ctx context.Context, cfg *config.Config, provider string) erro
 
 	srv := &http.Server{Handler: mux}
 	go func() { srv.Serve(listener) }()
-	defer srv.Shutdown(ctx)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdownCtx)
+	}()
 
 	// Build auth URL
 	parsedAuthURL, err := url.Parse(authURL)
@@ -220,6 +237,7 @@ func runAuthLocal(ctx context.Context, cfg *config.Config, provider string) erro
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")
 	params.Set("scope", scope)
+	params.Set("state", expectedState)
 	parsedAuthURL.RawQuery = params.Encode()
 	fullAuthURL := parsedAuthURL.String()
 

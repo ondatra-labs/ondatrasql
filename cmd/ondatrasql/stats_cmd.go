@@ -235,7 +235,10 @@ func printStatsBox(stats *ProjectStats) {
 		}
 
 		for _, kc := range stats.KindBreakdown {
-			pct := float64(kc.Count) / float64(total) * 100
+			var pct float64
+			if total > 0 {
+				pct = float64(kc.Count) / float64(total) * 100
+			}
 			barWidth := int(pct / 100 * 30)
 			if barWidth < 1 && kc.Count > 0 {
 				barWidth = 1

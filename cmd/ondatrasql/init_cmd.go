@@ -230,7 +230,11 @@ func initExtensions() string {
 }
 
 func initMacroFile(name string) string {
-	content, _ := sqlfiles.Load("init/" + name)
+	content, err := sqlfiles.Load("init/" + name)
+	if err != nil {
+		// Embedded file missing — return empty with comment so user knows
+		return fmt.Sprintf("-- WARNING: embedded template %q not found\n", name)
+	}
 	return content
 }
 
@@ -447,8 +451,8 @@ ondatrasql stats
 | Directory | Purpose |
 |---|---|
 | ` + "`config/`" + ` | SQL config files (catalog, schemas, extensions, macros, variables, sources) |
-| ` + "`lib/`" + ` | Shared Starlark libraries (reusable connectors for YAML models) |
-| ` + "`models/`" + ` | SQL, Starlark, and YAML model files organized by schema layer |
+| ` + "`lib/`" + ` | Shared Starlark libraries (API connectors via blueprint API dict) |
+| ` + "`models/`" + ` | SQL model files organized by schema layer |
 | ` + "`sql/`" + ` | Executable SQL files for maintenance (merge, expire, cleanup) |
 
 See the [OndatraSQL documentation](https://github.com/ondatralabs/ondatrasql) for details on model directives, incremental loading, Starlark scripting, and CLI commands.

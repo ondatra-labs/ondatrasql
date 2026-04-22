@@ -1,6 +1,0 @@
-target: staging.script_data
-kind: table
-run_type: backfill
-rows_affected: 3
-sandbox_count: 3
-prod_count: 2

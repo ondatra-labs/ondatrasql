@@ -27,8 +27,8 @@ func envModule() *starlarkstruct.Module {
 					return nil, err
 				}
 
-				value := os.Getenv(name)
-				if value == "" && string(defaultVal) != "" {
+				value, exists := os.LookupEnv(name)
+				if !exists && string(defaultVal) != "" {
 					value = string(defaultVal)
 				}
 

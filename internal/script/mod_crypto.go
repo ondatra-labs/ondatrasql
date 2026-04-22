@@ -7,17 +7,12 @@ package script
 import (
 	"crypto/hmac"
 	"crypto/md5"
-	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
-	"math/big"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
-
-	"github.com/google/uuid"
 )
 
 // cryptoModule provides cryptographic functions.
@@ -76,31 +71,6 @@ func cryptoModule() *starlarkstruct.Module {
 				h := hmac.New(sha256.New, []byte(key))
 				h.Write([]byte(message))
 				return starlark.String(hex.EncodeToString(h.Sum(nil))), nil
-			}),
-
-			// uuid() -> string
-			"uuid": starlark.NewBuiltin("crypto.uuid", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-				return starlark.String(uuid.New().String()), nil
-			}),
-
-			// random_string(length?) -> string (default length 32)
-			"random_string": starlark.NewBuiltin("crypto.random_string", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-				length := 32
-				if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
-					"length?", &length,
-				); err != nil {
-					return nil, err
-				}
-				const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-				b := make([]byte, length)
-				for i := range b {
-					n, err := crand.Int(crand.Reader, big.NewInt(int64(len(charset))))
-					if err != nil {
-						return nil, fmt.Errorf("crypto.random_string: %w", err)
-					}
-					b[i] = charset[n.Int64()]
-				}
-				return starlark.String(b), nil
 			}),
 		},
 	}

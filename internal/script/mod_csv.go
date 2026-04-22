@@ -128,8 +128,8 @@ func csvEncode(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tupl
 			for j, h := range headers {
 				v, _, _ := d.Get(starlark.String(h))
 				if v != nil && v != starlark.None {
-					s, _ := starlark.AsString(v)
-					if s == "" {
+					s, ok := starlark.AsString(v)
+					if !ok {
 						s = v.String()
 					}
 					record[j] = s
@@ -159,8 +159,8 @@ func csvEncode(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tupl
 			}
 			record := make([]string, l.Len())
 			for j := 0; j < l.Len(); j++ {
-				s, _ := starlark.AsString(l.Index(j))
-				if s == "" {
+				s, ok := starlark.AsString(l.Index(j))
+				if !ok {
 					s = l.Index(j).String()
 				}
 				record[j] = s

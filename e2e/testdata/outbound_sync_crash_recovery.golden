@@ -1,0 +1,2 @@
+claimed_after_crash: 1
+note: old inflight rows recover after 10min timeout (by design)

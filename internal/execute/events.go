@@ -119,6 +119,7 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 
 		if err := r.sess.Exec(txnSQL); err != nil {
 			r.trace(result, "commit_batch", stepStart, "error")
+			r.sess.Exec("ROLLBACK") // clear aborted transaction state
 			nackEvents(ctx, r.adminPort, schema, table, claimResp.ClaimID)
 			r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
 			return nil, fmt.Errorf("commit events batch: %w", err)
@@ -184,6 +185,9 @@ func (r *Runner) recoverInflightEvents(ctx context.Context, schema, table string
 			// Already committed to DuckDB — ack in daemon to discard
 			if err := ackEvents(ctx, r.adminPort, schema, table, claimID); err != nil {
 				errs = append(errs, fmt.Sprintf("daemon ack for committed claim %s: %v", claimID, err))
+			} else {
+				// Clean up the ack record — crash window is closed
+				script.DeleteAck(r.sess, claimID)
 			}
 		}
 		// Uncommitted claims: left in inflight. The daemon's Claim() will

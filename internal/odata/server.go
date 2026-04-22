@@ -202,8 +202,13 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 					switch v := keyVal.(type) {
 					case string:
 						filterVal = "'" + strings.ReplaceAll(v, "'", "''") + "'"
-					default:
+					case int, int64, int32, float64, float32:
 						filterVal = fmt.Sprintf("%v", v)
+					case bool:
+						filterVal = fmt.Sprintf("%t", v)
+					default:
+						// Safety: quote unknown types as strings to prevent injection
+						filterVal = "'" + strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''") + "'"
 					}
 
 					relSQL := fmt.Sprintf("SELECT * FROM %s.%s WHERE %s = %s",

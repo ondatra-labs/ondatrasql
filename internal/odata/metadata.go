@@ -58,7 +58,7 @@ func DiscoverSchemas(sess *duckdb.Session, targets []ExposeTarget) ([]EntitySche
 
 		rows, err := sess.QueryRowsMap(fmt.Sprintf(
 			"SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = '%s' AND table_name = '%s' ORDER BY ordinal_position",
-			schema, table))
+			strings.ReplaceAll(schema, "'", "''"), strings.ReplaceAll(table, "'", "''")))
 		if err != nil {
 			return nil, fmt.Errorf("discover schema for %s: %w", et.Target, err)
 		}

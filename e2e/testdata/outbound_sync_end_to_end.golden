@@ -1,0 +1,4 @@
+delta_rows: 5
+push_results: 5
+api_batches_received: 1
+api_rows_total: 5

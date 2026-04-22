@@ -85,7 +85,10 @@ func extractCalls(code string) starlarkCalls {
 		if !ok {
 			continue
 		}
-		mod := loadStmt.Module.Value.(string)
+		mod, ok := loadStmt.Module.Value.(string)
+		if !ok {
+			continue
+		}
 		result.loads = append(result.loads, mod)
 	}
 
@@ -187,25 +190,10 @@ func ExtractStarlarkDeps(sess *duckdb.Session, code string, projectDir ...string
 }
 
 // extractStarlarkDeps extracts dependencies for a script model.
-// For YAML models, reads lib/<source>.star. For .star models, uses model.SQL.
-// Recursively follows load() calls to find query() dependencies in imported modules.
+// Uses model.SQL and recursively follows load() calls to find query() dependencies in imported modules.
 func (g *Graph) extractStarlarkDeps(model *modelInfo) []string {
-	var code string
-	if model.source != "" && g.projectDir != "" {
-		// YAML model: read lib/<source>.star
-		path := filepath.Join(g.projectDir, "lib", model.source+".star")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		code = string(data)
-	} else {
-		code = model.sql
-	}
-
-	if code == "" {
+	if model.sql == "" {
 		return nil
 	}
-
-	return ExtractStarlarkDeps(g.sess, code, g.projectDir)
+	return ExtractStarlarkDeps(g.sess, model.sql, g.projectDir)
 }

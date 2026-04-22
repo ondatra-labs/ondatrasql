@@ -82,51 +82,5 @@ if len(sig) != 64:
 	}
 }
 
-func TestCryptoUUID(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-id = crypto.uuid()
-# UUID format: 8-4-4-4-12 = 36 chars
-if len(id) != 36:
-    fail("uuid length: " + str(len(id)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoRandomString(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-s = crypto.random_string(length=16)
-if len(s) != 16:
-    fail("length: " + str(len(s)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCryptoRandomStringDefault(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-s = crypto.random_string()
-if len(s) != 32:
-    fail("default length should be 32, got: " + str(len(s)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}

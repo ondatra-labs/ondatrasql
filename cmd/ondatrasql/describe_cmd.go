@@ -477,8 +477,9 @@ func printModelBox(info *ModelInfo) {
 			}
 			// Trim and truncate long lines
 			line = strings.TrimRight(line, " \t\r")
-			if len(line) > boxWidth-6 {
-				line = line[:boxWidth-9] + "..."
+			runes := []rune(line)
+			if len(runes) > boxWidth-6 {
+				line = string(runes[:boxWidth-9]) + "..."
 			}
 			printPaddedLine(line)
 		}

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"go.starlark.net/starlark"
@@ -40,23 +42,125 @@ type clientCertConfig struct {
 }
 
 // httpModule provides HTTP client functions with kwargs support.
-func httpModule(ctx context.Context) *starlarkstruct.Module {
+// apiConfig is optional -- when non-nil, base_url/auth/headers/timeout/retry/backoff
+// are injected as defaults into every request. Per-call kwargs override.
+func httpModule(ctx context.Context, apiConfig ...*apiHTTPConfig) *starlarkstruct.Module {
+	var cfg *apiHTTPConfig
+	if len(apiConfig) > 0 {
+		cfg = apiConfig[0]
+	}
 	return &starlarkstruct.Module{
 		Name: "http",
 		Members: starlark.StringDict{
-			"get":    starlark.NewBuiltin("http.get", httpRequest(ctx, "GET")),
-			"post":   starlark.NewBuiltin("http.post", httpRequest(ctx, "POST")),
-			"put":    starlark.NewBuiltin("http.put", httpRequest(ctx, "PUT")),
-			"delete": starlark.NewBuiltin("http.delete", httpRequest(ctx, "DELETE")),
-			"patch":  starlark.NewBuiltin("http.patch", httpRequest(ctx, "PATCH")),
-			"upload": starlark.NewBuiltin("http.upload", httpUpload(ctx)),
+			"get":    starlark.NewBuiltin("http.get", httpRequest(ctx, "GET", cfg)),
+			"post":   starlark.NewBuiltin("http.post", httpRequest(ctx, "POST", cfg)),
+			"put":    starlark.NewBuiltin("http.put", httpRequest(ctx, "PUT", cfg)),
+			"delete": starlark.NewBuiltin("http.delete", httpRequest(ctx, "DELETE", cfg)),
+			"patch":  starlark.NewBuiltin("http.patch", httpRequest(ctx, "PATCH", cfg)),
+			"upload": starlark.NewBuiltin("http.upload", httpUpload(ctx, cfg)),
 		},
 	}
 }
 
+// APIHTTPConfig holds defaults injected into every http.* call from the API dict.
+type APIHTTPConfig struct {
+	BaseURL    string
+	Headers    map[string]string
+	Timeout    int // seconds, 0 = use default
+	Retry      int
+	Backoff    int
+	Auth       map[string]any // auth config from API dict
+	ProjectDir string         // for OAuth provider flow
+	Ctx        context.Context // for OAuth provider flow
+}
+
+// apiHTTPConfig is an alias for internal use.
+type apiHTTPConfig = APIHTTPConfig
+
+// injectAPIAuth resolves auth config from API dict and sets headers or query params.
+func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *string, cfg *apiHTTPConfig) error {
+	// Google service account: google_key_file or google_key_file_env
+	keyFile, _ := auth["google_key_file"].(string)
+	if envName, ok := auth["google_key_file_env"].(string); ok && envName != "" {
+		keyFile = os.Getenv(envName)
+	}
+	if keyFile != "" {
+		keyData, err := os.ReadFile(keyFile)
+		if err != nil {
+			return fmt.Errorf("auth: read google_key_file %q: %w", keyFile, err)
+		}
+		var key ServiceAccountKey
+		if err := json.Unmarshal(keyData, &key); err != nil {
+			return fmt.Errorf("auth: parse google_key_file %q: %w", keyFile, err)
+		}
+		scope, _ := auth["scope"].(string)
+		tp := &tokenProvider{
+			ctx:         cfg.Ctx,
+			googleSAKey: &key,
+			scope:       scope,
+		}
+		tok, err := tp.AccessToken()
+		if err != nil {
+			return fmt.Errorf("auth: google service account: %w", err)
+		}
+		headers["Authorization"] = "Bearer " + tok
+		return nil
+	}
+
+	// provider: OAuth2 managed token (refreshes automatically)
+	if provider, ok := auth["provider"].(string); ok && provider != "" {
+		tp := &tokenProvider{
+			ctx:        cfg.Ctx,
+			provider:   provider,
+			projectDir: cfg.ProjectDir,
+		}
+		tok, err := tp.AccessToken()
+		if err != nil {
+			return fmt.Errorf("auth: oauth token for %q: %w", provider, err)
+		}
+		headers["Authorization"] = "Bearer " + tok
+		return nil
+	}
+
+	// env: API key from environment variable
+	if envKey, ok := auth["env"].(string); ok && envKey != "" {
+		token := os.Getenv(envKey)
+		if token != "" {
+			if param, ok := auth["param"].(string); ok && param != "" {
+				// Query parameter auth
+				u, err := url.Parse(*urlStr)
+				if err == nil {
+					q := u.Query()
+					q.Set(param, token)
+					u.RawQuery = q.Encode()
+					*urlStr = u.String()
+				}
+			} else if header, ok := auth["header"].(string); ok && header != "" {
+				// Custom header
+				headers[header] = token
+			} else {
+				// Default: Authorization: Bearer
+				headers["Authorization"] = "Bearer " + token
+			}
+		}
+	}
+
+	// env_user + env_pass: basic auth
+	if userKey, ok := auth["env_user"].(string); ok && userKey != "" {
+		if passKey, ok := auth["env_pass"].(string); ok && passKey != "" {
+			user := os.Getenv(userKey)
+			pass := os.Getenv(passKey)
+			if user != "" {
+				headers["Authorization"] = BasicAuth(user, pass)
+			}
+		}
+	}
+	return nil
+}
+
 // httpRequest creates a unified handler for all HTTP methods using kwargs.
 // Signature: http.method(url, headers?, json?, data?, timeout?, retry?)
-func httpRequest(ctx context.Context, method string) func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func httpRequest(ctx context.Context, method string, apiCfg *apiHTTPConfig) func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var (
 			urlStr      string
@@ -64,6 +168,7 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 			paramsDict  *starlark.Dict
 			jsonBody    starlark.Value
 			dataDict    *starlark.Dict
+			bodyStr     string
 			timeout     starlark.Value // float seconds
 			retry       int
 			backoff     starlark.Value // float seconds
@@ -78,6 +183,7 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 			"params?", &paramsDict,
 			"json?", &jsonBody,
 			"data?", &dataDict,
+			"body?", &bodyStr,
 			"timeout?", &timeout,
 			"retry?", &retry,
 			"backoff?", &backoff,
@@ -87,6 +193,26 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 			"ca?", &ca,
 		); err != nil {
 			return nil, err
+		}
+
+		// Inject API config defaults (base_url, headers, timeout, retry, backoff)
+		if apiCfg != nil {
+			// base_url: prepend to relative URLs
+			if apiCfg.BaseURL != "" && !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
+				urlStr = strings.TrimRight(apiCfg.BaseURL, "/") + "/" + strings.TrimLeft(urlStr, "/")
+			}
+			// timeout default (only if not set by caller)
+			if timeout == nil && apiCfg.Timeout > 0 {
+				timeout = starlark.Float(float64(apiCfg.Timeout))
+			}
+			// retry default (only if not set by caller -- 0 means "not set" since UnpackArgs inits to 0)
+			if retry == 0 && apiCfg.Retry > 0 {
+				retry = apiCfg.Retry
+			}
+			// backoff default
+			if backoff == nil && apiCfg.Backoff > 0 {
+				backoff = starlark.Float(float64(apiCfg.Backoff))
+			}
 		}
 
 		// Append query params to URL
@@ -121,13 +247,28 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 			return nil, fmt.Errorf("%s: ca requires cert and key", fn.Name())
 		}
 
-		// Validate: json and data are mutually exclusive
-		if jsonBody != nil && jsonBody != starlark.None && dataDict != nil {
-			return nil, fmt.Errorf("%s: json and data are mutually exclusive", fn.Name())
+		// Validate: json, data, and body are mutually exclusive
+		bodyArgCount := 0
+		if jsonBody != nil && jsonBody != starlark.None {
+			bodyArgCount++
+		}
+		if dataDict != nil {
+			bodyArgCount++
+		}
+		if bodyStr != "" {
+			bodyArgCount++
+		}
+		if bodyArgCount > 1 {
+			return nil, fmt.Errorf("%s: json, data, and body are mutually exclusive", fn.Name())
 		}
 
-		// Build headers
+		// Build headers: API config defaults first, then per-call overrides win
 		headers := make(map[string]string)
+		if apiCfg != nil {
+			for k, v := range apiCfg.Headers {
+				headers[k] = v
+			}
+		}
 		if headersDict != nil {
 			for _, item := range headersDict.Items() {
 				k, ok := starlark.AsString(item[0])
@@ -141,6 +282,13 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 				if k != "" {
 					headers[k] = v
 				}
+			}
+		}
+
+		// Inject auth from API dict (only if caller didn't set auth= kwarg)
+		if auth == nil && apiCfg != nil && apiCfg.Auth != nil {
+			if authErr := injectAPIAuth(apiCfg.Auth, headers, &urlStr, apiCfg); authErr != nil {
+				return nil, authErr
 			}
 		}
 
@@ -191,6 +339,11 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 			if headers["Content-Type"] == "" {
 				headers["Content-Type"] = "application/x-www-form-urlencoded"
 			}
+		}
+
+		// Raw body string (for CSV, XML, etc.)
+		if bodyStr != "" && body == nil {
+			body = []byte(bodyStr)
 		}
 
 		// Build options
@@ -288,7 +441,7 @@ func httpRequest(ctx context.Context, method string) func(thread *starlark.Threa
 //   - headers: extra headers dict
 //   - fields: dict of additional form fields (string key-value pairs)
 //   - timeout, retry, backoff, auth: same as http.post
-func httpUpload(ctx context.Context) func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func httpUpload(ctx context.Context, apiCfg *apiHTTPConfig) func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var (
 			urlStr      string
@@ -353,6 +506,40 @@ func httpUpload(ctx context.Context) func(thread *starlark.Thread, fn *starlark.
 					return nil, fmt.Errorf("%s: fields value must be string", fn.Name())
 				}
 				extraFields[k] = v
+			}
+		}
+
+		// Inject API config defaults (same as httpRequest)
+		if apiCfg != nil {
+			// base_url: prepend to relative URLs
+			if apiCfg.BaseURL != "" && !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
+				urlStr = strings.TrimRight(apiCfg.BaseURL, "/") + "/" + strings.TrimLeft(urlStr, "/")
+			}
+			// headers: merge (per-call overrides)
+			if apiCfg.Headers != nil {
+				for k, v := range apiCfg.Headers {
+					if _, exists := headers[k]; !exists {
+						headers[k] = v
+					}
+				}
+			}
+			// auth: inject if caller didn't set auth= kwarg
+			if (authVal == nil || authVal == starlark.None) && apiCfg.Auth != nil {
+				if authErr := injectAPIAuth(apiCfg.Auth, headers, &urlStr, apiCfg); authErr != nil {
+					return nil, authErr
+				}
+			}
+			// timeout default
+			if timeout == nil && apiCfg.Timeout > 0 {
+				timeout = starlark.Float(float64(apiCfg.Timeout))
+			}
+			// retry default
+			if retry == 0 && apiCfg.Retry > 0 {
+				retry = apiCfg.Retry
+			}
+			// backoff default
+			if backoff == nil && apiCfg.Backoff > 0 {
+				backoff = starlark.Float(float64(apiCfg.Backoff))
 			}
 		}
 

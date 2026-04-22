@@ -20,14 +20,13 @@ import (
 // Formats:
 //
 //	ondatrasql new schema.name.sql          → models/schema/name.sql
-//	ondatrasql new schema.sub.name.star     → models/schema/sub/name.star
 //	ondatrasql new schema                   → models/schema/  (directory only)
 //	ondatrasql new schema.sub               → models/schema/sub/  (directory only)
 func runNew(cfg *config.Config, target string) error {
 	// Check for explicit extension (case-insensitive)
 	ext := ""
 	lower := strings.ToLower(target)
-	for _, e := range []string{".sql", ".star"} {
+	for _, e := range []string{".sql"} {
 		if strings.HasSuffix(lower, e) {
 			ext = e
 			target = target[:len(target)-len(e)]
@@ -56,7 +55,7 @@ func runNew(cfg *config.Config, target string) error {
 		lowerTarget := strings.ToLower(target)
 		for _, bad := range []string{".py", ".sh", ".ps1", ".ts", ".js", ".go", ".yaml", ".yml", ".json", ".csv"} {
 			if strings.HasSuffix(lowerTarget, bad) {
-				return fmt.Errorf("unsupported extension %q: use .sql or .star", bad)
+				return fmt.Errorf("unsupported extension %q: use .sql", bad)
 			}
 		}
 		dirPath := filepath.Join(cfg.ModelsPath, filepath.Join(parts...))
@@ -84,14 +83,8 @@ func runNew(cfg *config.Config, target string) error {
 
 	// Create file path based on extension
 	var filePath, template string
-	switch ext {
-	case ".star":
-		filePath = filepath.Join(dirPath, name+".star")
-		template = generateStarlarkTemplate(schema, name)
-	default:
-		filePath = filepath.Join(dirPath, name+".sql")
-		template = generateTemplate(schema, name)
-	}
+	filePath = filepath.Join(dirPath, name+".sql")
+	template = generateTemplate(schema, name)
 
 	// Check if file already exists
 	if _, err := os.Stat(filePath); err == nil {
@@ -121,31 +114,4 @@ FROM source_table
 `, schema, name)
 }
 
-// generateStarlarkTemplate creates a Starlark script template.
-func generateStarlarkTemplate(schema, name string) string {
-	return fmt.Sprintf(`# Starlark script: %s.%s
-# Fetches data from REST API and saves to DuckDB
-# @kind: append
-
-# API configuration
-api_url = "https://api.example.com/data"
-api_token = env.get("API_TOKEN")
-
-# Fetch data
-resp = http.get(api_url, headers={"Authorization": "Bearer " + api_token})
-
-if not resp.ok:
-    fail("API returned status " + str(resp.status_code))
-
-# Save each record
-for item in resp.json:
-    save.row({
-        "id": item["id"],
-        "name": item["name"],
-        "value": item["value"],
-    })
-
-print("Saved", save.count(), "records")
-`, schema, name)
-}
 

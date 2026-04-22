@@ -101,7 +101,17 @@ func (a *AST) ReplaceBaseTables(match func(*Node) bool, build func(*Node) map[st
 	if a == nil {
 		return
 	}
-	replaceInValue(a.raw, match, build)
+	replaceInValue(a.raw, func(n *Node) bool { return n.IsBaseTable() }, match, build)
+}
+
+// ReplaceTableFunctions walks the tree and substitutes TABLE_FUNCTION nodes
+// for which match() returns true with the result of build(). Used to replace
+// lib function calls (FROM gam_fetch(...)) with temp table references.
+func (a *AST) ReplaceTableFunctions(match func(*Node) bool, build func(*Node) map[string]any) {
+	if a == nil {
+		return
+	}
+	replaceInValue(a.raw, func(n *Node) bool { return n.IsTableFunction() }, match, build)
 }
 
 // ----------------------------------------------------------------------
@@ -225,6 +235,30 @@ func (n *Node) IsBaseTable() bool { return n.NodeType() == "BASE_TABLE" }
 
 // IsJoin reports whether this node is a join in the FROM clause.
 func (n *Node) IsJoin() bool { return n.NodeType() == "JOIN" }
+
+// IsTableFunction reports whether this node is a table function call in FROM
+// (e.g. FROM read_csv(...), FROM gam_fetch(...)).
+func (n *Node) IsTableFunction() bool { return n.NodeType() == "TABLE_FUNCTION" }
+
+// TableFunctionName returns the function name for a TABLE_FUNCTION node.
+// The name is nested inside function.function_name.
+func (n *Node) TableFunctionName() string {
+	fn := n.Field("function")
+	if fn.IsNil() {
+		return ""
+	}
+	return fn.FunctionName()
+}
+
+// TableFunctionArgs returns the argument nodes for a TABLE_FUNCTION.
+// Each arg is a CONSTANT or FUNCTION expression node.
+func (n *Node) TableFunctionArgs() []*Node {
+	fn := n.Field("function")
+	if fn.IsNil() {
+		return nil
+	}
+	return fn.Children()
+}
 
 // ----- SELECT-shape accessors -----
 
@@ -449,11 +483,11 @@ func walkValue(v any, visit func(*Node) bool) {
 
 // ----- Mutation: ReplaceBaseTables (used by CDC) -----
 
-func replaceInValue(v any, match func(*Node) bool, build func(*Node) map[string]any) any {
+func replaceInValue(v any, typeCheck func(*Node) bool, match func(*Node) bool, build func(*Node) map[string]any) any {
 	switch x := v.(type) {
 	case map[string]any:
 		node := &Node{raw: x}
-		if node.IsBaseTable() && match(node) {
+		if typeCheck(node) && match(node) {
 			replacement := build(node)
 			// Replace the map's contents in place so all references
 			// (including the one held by the parent slice/map) see
@@ -467,12 +501,12 @@ func replaceInValue(v any, match func(*Node) bool, build func(*Node) map[string]
 			return x
 		}
 		for k, child := range x {
-			x[k] = replaceInValue(child, match, build)
+			x[k] = replaceInValue(child, typeCheck, match, build)
 		}
 		return x
 	case []any:
 		for i, item := range x {
-			x[i] = replaceInValue(item, match, build)
+			x[i] = replaceInValue(item, typeCheck, match, build)
 		}
 		return x
 	default:

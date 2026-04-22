@@ -2,7 +2,7 @@ target: mart.final
 kind: table
 run_type: skip
 rows_affected: 0
-run_reason: deps unchanged
+warning: skipped: upstream model failed
 ---
 target: raw.source
 kind: table

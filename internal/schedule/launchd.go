@@ -71,24 +71,26 @@ func (l *launchdBackend) Install(projectName, projectDir, cronExpr, binaryPath s
 	label := l.label(projectName)
 	path, _ := l.plistPath(projectName)
 
-	tmpl := template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+	tmpl := template.Must(template.New("plist").Funcs(template.FuncMap{
+		"xml": xmlEscape,
+	}).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- cron: {{.Cron}} -->
+<!-- cron: {{.Cron | xml}} -->
 <dict>
     <key>Label</key>
-    <string>{{.Label}}</string>
+    <string>{{.Label | xml}}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{{.Binary}}</string>
+        <string>{{.Binary | xml}}</string>
         <string>run</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>{{.Dir}}</string>
+    <string>{{.Dir | xml}}</string>
     <key>StandardOutPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{.LogPath | xml}}</string>
     <key>StandardErrorPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{.LogPath | xml}}</string>
     {{.Schedule}}
 </dict>
 </plist>
@@ -266,4 +268,14 @@ func requireLiteralOrStar(name, val string) error {
 		return fmt.Errorf("invalid %s value %q", name, val)
 	}
 	return nil
+}
+
+// xmlEscape escapes special characters for XML string values.
+func xmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	return s
 }

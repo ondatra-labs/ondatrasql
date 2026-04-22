@@ -97,8 +97,15 @@ func computeDigestResponse(creds *digestCredentials, challenge, method, uri stri
 	// HA1 = H(username:realm:password)
 	ha1 := hashFn(fmt.Sprintf("%s:%s:%s", creds.Username, realm, creds.Password))
 
-	// HA2 = H(method:uri)
-	ha2 := hashFn(fmt.Sprintf("%s:%s", method, uri))
+	// HA2 = H(method:uri) for auth, H(method:uri:H(body)) for auth-int
+	var ha2 string
+	if qop == "auth-int" {
+		// RFC 2617: HA2 = H(method:uri:H(entityBody))
+		// We don't have the request body, so use H("") as body hash
+		ha2 = hashFn(fmt.Sprintf("%s:%s:%s", method, uri, hashFn("")))
+	} else {
+		ha2 = hashFn(fmt.Sprintf("%s:%s", method, uri))
+	}
 
 	// Response
 	var response string

@@ -105,8 +105,9 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 	output.Println(topLeft + strings.Repeat(horizontal, historyBoxWidth) + topRight)
 
 	// Centered title
-	padding := (historyBoxWidth - len(title)) / 2
-	rightPad := historyBoxWidth - len(title) - padding
+	titleWidth := len([]rune(title))
+	padding := (historyBoxWidth - titleWidth) / 2
+	rightPad := historyBoxWidth - titleWidth - padding
 	output.Println(vertical + strings.Repeat(" ", padding) + title + strings.Repeat(" ", rightPad) + vertical)
 
 	// Section border
@@ -117,7 +118,7 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 
 	if len(rows) == 0 {
 		line := "  No runs found"
-		output.Println(vertical + line + strings.Repeat(" ", historyBoxWidth-len(line)) + vertical)
+		output.Println(vertical + line + strings.Repeat(" ", historyBoxWidth-len([]rune(line))) + vertical)
 		output.Println(vertical + strings.Repeat(" ", historyBoxWidth) + vertical)
 		output.Println(bottomLeft + strings.Repeat(horizontal, historyBoxWidth) + bottomRight)
 		return
@@ -125,7 +126,7 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 
 	// Header
 	header := fmt.Sprintf("  %4s  %-19s  %-36s  %-6s  %-8s  %5s  %5s  %-22s", "ID", "Time", "Model", "Kind", "Type", "Rows", "ms", "Run ID")
-	output.Println(vertical + header + strings.Repeat(" ", historyBoxWidth-len(header)) + vertical)
+	output.Println(vertical + header + strings.Repeat(" ", historyBoxWidth-len([]rune(header))) + vertical)
 
 	// Empty line after header
 	output.Println(vertical + strings.Repeat(" ", historyBoxWidth) + vertical)
@@ -164,10 +165,12 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 
 		line := fmt.Sprintf("  %4s  %-19s  %-36s  %-6s  %-8s  %5s  %5s  %-22s", row["ID"], row["Time"], modelName, kind, runType, rowsVal, msVal, runID)
 		// Ensure line fits in box
-		if len(line) > historyBoxWidth {
-			line = line[:historyBoxWidth-3] + "..."
+		lineRunes := []rune(line)
+		if len(lineRunes) > historyBoxWidth {
+			line = string(lineRunes[:historyBoxWidth-3]) + "..."
+			lineRunes = []rune(line)
 		}
-		padding := historyBoxWidth - len(line)
+		padding := historyBoxWidth - len(lineRunes)
 		if padding < 0 {
 			padding = 0
 		}

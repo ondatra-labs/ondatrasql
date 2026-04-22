@@ -42,24 +42,28 @@ mkdir my-pipeline && cd my-pipeline
 ondatrasql init
 ```
 
-Ingest data from an API:
-
-```bash
-ondatrasql new raw.countries.star
-ondatrasql edit raw.countries.star
-```
+Ingest data from an API (create a blueprint in `lib/`):
 
 ```python
-# @kind: table
+# lib/countries_fetch.star
+API = {
+    "base_url": "https://restcountries.com",
+    "fetch": {
+        "args": [],
+        "dynamic_columns": True,
+    },
+}
 
-resp = http.get("https://restcountries.com/v3.1/region/europe")
+def fetch(page):
+    resp = http.get("/v3.1/region/europe")
+    rows = [{"name": c["name"]["common"], "capital": c["capital"][0], "population": c["population"]} for c in resp.json]
+    return {"rows": rows, "next": None}
+```
 
-for c in resp.json:
-    save.row({
-        "name": c["name"]["common"],
-        "capital": c["capital"][0],
-        "population": c["population"],
-    })
+```sql
+-- models/raw/countries.sql
+-- @kind: table
+SELECT * FROM countries_fetch()
 ```
 
 Transform with SQL:
@@ -108,27 +112,27 @@ SELECT date, SUM(total) AS revenue
 FROM staging.orders GROUP BY date
 ```
 
-**Starlark** — API ingestion (embedded scripting with Python-like syntax):
+**Lib functions** — API ingestion and outbound sync via Starlark in `lib/`:
+
+```sql
+-- models/raw/users.sql
+-- @kind: table
+SELECT * FROM my_api('users')
+```
 
 ```python
-# @kind: append
-# @incremental: updated_at
+# lib/my_api.star — fetch function called by the SQL model
+API = {"base_url": "https://api.example.com", "auth": {"env": "API_KEY"},
+       "fetch": {"args": ["resource"], "page_size": 100, "dynamic_columns": True}}
 
-resp = http.get("https://api.example.com/users")
-for user in resp.json:
-    save.row(user)
+def fetch(resource, page):
+    resp = http.get("/v1/" + resource, params={"limit": page.size, "cursor": page.cursor})
+    return {"rows": resp.json["items"], "next": resp.json.get("next")}
 ```
 
-**YAML** — declarative configuration for reusable source functions:
+Models are SQL files. Starlark is used in `lib/` for API transport (HTTP, auth, pagination).
 
-```yaml
-kind: append
-source: api_fetch
-config:
-  base_url: https://api.example.com
-```
-
-All model types execute in the same pipeline and share the same dependency graph.
+All models execute in the same pipeline and share the same dependency graph.
 
 ## Key Capabilities
 
@@ -137,7 +141,7 @@ All model types execute in the same pipeline and share the same dependency graph
 | SQL transformation | SQL models with automatic materialization and CDC |
 | API ingestion | Built-in HTTP, OAuth, pagination via Starlark |
 | Event collection | Embedded HTTP endpoint with durable buffering |
-| Outbound sync | Tracked models with content-hash change detection |
+| Outbound sync | Push to APIs via @sink with raw DuckLake change types |
 | Validation | 30 constraint macros, 18 audit macros, 14 warning macros |
 | Schema evolution | Automatic via ALTER TABLE (metadata-only in DuckLake) |
 | Sandbox preview | Full DAG simulation before committing |

@@ -239,10 +239,10 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 
 	case "tracked":
 		if model.UniqueKey == "" {
-			return 0, fmt.Errorf("tracked kind requires unique_key directive")
+			return 0, fmt.Errorf("tracked kind requires @unique_key directive")
 		}
 		// Bug 16 + 22: validate unique_key columns exist and contain no NULLs.
-		// Tracked uses unique_key as the row identity for content-hash dedup.
+		// Tracked uses unique_key as the group identity for content-hash dedup.
 		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
 			return 0, err
 		}
@@ -396,7 +396,6 @@ func (r *Runner) applyStorageHints(model *parser.Model) {
 
 // buildMergeSQL builds a MERGE INTO statement for upsert operations.
 func (r *Runner) buildMergeSQL(target, source, uniqueKey string, cols []string) string {
-	// Quote identifiers to handle reserved words, spaces, and mixed casing
 	qk := duckdb.QuoteIdentifier(uniqueKey)
 
 	// Build UPDATE SET clause for all columns except the unique key
@@ -410,7 +409,6 @@ func (r *Runner) buildMergeSQL(target, source, uniqueKey string, cols []string) 
 
 	setClause := "SET " + strings.Join(setClauses, ", ")
 	if len(setClauses) == 0 {
-		// If only the unique key column exists, just update the key itself
 		setClause = fmt.Sprintf("SET %s = source.%s", qk, qk)
 	}
 

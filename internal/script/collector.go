@@ -6,6 +6,7 @@ package script
 
 import (
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,8 +29,11 @@ type saveCollector struct {
 	columns []string
 }
 
-// add adds a row to the collector.
+// add adds a row to the collector. Empty rows (0 columns) are rejected.
 func (c *saveCollector) add(row map[string]interface{}) error {
+	if len(row) == 0 {
+		return fmt.Errorf("save.row: empty dict (no columns)")
+	}
 	// Track all unique columns across all rows (not just first row)
 	// This prevents data loss when later rows have extra columns
 	seen := make(map[string]bool)
@@ -100,7 +104,23 @@ func (c *saveCollector) createTempTable() (string, error) {
 		for _, row := range c.data {
 			vals := make([]driver.Value, len(c.columns))
 			for j, col := range c.columns {
-				vals[j] = row[col] // nil maps to NULL
+				v := row[col]
+				// Fix JSON round-trip: float64 that are whole numbers → int64
+				// for BIGINT columns (json.Unmarshal converts all numbers to float64)
+				if f, ok := v.(float64); ok && colTypes[col] == "BIGINT" {
+					v = int64(f)
+				}
+				// Convert slices/maps to JSON strings for VARCHAR columns.
+				// DuckDB Appender can't handle Go slices/maps directly.
+				switch v.(type) {
+				case []any, map[string]any:
+					if b, err := json.Marshal(v); err == nil {
+						v = string(b)
+					} else {
+						v = fmt.Sprintf("%v", v)
+					}
+				}
+				vals[j] = v // nil maps to NULL
 			}
 			if err := appender.AppendRow(vals...); err != nil {
 				return fmt.Errorf("append row: %w", err)
@@ -132,11 +152,18 @@ func (c *saveCollector) inferTypes() map[string]string {
 				}
 				continue
 			}
-			switch row[col].(type) {
+			switch v := row[col].(type) {
 			case int, int64:
 				types[col] = "BIGINT"
 			case float64:
-				types[col] = "DOUBLE"
+				// JSON unmarshal converts all numbers to float64.
+				// Detect integers to preserve BIGINT type.
+				if v == float64(int64(v)) {
+					types[col] = "BIGINT"
+					row[col] = int64(v) // convert back for Appender
+				} else {
+					types[col] = "DOUBLE"
+				}
 			case bool:
 				types[col] = "BOOLEAN"
 			default:

@@ -14,10 +14,8 @@ import (
 	"strings"
 	"time"
 
-	starlarkre "github.com/magnetde/starlark-re"
 	"go.starlark.net/starlark"
 	starlarkjson "go.starlark.net/lib/json"
-	starlarkmath "go.starlark.net/lib/math"
 	starlarktime "go.starlark.net/lib/time"
 	"go.starlark.net/syntax"
 
@@ -81,10 +79,14 @@ func fileOptions() *syntax.FileOptions {
 // libraryPredeclared returns the predeclared globals available to library modules.
 // This excludes save (write side effects — must be passed explicitly as a parameter)
 // but includes incremental (read-only state, safe as a global like env/http/json).
-func (r *Runtime) libraryPredeclared(ctx context.Context) starlark.StringDict {
+func (r *Runtime) libraryPredeclared(ctx context.Context, httpCfg ...*apiHTTPConfig) starlark.StringDict {
+	var cfg *apiHTTPConfig
+	if len(httpCfg) > 0 {
+		cfg = httpCfg[0]
+	}
 	return starlark.StringDict{
 		"incremental": incrementalModule(r.incrState),
-		"http":        httpModule(ctx),
+		"http":        httpModule(ctx, cfg),
 		"env":         envModule(),
 		"getvariable": getvariableBuiltin(r.sess),
 		"query":       queryBuiltin(r.sess),
@@ -94,9 +96,7 @@ func (r *Runtime) libraryPredeclared(ctx context.Context) starlark.StringDict {
 		"csv":         csvModule(),
 		"oauth":       oauthModule(ctx, r.projectDir),
 		"time":        starlarktime.Module,
-		"math":        starlarkmath.Module,
 		"json":        starlarkjson.Module,
-		"re":          starlarkre.NewModule(),
 		"abort": starlark.NewBuiltin("abort", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			if err := starlark.UnpackPositionalArgs(fn.Name(), args, kwargs, 0); err != nil {
 				return nil, err
@@ -232,6 +232,16 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 		}
 	}
 
+	// Track whether we returned successfully so defer can close bc on error
+	var succeeded bool
+	if bc != nil {
+		defer func() {
+			if !succeeded {
+				bc.close()
+			}
+		}()
+	}
+
 	// Create a Starlark thread with context for cancellation
 	thread := &starlark.Thread{
 		Name: target,
@@ -268,9 +278,6 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 	// Execute the script with Python-like semantics enabled
 	_, err := starlark.ExecFileOptions(fileOptions(), thread, target+".star", code, predeclared)
 	if err != nil {
-		if bc != nil {
-			bc.close()
-		}
 		return nil, fmt.Errorf("run script: %w", err)
 	}
 
@@ -285,10 +292,11 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 		result.collector = sc
 	}
 
+	succeeded = true
 	return result, nil
 }
 
-// RunSource executes a YAML model by loading a source function from lib/ and
+// RunSource executes a lib/ blueprint by loading a source function from lib/ and
 // calling it directly via starlark.Call(). This avoids generating Starlark source
 // code as a string — config values are converted to Starlark values in Go and
 // passed as keyword arguments.
@@ -310,6 +318,16 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 			target: target,
 			sess:   r.sess,
 		}
+	}
+
+	// Track whether we returned successfully so defer can close bc on error
+	var succeeded bool
+	if bc != nil {
+		defer func() {
+			if !succeeded {
+				bc.close()
+			}
+		}()
 	}
 
 	// Build predeclared
@@ -348,10 +366,16 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 		return nil, fmt.Errorf("load source %q: %w", source, err)
 	}
 
-	// Get the function by name
-	fn, ok := globals[source]
+	// Get the function by name — try "fetch" first (lib convention), then source name
+	funcName := "fetch"
+	fn, ok := globals[funcName]
 	if !ok {
-		return nil, fmt.Errorf("source %q: function %q not found in %s", source, source, modulePath)
+		// Fallback: try the source name (backwards compat)
+		funcName = source
+		fn, ok = globals[funcName]
+		if !ok {
+			return nil, fmt.Errorf("source %q: no fetch() or %s() function in %s", source, source, modulePath)
+		}
 	}
 	callable, ok := fn.(starlark.Callable)
 	if !ok {
@@ -377,9 +401,6 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 	// Call the function
 	_, err = starlark.Call(thread, callable, args, kwargs)
 	if err != nil {
-		if bc != nil {
-			bc.close()
-		}
 		return nil, fmt.Errorf("run source: %w", err)
 	}
 
@@ -392,7 +413,471 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 		result.collector = sc
 	}
 
+	succeeded = true
 	return result, nil
+}
+
+// RunSourcePaginated executes a paginated fetch from lib/<source>.star.
+// Runtime calls fetch(page, **kwargs) per page until next is None.
+// fetch() returns {"rows": [...], "next": cursor_or_none}.
+func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string, config map[string]any, pageSize int, httpCfg ...*apiHTTPConfig) (*Result, error) {
+	start := time.Now()
+
+	var cfg *apiHTTPConfig
+	if len(httpCfg) > 0 {
+		cfg = httpCfg[0]
+	}
+
+	// Create collector
+	var collector rowCollector
+	var bc *badgerCollector
+	if r.ingestDir != "" {
+		var err error
+		bc, err = newBadgerCollector(target, r.ingestDir, r.sess)
+		if err != nil {
+			return nil, fmt.Errorf("create ingest collector: %w", err)
+		}
+		collector = bc
+	} else {
+		collector = &saveCollector{target: target, sess: r.sess}
+	}
+
+	// Track whether we returned successfully so defer can close bc on error
+	var succeeded bool
+	if bc != nil {
+		defer func() {
+			if !succeeded {
+				bc.close()
+			}
+		}()
+	}
+
+	libPredeclared := r.libraryPredeclared(ctx, cfg)
+
+	loadCache := make(map[string]starlark.StringDict)
+	loadFunc := r.makeLoadFunc(ctx, libPredeclared, loadCache)
+
+	thread := &starlark.Thread{
+		Name: target,
+		Print: func(_ *starlark.Thread, msg string) {
+			fmt.Fprintln(os.Stderr, RedactSecrets(msg))
+		},
+		Load: loadFunc,
+	}
+	thread.SetLocal("ctx", ctx)
+	thread.SetLocal("sess", r.sess)
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel(ctx.Err().Error())
+		case <-done:
+		}
+	}()
+
+	modulePath := "lib/" + source + ".star"
+	globals, err := loadFunc(thread, modulePath)
+	if err != nil {
+		return nil, fmt.Errorf("load source %q: %w", source, err)
+	}
+
+	fn, ok := globals["fetch"]
+	if !ok {
+		return nil, fmt.Errorf("source %q: no fetch() function in %s", source, modulePath)
+	}
+	callable, ok := fn.(starlark.Callable)
+	if !ok {
+		return nil, fmt.Errorf("source %q: fetch is not a function (got %s)", source, fn.Type())
+	}
+
+	// Check for finalize_fetch
+	var finalizeFn starlark.Callable
+	if ff, ok := globals["finalize_fetch"]; ok {
+		if fc, ok := ff.(starlark.Callable); ok {
+			finalizeFn = fc
+		}
+	}
+
+	// Build keyword args from config
+	var kwargs []starlark.Tuple
+	for key, val := range config {
+		sv, err := goToStarlark(val)
+		if err != nil {
+			return nil, fmt.Errorf("source %q: config key %q: %w", source, key, err)
+		}
+		kwargs = append(kwargs, starlark.Tuple{starlark.String(key), sv})
+	}
+
+	// Pagination loop
+	var cursor starlark.Value = starlark.None
+	pageNum := 1
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		page := pageModule(cursor, pageSize, pageNum)
+
+		// Call fetch(**kwargs, page=page) -- page passed as keyword arg
+		allKwargs := make([]starlark.Tuple, len(kwargs)+1)
+		copy(allKwargs, kwargs)
+		allKwargs[len(kwargs)] = starlark.Tuple{starlark.String("page"), page}
+		retVal, err := starlark.Call(thread, callable, nil, allKwargs)
+		if err != nil {
+			return nil, fmt.Errorf("fetch page %d: %w", pageNum, err)
+		}
+
+		// Parse return value: {"rows": [...], "next": cursor_or_none}
+		retDict, ok := retVal.(*starlark.Dict)
+		if !ok {
+			return nil, fmt.Errorf("fetch page %d: must return dict {rows, next}, got %s", pageNum, retVal.Type())
+		}
+
+		// Extract rows
+		rowsVal, found, _ := retDict.Get(starlark.String("rows"))
+		if !found {
+			return nil, fmt.Errorf("fetch page %d: return dict must include 'rows' key", pageNum)
+		}
+		rowsList, ok := rowsVal.(*starlark.List)
+		if !ok {
+			return nil, fmt.Errorf("fetch page %d: 'rows' must be a list, got %s", pageNum, rowsVal.Type())
+		}
+
+		// save.row() for each returned row
+		for i := 0; i < rowsList.Len(); i++ {
+			item := rowsList.Index(i)
+			goVal, err := starlarkToGo(item)
+			if err != nil {
+				return nil, fmt.Errorf("fetch page %d row %d: convert: %w", pageNum, i, err)
+			}
+			rowMap, ok := goVal.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("fetch page %d row %d: expected dict, got %T", pageNum, i, goVal)
+			}
+			if addErr := collector.add(rowMap); addErr != nil {
+				return nil, fmt.Errorf("fetch page %d row %d: %w", pageNum, i, addErr)
+			}
+		}
+
+		// Extract next cursor. None, missing, or empty string = last page.
+		nextVal, found, _ := retDict.Get(starlark.String("next"))
+		if !found || nextVal == starlark.None {
+			break
+		}
+		if s, ok := nextVal.(starlark.String); ok && string(s) == "" {
+			break
+		}
+		cursor = nextVal
+		pageNum++
+	}
+
+	// Call finalize_fetch(row_count) if defined
+	if finalizeFn != nil {
+		_, err := starlark.Call(thread, finalizeFn, starlark.Tuple{
+			starlark.MakeInt64(int64(collector.count())),
+		}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("finalize_fetch: %w", err)
+		}
+	}
+
+	result := &Result{
+		Duration: time.Since(start),
+		RowCount: int64(collector.count()),
+		badger:   bc,
+	}
+	if sc, ok := collector.(*saveCollector); ok {
+		result.collector = sc
+	}
+
+	succeeded = true
+	return result, nil
+}
+
+// SinkResult holds the return value from a push() call.
+type SinkResult struct {
+	// PerRow maps sync_key -> "ok" or "error: message" (sync mode).
+	// Nil if push returned None (atomic mode).
+	PerRow map[string]string
+
+	// RawReturn holds the full Starlark return value converted to Go types.
+	// Used by async mode for job references that may contain non-string values
+	// (e.g. {"job_id": 123, "meta": {"cursor": "x"}}).
+	RawReturn map[string]any
+}
+
+// RunSink executes a SINK push function from lib/<sink>.star.
+// It calls push(rows) with the given batch and returns the Starlark return value.
+// Optional httpCfg injects API dict defaults (base_url, headers, etc.) into http module.
+func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, httpCfg ...*apiHTTPConfig) (*SinkResult, error) {
+	var cfg *apiHTTPConfig
+	if len(httpCfg) > 0 {
+		cfg = httpCfg[0]
+	}
+	libPredeclared := r.libraryPredeclared(ctx, cfg)
+
+	// Add sink module to predeclared
+	libPredeclared["sink"] = sinkModule(batchNumber)
+
+	loadCache := make(map[string]starlark.StringDict)
+	loadFunc := r.makeLoadFunc(ctx, libPredeclared, loadCache)
+
+	thread := &starlark.Thread{
+		Name: sinkName,
+		Print: func(_ *starlark.Thread, msg string) {
+			fmt.Fprintln(os.Stderr, RedactSecrets(msg))
+		},
+		Load: loadFunc,
+	}
+	thread.SetLocal("ctx", ctx)
+	thread.SetLocal("sess", r.sess)
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel(ctx.Err().Error())
+		case <-done:
+		}
+	}()
+
+	// Load the sink module: lib/<sink>.star
+	modulePath := "lib/" + sinkName + ".star"
+	globals, err := loadFunc(thread, modulePath)
+	if err != nil {
+		return nil, fmt.Errorf("load sink %q: %w", sinkName, err)
+	}
+
+	// Find push() function
+	fn, ok := globals["push"]
+	if !ok {
+		return nil, fmt.Errorf("sink %q: no push() function in %s", sinkName, modulePath)
+	}
+	callable, ok := fn.(starlark.Callable)
+	if !ok {
+		return nil, fmt.Errorf("sink %q: push is not a function (got %s)", sinkName, fn.Type())
+	}
+
+	// Convert []map[string]any to []interface{} for goToStarlark compatibility
+	rowsIface := make([]interface{}, len(rows))
+	for i, r := range rows {
+		m := make(map[string]interface{}, len(r))
+		for k, v := range r {
+			m[k] = v
+		}
+		rowsIface[i] = m
+	}
+	starlarkRows, err := goToStarlark(rowsIface)
+	if err != nil {
+		return nil, fmt.Errorf("sink %q: convert rows: %w", sinkName, err)
+	}
+
+	// Call push(rows)
+	retVal, err := starlark.Call(thread, callable, starlark.Tuple{starlarkRows}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("push: %w", err)
+	}
+
+	// Parse return value
+	result := &SinkResult{}
+	if retVal == nil || retVal == starlark.None {
+		return result, nil
+	}
+
+	// Dict return: convert to Go types
+	retDict, ok := retVal.(*starlark.Dict)
+	if !ok {
+		return result, nil
+	}
+
+	// Always populate RawReturn with full Go types (handles nested dicts, ints, etc.)
+	rawGo, convErr := starlarkToGo(retDict)
+	if convErr != nil {
+		return nil, fmt.Errorf("push: cannot convert return value: %w", convErr)
+	}
+	if m, ok := rawGo.(map[string]any); ok {
+		result.RawReturn = m
+	}
+
+	// Also populate PerRow for sync mode (string values only)
+	result.PerRow = make(map[string]string)
+	for _, item := range retDict.Items() {
+		key, _ := starlark.AsString(item[0])
+		if key == "" {
+			continue
+		}
+		// Convert value to string — handles int, bool, etc.
+		if s, ok := starlark.AsString(item[1]); ok {
+			result.PerRow[key] = s
+		} else {
+			result.PerRow[key] = item[1].String()
+		}
+	}
+
+	return result, nil
+}
+
+// RunSinkFinalize calls the optional finalize(succeeded, failed) function after all batches.
+// Returns nil if finalize() is not defined (no-op).
+func (r *Runtime) RunSinkFinalize(ctx context.Context, sinkName string, succeeded, failed int64, httpCfg ...*apiHTTPConfig) error {
+	var cfg *apiHTTPConfig
+	if len(httpCfg) > 0 {
+		cfg = httpCfg[0]
+	}
+	libPredeclared := r.libraryPredeclared(ctx, cfg)
+
+	loadCache := make(map[string]starlark.StringDict)
+	loadFunc := r.makeLoadFunc(ctx, libPredeclared, loadCache)
+
+	thread := &starlark.Thread{
+		Name: sinkName + "_finalize",
+		Print: func(_ *starlark.Thread, msg string) {
+			fmt.Fprintln(os.Stderr, RedactSecrets(msg))
+		},
+		Load: loadFunc,
+	}
+	thread.SetLocal("ctx", ctx)
+	thread.SetLocal("sess", r.sess)
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel(ctx.Err().Error())
+		case <-done:
+		}
+	}()
+
+	modulePath := "lib/" + sinkName + ".star"
+	globals, err := loadFunc(thread, modulePath)
+	if err != nil {
+		return fmt.Errorf("load sink %q: %w", sinkName, err)
+	}
+
+	fn, ok := globals["finalize"]
+	if !ok {
+		return nil // finalize is optional
+	}
+	callable, ok := fn.(starlark.Callable)
+	if !ok {
+		return fmt.Errorf("sink %q: finalize is not a function", sinkName)
+	}
+
+	_, err = starlark.Call(thread, callable, starlark.Tuple{
+		starlark.MakeInt64(succeeded),
+		starlark.MakeInt64(failed),
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("finalize: %w", err)
+	}
+
+	return nil
+}
+
+// RunSinkPoll calls the poll() function for async batch mode.
+func (r *Runtime) RunSinkPoll(ctx context.Context, sinkName string, jobRef map[string]any, httpCfg ...*apiHTTPConfig) (done bool, perRow map[string]string, err error) {
+	var cfg *apiHTTPConfig
+	if len(httpCfg) > 0 {
+		cfg = httpCfg[0]
+	}
+	libPredeclared := r.libraryPredeclared(ctx, cfg)
+
+	loadCache := make(map[string]starlark.StringDict)
+	loadFunc := r.makeLoadFunc(ctx, libPredeclared, loadCache)
+
+	thread := &starlark.Thread{
+		Name: sinkName + "_poll",
+		Print: func(_ *starlark.Thread, msg string) {
+			fmt.Fprintln(os.Stderr, RedactSecrets(msg))
+		},
+		Load: loadFunc,
+	}
+	thread.SetLocal("ctx", ctx)
+	thread.SetLocal("sess", r.sess)
+
+	doneC := make(chan struct{})
+	defer close(doneC)
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel(ctx.Err().Error())
+		case <-doneC:
+		}
+	}()
+
+	modulePath := "lib/" + sinkName + ".star"
+	globals, err := loadFunc(thread, modulePath)
+	if err != nil {
+		return false, nil, fmt.Errorf("load sink %q: %w", sinkName, err)
+	}
+
+	fn, ok := globals["poll"]
+	if !ok {
+		return false, nil, fmt.Errorf("sink %q: no poll() function (required for async batch_mode)", sinkName)
+	}
+	callable, ok := fn.(starlark.Callable)
+	if !ok {
+		return false, nil, fmt.Errorf("sink %q: poll is not a function", sinkName)
+	}
+
+	jobRefVal, err := goToStarlark(jobRef)
+	if err != nil {
+		return false, nil, fmt.Errorf("convert job_ref: %w", err)
+	}
+
+	retVal, err := starlark.Call(thread, callable, starlark.Tuple{jobRefVal}, nil)
+	if err != nil {
+		return false, nil, fmt.Errorf("poll: %w", err)
+	}
+
+	retDict, ok := retVal.(*starlark.Dict)
+	if !ok {
+		return false, nil, fmt.Errorf("poll must return a dict, got %s", retVal.Type())
+	}
+
+	// Check "done" field -- must be a bool (True/False)
+	doneVal, found, _ := retDict.Get(starlark.String("done"))
+	if !found {
+		return false, nil, fmt.Errorf("poll return must include 'done' key")
+	}
+	if doneVal != starlark.True && doneVal != starlark.False {
+		return false, nil, fmt.Errorf("poll 'done' must be True or False, got %s (%s)", doneVal.String(), doneVal.Type())
+	}
+
+	if doneVal == starlark.False {
+		return false, nil, nil
+	}
+
+	// Check "per_row" field
+	perRowVal, found, _ := retDict.Get(starlark.String("per_row"))
+	if !found {
+		return true, nil, nil
+	}
+	perRowDict, ok := perRowVal.(*starlark.Dict)
+	if !ok {
+		return true, nil, nil
+	}
+
+	perRow = make(map[string]string)
+	for _, item := range perRowDict.Items() {
+		key, _ := starlark.AsString(item[0])
+		if key == "" {
+			continue
+		}
+		// Convert value to string — same logic as RunSink PerRow
+		if s, ok := starlark.AsString(item[1]); ok {
+			perRow[key] = s
+		} else {
+			perRow[key] = item[1].String()
+		}
+	}
+
+	return true, perRow, nil
 }
 
 // CreateTempTable materializes collected script data into a DuckDB temp table.

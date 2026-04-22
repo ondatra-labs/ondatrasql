@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
-//go:build e2e
+//go:build e2e && bench
 
 package e2e
 
@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,18 +24,6 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
-
-// freePortE2E allocates a free TCP port and returns it as a string.
-func freePortE2E(t testing.TB) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port)
-	ln.Close()
-	return port
-}
 
 // startDaemon starts an in-process event daemon and returns ports and cleanup.
 func startDaemon(t testing.TB, model *parser.Model) (*collect.Store, string, string, context.CancelFunc) {

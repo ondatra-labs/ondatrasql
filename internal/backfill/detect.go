@@ -81,7 +81,10 @@ func CaptureSchema(sess *duckdb.Session, table string) ([]Column, error) {
 		// schema.table (model targets after path flattening)
 		query = fmt.Sprintf("SELECT * FROM ondatra_get_columns('%s', '%s')", escapeSQL(parts[0]), escapeSQL(parts[1]))
 	default:
-		return nil, fmt.Errorf("invalid table name %q: max 2 parts (schema.table) supported", table)
+		// 3-part name (catalog.schema.table) or more: use last two parts
+		schema := parts[len(parts)-2]
+		tbl := parts[len(parts)-1]
+		query = fmt.Sprintf("SELECT * FROM ondatra_get_columns('%s', '%s')", escapeSQL(schema), escapeSQL(tbl))
 	}
 
 	rows, err := sess.QueryRows(query)
@@ -247,6 +250,9 @@ func classifyChangeType(change SchemaChange, sess *duckdb.Session) SchemaChangeT
 // areAllTypesPromotable checks if all type changes can be done without data loss.
 // Uses batched SQL query with ondatra_batch_type_check macro for efficiency.
 func areAllTypesPromotable(changes []TypeChange, sess *duckdb.Session) bool {
+	if sess == nil {
+		return false // No session, assume not promotable
+	}
 	// Build comma-separated pairs: "old1,new1,old2,new2,..."
 	var pairs []string
 	for _, tc := range changes {
@@ -285,7 +291,11 @@ func GetPreviousSnapshot(sess *duckdb.Session, target string) (int64, error) {
 		snapshotCatalog, escapeSQL(target))
 	result, err := sess.QueryValue(query)
 	if err != nil {
-		return 0, nil
+		// No DuckLake catalog (snapshots() not available) — treat as no previous snapshot
+		if strings.Contains(err.Error(), "does not exist") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("get previous snapshot for %s: %w", target, err)
 	}
 
 	if result == "" {

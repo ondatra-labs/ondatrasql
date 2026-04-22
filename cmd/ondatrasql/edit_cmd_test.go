@@ -33,6 +33,9 @@ func TestEditPathTraversal(t *testing.T) {
 		"variables/../secrets",
 		"macros/sub/nested",
 		"macros/",
+		"..",          // Before fix: split("..", ".") = ["","",""] — none equal ".."
+		"..hidden",    // contains ".." substring
+		"schema..table", // double dot in model name
 	} {
 		t.Run(target, func(t *testing.T) {
 			err := runEdit(cfg, target)

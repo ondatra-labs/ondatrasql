@@ -190,65 +190,6 @@ func FuzzParseColumnDefs(f *testing.F) {
 	})
 }
 
-func FuzzParseYAMLModel(f *testing.F) {
-	f.Add(`kind: table
-source: my_source
-config:
-  key: value`)
-
-	f.Add(`kind: append
-incremental: updated_at
-source: api_fetch
-config:
-  url: https://api.example.com
-  page_size: 100`)
-
-	f.Add(`kind: merge
-unique_key: id
-source: crm_sync
-config:
-  account_id: "12345"`)
-
-	f.Add(`source: minimal`)
-
-	f.Add(`kind: scd2
-unique_key: customer_id
-source: customer_loader
-description: Customer SCD2 loader`)
-
-	// Edge cases
-	f.Add(``)
-	f.Add(`kind: table`)                              // missing source
-	f.Add(`kind: invalid_kind` + "\n" + `source: x`)  // invalid kind
-	f.Add(`source: x` + "\n" + `config:` + "\n" + `  nested:` + "\n" + `    deep: value`)
-	f.Add(`source: x` + "\n" + `config:` + "\n" + `  list:` + "\n" + `    - a` + "\n" + `    - b`)
-	f.Add(`not valid yaml: [`)
-
-	f.Fuzz(func(t *testing.T, content string) {
-		dir := t.TempDir()
-		modelDir := filepath.Join(dir, "models", "raw")
-		os.MkdirAll(modelDir, 0o755)
-		modelPath := filepath.Join(modelDir, "test.yaml")
-		os.WriteFile(modelPath, []byte(content), 0o644)
-
-		m, err := ParseModel(modelPath, dir)
-		if err != nil {
-			return
-		}
-		// Target must always be derived from path
-		if m.Target == "" {
-			t.Error("successful parse should produce non-empty Target")
-		}
-		// Source must be non-empty for YAML models
-		if m.Source == "" {
-			t.Error("successful parse should produce non-empty Source")
-		}
-		// Must be a script model
-		if m.ScriptType != ScriptTypeStarlark {
-			t.Errorf("YAML model should have ScriptType=starlark, got %q", m.ScriptType)
-		}
-	})
-}
 
 func FuzzValidateIdentifier(f *testing.F) {
 	f.Add("staging.orders")
@@ -319,7 +260,7 @@ func FuzzIsModelFile(f *testing.F) {
 		result := IsModelFile(path)
 		ext := filepath.Ext(path)
 		// Consistency: .sql, .star, .yaml, .yml files must return true, others false
-		validExt := ext == ".sql" || ext == ".star" || ext == ".yaml" || ext == ".yml"
+		validExt := ext == ".sql"
 		if validExt && !result {
 			t.Errorf("IsModelFile(%q) = false, want true for %s extension", path, ext)
 		}

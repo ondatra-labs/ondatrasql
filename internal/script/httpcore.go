@@ -15,12 +15,17 @@ import (
 	"math/rand"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// defaultHTTPTransport is shared across all normal (non-mTLS, non-insecure)
+// HTTP requests to reuse connections and avoid leaking goroutines/file descriptors.
+var defaultHTTPTransport = http.DefaultTransport.(*http.Transport).Clone()
 
 // HTTPResponse holds the result of an HTTP request in pure Go types.
 type HTTPResponse struct {
@@ -66,9 +71,18 @@ func DoHTTPWithRetry(ctx context.Context, method, urlStr string, body []byte, he
 		if result.StatusCode == 401 && opts.DigestAuth != nil {
 			challenge := result.Headers.Get("Www-Authenticate")
 			if strings.HasPrefix(challenge, "Digest ") {
-				authHeader := computeDigestResponse(opts.DigestAuth, challenge, method, urlStr)
+				// Digest auth requires the Request-URI (path+query), not the full URL
+				digestURI := urlStr
+				if u, err := url.Parse(urlStr); err == nil {
+					digestURI = u.RequestURI()
+				}
+				authHeader := computeDigestResponse(opts.DigestAuth, challenge, method, digestURI)
+				if headers == nil {
+					headers = make(map[string]string)
+				}
 				headers["Authorization"] = authHeader
 				opts.DigestAuth = nil // don't retry digest again
+				maxAttempts++         // digest challenge doesn't count against retry budget
 				continue
 			}
 		}
@@ -108,34 +122,36 @@ func DoHTTP(ctx context.Context, method, urlStr string, body []byte, headers map
 		req.Header.Set(k, v)
 	}
 
-	transport := &http.Transport{}
-	tlsConfig := &tls.Config{}
-
-	if opts.Insecure {
-		tlsConfig.InsecureSkipVerify = true
-	}
-
-	if opts.ClientCert != nil {
-		cert, err := tls.LoadX509KeyPair(opts.ClientCert.CertFile, opts.ClientCert.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load client certificate: %w", err)
+	// Use the shared default transport for normal requests to avoid
+	// leaking idle connections and goroutines. Only create a custom
+	// transport when mTLS or insecure mode requires it.
+	var transport http.RoundTripper = defaultHTTPTransport
+	if opts.Insecure || opts.ClientCert != nil {
+		customTransport := defaultHTTPTransport.Clone()
+		if opts.Insecure {
+			customTransport.TLSClientConfig.InsecureSkipVerify = true
 		}
-		tlsConfig.Certificates = []tls.Certificate{cert}
-
-		if opts.ClientCert.CAFile != "" {
-			caCert, err := os.ReadFile(opts.ClientCert.CAFile)
+		if opts.ClientCert != nil {
+			cert, err := tls.LoadX509KeyPair(opts.ClientCert.CertFile, opts.ClientCert.KeyFile)
 			if err != nil {
-				return nil, fmt.Errorf("read CA certificate: %w", err)
+				return nil, fmt.Errorf("load client certificate: %w", err)
 			}
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				return nil, fmt.Errorf("failed to parse CA certificate")
-			}
-			tlsConfig.RootCAs = caCertPool
-		}
-	}
+			customTransport.TLSClientConfig.Certificates = []tls.Certificate{cert}
 
-	transport.TLSClientConfig = tlsConfig
+			if opts.ClientCert.CAFile != "" {
+				caCert, err := os.ReadFile(opts.ClientCert.CAFile)
+				if err != nil {
+					return nil, fmt.Errorf("read CA certificate: %w", err)
+				}
+				caCertPool := x509.NewCertPool()
+				if !caCertPool.AppendCertsFromPEM(caCert) {
+					return nil, fmt.Errorf("failed to parse CA certificate")
+				}
+				customTransport.TLSClientConfig.RootCAs = caCertPool
+			}
+		}
+		transport = customTransport
+	}
 
 	client := &http.Client{
 		Timeout:   opts.Timeout,

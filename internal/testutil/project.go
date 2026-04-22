@@ -7,6 +7,8 @@
 package testutil
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -63,7 +65,12 @@ func NewProject(t *testing.T) *Project {
 		t.Fatalf("init catalog: %v", err)
 	}
 
-	t.Cleanup(func() { sess.Close() })
+	t.Cleanup(func() {
+		sess.Close()
+		// Clean up per-PID DuckDB extension cache to prevent /tmp bloat
+		extDir := filepath.Join(os.TempDir(), fmt.Sprintf("duckdb-ext-%d", os.Getpid()))
+		os.RemoveAll(extDir)
+	})
 
 	return &Project{Dir: dir, Sess: sess, t: t}
 }

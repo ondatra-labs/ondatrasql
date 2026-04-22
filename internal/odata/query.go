@@ -92,6 +92,8 @@ func BuildQuery(entity EntitySchema, params url.Values) (string, error) {
 	// $search — full-text search across all VARCHAR columns
 	if search := params.Get("$search"); search != "" {
 		searchVal := strings.ReplaceAll(search, "'", "''")
+		searchVal = strings.ReplaceAll(searchVal, "%", "\\%")
+		searchVal = strings.ReplaceAll(searchVal, "_", "\\_")
 		var searchConds []string
 		for _, col := range entity.Columns {
 			if col.EdmType == "Edm.String" {
@@ -323,6 +325,8 @@ func BuildCountQuery(entity EntitySchema, params url.Values) (string, error) {
 	// $search must match BuildQuery behavior
 	if search := params.Get("$search"); search != "" {
 		searchVal := strings.ReplaceAll(search, "'", "''")
+		searchVal = strings.ReplaceAll(searchVal, "%", "\\%")
+		searchVal = strings.ReplaceAll(searchVal, "_", "\\_")
 		var searchConds []string
 		for _, col := range entity.Columns {
 			if col.EdmType == "Edm.String" {
@@ -578,15 +582,15 @@ func filterNodeToSQL(node *godata.ParseNode, validCols map[string]bool) (string,
 		// all() = NOT (NOT predicate)
 		return fmt.Sprintf("NOT (NOT (%s))", predicate), nil
 
-	// Date/time/duration/guid literals
+	// Date/time/duration/guid literals — escape quotes to prevent SQL injection
 	case godata.ExpressionTokenDate:
-		return fmt.Sprintf("DATE '%s'", node.Token.Value), nil
+		return fmt.Sprintf("DATE '%s'", strings.ReplaceAll(node.Token.Value, "'", "''")), nil
 	case godata.ExpressionTokenTime:
-		return fmt.Sprintf("TIME '%s'", node.Token.Value), nil
+		return fmt.Sprintf("TIME '%s'", strings.ReplaceAll(node.Token.Value, "'", "''")), nil
 	case godata.ExpressionTokenDateTime:
-		return fmt.Sprintf("TIMESTAMP '%s'", node.Token.Value), nil
+		return fmt.Sprintf("TIMESTAMP '%s'", strings.ReplaceAll(node.Token.Value, "'", "''")), nil
 	case godata.ExpressionTokenDuration:
-		return fmt.Sprintf("INTERVAL '%s'", node.Token.Value), nil
+		return fmt.Sprintf("INTERVAL '%s'", strings.ReplaceAll(node.Token.Value, "'", "''")), nil
 
 	default:
 		return "", fmt.Errorf("unsupported filter token: %s (%d)", node.Token.Value, t)
@@ -709,12 +713,12 @@ func funcToSQL(node *godata.ParseNode, validCols map[string]bool) (string, error
 		// substringof('val',col) → col ILIKE '%val%' (args reversed vs contains)
 		return fmt.Sprintf("(%s ILIKE '%%' || %s || '%%')", args[1], args[0]), nil
 
-	// Pattern matching
+	// Pattern matching — limit pattern length to prevent ReDoS
 	case "matchespattern":
 		if len(args) != 2 {
 			return "", fmt.Errorf("matchesPattern() requires 2 arguments")
 		}
-		return fmt.Sprintf("regexp_matches(%s, %s)", args[0], args[1]), nil
+		return fmt.Sprintf("CASE WHEN length(%s) > 1000 THEN false ELSE regexp_matches(%s, %s) END", args[1], args[0], args[1]), nil
 
 	// Type functions
 	case "cast":

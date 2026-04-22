@@ -17,6 +17,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/git"
+	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -57,6 +58,16 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		return fmt.Errorf("create session: %w", err)
 	}
 	defer sess.Close()
+
+	// Scan lib/ for TABLE/SINK functions and register dummy macros
+	// so json_serialize_sql() accepts FROM lib_func(...) syntax
+	libReg, err := libregistry.Scan(cfg.ProjectDir)
+	if err != nil {
+		return fmt.Errorf("scan lib/: %w", err)
+	}
+	if err := libReg.RegisterMacros(sess); err != nil {
+		return fmt.Errorf("register lib macros: %w", err)
+	}
 
 	// Build DAG with AST-based dependency extraction (before catalog attach)
 	// This uses DuckDB's parser which doesn't need the lake attached
@@ -111,6 +122,11 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		output.Fprintf("Running %d models...\n", len(sortedModels))
 	}
 
+	// Validate model + sink compatibility before execution
+	if err := execute.ValidateModelSinkCompat(sortedModels, libReg); err != nil {
+		return err
+	}
+
 	// Get git info once for the entire run
 	gitInfo := git.GetInfo(cfg.ProjectDir)
 
@@ -127,6 +143,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL,
 		adminPort,
 		cfg.ProjectDir,
+		libReg,
 		func(model *parser.Model, result *execute.Result, err error) bool {
 			if sandboxMode {
 				printSandboxResult(result, model.Target, err)

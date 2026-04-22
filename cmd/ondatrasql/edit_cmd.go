@@ -57,10 +57,8 @@ func runEdit(cfg *config.Config, target string) error {
 		sourceFile = filepath.Join("config", "settings.sql")
 	default:
 		// Reject path traversal attempts
-		for _, p := range strings.Split(target, ".") {
-			if p == ".." || strings.ContainsAny(p, `/\`) {
-				return fmt.Errorf("invalid target: %q", target)
-			}
+		if strings.Contains(target, "..") || strings.ContainsAny(target, `/\`) {
+			return fmt.Errorf("invalid target: %q", target)
 		}
 		// Find the source file for the model
 		var err error
@@ -118,12 +116,11 @@ func findModelSourceFile(cfg *config.Config, target string) (string, error) {
 	}
 
 	// Fallback: search in models directory
-	// Try common patterns: schema/name.sql, schema/name.star
+	// Try common patterns: schema/name.sql
 	parts := splitTarget(target)
 	if len(parts) == 2 {
 		patterns := []string{
 			filepath.Join(cfg.ModelsPath, parts[0], parts[1]+".sql"),
-			filepath.Join(cfg.ModelsPath, parts[0], parts[1]+".star"),
 			filepath.Join(cfg.ModelsPath, parts[0]+"."+parts[1]+".sql"),
 		}
 		for _, pattern := range patterns {
@@ -138,10 +135,10 @@ func findModelSourceFile(cfg *config.Config, target string) (string, error) {
 }
 
 // splitTarget splits "schema.table" or "schema.table.sql" into ["schema", "table"].
-// Known extensions (.sql, .star, .yaml, .yml) are stripped before splitting.
+// Known extensions (.sql) are stripped before splitting.
 func splitTarget(target string) []string {
 	lower := strings.ToLower(target)
-	for _, ext := range []string{".sql", ".star", ".yaml", ".yml"} {
+	for _, ext := range []string{".sql"} {
 		if strings.HasSuffix(lower, ext) {
 			target = target[:len(target)-len(ext)]
 			break

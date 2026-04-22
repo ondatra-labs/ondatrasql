@@ -48,7 +48,6 @@ func CreateGoogleJWT(key ServiceAccountKey, scope string) (string, error) {
 	now := time.Now().Unix()
 	claims := map[string]interface{}{
 		"iss":   key.ClientEmail,
-		"sub":   key.ClientEmail,
 		"aud":   key.TokenURI,
 		"iat":   now,
 		"exp":   now + 3600,

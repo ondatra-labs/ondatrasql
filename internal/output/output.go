@@ -63,7 +63,9 @@ func EmitJSON(v any) {
 	if !JSONEnabled {
 		return
 	}
-	json.NewEncoder(os.Stdout).Encode(v)
+	if err := json.NewEncoder(os.Stdout).Encode(v); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: JSON encode error: %v\n", err)
+	}
 }
 
 // Fprintf writes formatted output to the Human writer.

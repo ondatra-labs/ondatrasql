@@ -26,7 +26,7 @@ const (
 // IsModelFile returns true if the file has a valid model extension.
 func IsModelFile(path string) bool {
 	ext := filepath.Ext(path)
-	return ext == ".sql" || ext == ".star" || ext == ".yaml" || ext == ".yml"
+	return ext == ".sql"
 }
 
 // ColumnDef represents a column definition for @kind: events models.
@@ -47,7 +47,7 @@ type Model struct {
 	// ScriptType indicates the type of script (starlark) or empty for SQL.
 	ScriptType ScriptType
 
-	// UniqueKey is the column used for merge/scd2 operations.
+	// UniqueKey is the column used for merge/scd2/tracked operations.
 	UniqueKey string
 
 	// PartitionedBy lists columns for DuckLake native storage partitioning.
@@ -106,15 +106,100 @@ type Model struct {
 	// Parsed from the model body (DDL-style column definitions instead of SQL).
 	Columns []ColumnDef
 
-	// Source is the Starlark function name for YAML models (e.g. "gam_report").
+	// Source is the Starlark function name for lib/ blueprints (e.g. "gam_report").
 	// The function is loaded from lib/<source>.star via load().
 	Source string
 
-	// SourceConfig holds config key-value pairs passed to the source function (YAML models).
+	// SourceConfig holds config key-value pairs passed to the source function (lib/ blueprints).
 	SourceConfig map[string]any
+
+	// Sink is the name of the push function in lib/<sink>.star for outbound sync.
+	// Set via @sink directive. When set, runtime pushes delta rows to external API after materialization.
+	Sink string
 
 	// FilePath is the original file path (empty for database-stored models).
 	FilePath string
+}
+
+// splitStatements splits SQL on semicolons, respecting string literals and
+// SQL comments. Returns non-empty trimmed statements.
+func splitStatements(sql string) []string {
+	var stmts []string
+	var current strings.Builder
+	inString := false
+	stringChar := byte(0)
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+
+		// Block comment
+		if inBlockComment {
+			current.WriteByte(ch)
+			if ch == '*' && i+1 < len(sql) && sql[i+1] == '/' {
+				current.WriteByte(sql[i+1])
+				i++
+				inBlockComment = false
+			}
+			continue
+		}
+
+		// Line comment
+		if inLineComment {
+			current.WriteByte(ch)
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		// Start of line comment
+		if !inString && ch == '-' && i+1 < len(sql) && sql[i+1] == '-' {
+			inLineComment = true
+			current.WriteByte(ch)
+			continue
+		}
+
+		// Start of block comment
+		if !inString && ch == '/' && i+1 < len(sql) && sql[i+1] == '*' {
+			inBlockComment = true
+			current.WriteByte(ch)
+			current.WriteByte(sql[i+1])
+			i++
+			continue
+		}
+
+		// String/identifier literal handling (single and double quotes)
+		if !inString && (ch == '\'' || ch == '"') {
+			inString = true
+			stringChar = ch
+			current.WriteByte(ch)
+		} else if inString && ch == stringChar {
+			current.WriteByte(ch)
+			if i+1 < len(sql) && sql[i+1] == stringChar {
+				current.WriteByte(sql[i+1])
+				i++ // escaped quote
+			} else {
+				inString = false
+			}
+		} else if ch == ';' && !inString {
+			s := strings.TrimSpace(current.String())
+			if s != "" {
+				stmts = append(stmts, s)
+			}
+			current.Reset()
+		} else {
+			current.WriteByte(ch)
+		}
+	}
+
+	s := strings.TrimSpace(current.String())
+	if s != "" {
+		stmts = append(stmts, s)
+	}
+
+	return stmts
 }
 
 // c matches comment prefixes: -- (SQL) or // (Starlark) or # (Starlark)
@@ -134,7 +219,10 @@ var (
 	descriptionRe        = regexp.MustCompile(`^` + c + `\s*@description:\s*(.+)$`)
 	columnRe             = regexp.MustCompile(`^` + c + `\s*@column:\s*(.+)$`)
 	sortedByRe           = regexp.MustCompile(`^` + c + `\s*@sorted_by:\s*(.+)$`)
-	exposeRe             = regexp.MustCompile(`^` + c + `\s*@expose(?:\s+(.+))?$`)
+	exposeRe                = regexp.MustCompile(`^` + c + `\s*@expose(?:\s+(.+))?$`)
+	sinkRe                  = regexp.MustCompile(`^` + c + `\s*@sink:\s*(.*)$`)
+	sinkDetectDeletesRe     = regexp.MustCompile(`^` + c + `\s*@sink_detect_deletes:\s*(.+)$`)
+	sinkDeleteThresholdRe   = regexp.MustCompile(`^` + c + `\s*@sink_delete_threshold:\s*(.+)$`)
 	commentRe = regexp.MustCompile(`^(?:--|//|#)`)
 )
 
@@ -142,12 +230,6 @@ var (
 // The target name is derived from the file path relative to projectDir/models/.
 // Returns an error if the file cannot be read or has invalid directives.
 func ParseModel(path, projectDir string) (*Model, error) {
-	// Route YAML files to dedicated parser
-	ext := filepath.Ext(path)
-	if ext == ".yaml" || ext == ".yml" {
-		return parseYAMLModel(path, projectDir)
-	}
-
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open model file: %w", err)
@@ -173,18 +255,13 @@ func ParseModel(path, projectDir string) (*Model, error) {
 		Kind:     "table", // default
 	}
 
-	// Determine file extension and set script type
-	ext = filepath.Ext(absPath)
-	if ext == ".star" {
-		model.ScriptType = ScriptTypeStarlark
-	}
+	ext := filepath.Ext(absPath)
 
 	// Calculate target from path
 	// DuckDB only supports schema.table (2 parts), so we flatten deeper paths:
 	//   models/orders.sql           -> main.orders
 	//   models/staging/orders.sql   -> staging.orders
 	//   models/raw/api/orders.sql   -> raw.api__orders (__ separates folder levels)
-	//   models/raw/api_data.star    -> raw.api_data (Starlark script)
 	modelsDir := filepath.Join(projectDir, "models")
 	relPath, err := filepath.Rel(modelsDir, absPath)
 	if err != nil || strings.HasPrefix(relPath, "..") {
@@ -239,7 +316,7 @@ func ParseModel(path, projectDir string) (*Model, error) {
 			model.Kind = strings.TrimSpace(matches[1])
 
 		case scriptRe.MatchString(trimmed):
-			return nil, fmt.Errorf("the @script directive was removed in v0.14.0. Use a .star file extension instead — Starlark models are detected automatically by file type")
+			return nil, fmt.Errorf("the @script directive was removed. Starlark is now used only in lib/ functions for API ingestion and outbound sync. Remove this directive")
 
 		case uniqueKeyRe.MatchString(trimmed):
 			matches := uniqueKeyRe.FindStringSubmatch(trimmed)
@@ -262,7 +339,9 @@ func ParseModel(path, projectDir string) (*Model, error) {
 
 		case incrementalInitialRe.MatchString(trimmed):
 			matches := incrementalInitialRe.FindStringSubmatch(trimmed)
-			model.IncrementalInitial = strings.TrimSpace(matches[1])
+			val := strings.TrimSpace(matches[1])
+			val = strings.Trim(val, `"'`)
+			model.IncrementalInitial = val
 
 		case constraintRe.MatchString(trimmed):
 			matches := constraintRe.FindStringSubmatch(trimmed)
@@ -295,6 +374,19 @@ func ParseModel(path, projectDir string) (*Model, error) {
 			if matches := exposeRe.FindStringSubmatch(trimmed); matches[1] != "" {
 				model.ExposeKey = strings.TrimSpace(matches[1])
 			}
+
+		case sinkRe.MatchString(trimmed):
+			matches := sinkRe.FindStringSubmatch(trimmed)
+			model.Sink = strings.TrimSpace(matches[1])
+			if model.Sink == "" {
+				return nil, fmt.Errorf("@sink requires a lib function name (e.g. @sink: hubspot_push)")
+			}
+
+		case sinkDetectDeletesRe.MatchString(trimmed):
+			return nil, fmt.Errorf("@sink_detect_deletes was removed — delete detection is now automatic for merge and tracked models with @sink. Remove this directive")
+
+		case sinkDeleteThresholdRe.MatchString(trimmed):
+			return nil, fmt.Errorf("@sink_delete_threshold was removed — delete threshold is no longer supported. Remove this directive")
 
 		case descriptionRe.MatchString(trimmed):
 			matches := descriptionRe.FindStringSubmatch(trimmed)
@@ -338,10 +430,18 @@ func ParseModel(path, projectDir string) (*Model, error) {
 		return nil, fmt.Errorf("read model file: %w", err)
 	}
 
-	model.SQL = strings.TrimSpace(strings.Join(sqlLines, "\n"))
+	fullSQL := strings.TrimSpace(strings.Join(sqlLines, "\n"))
 
-	// Strip trailing semicolon
-	model.SQL = strings.TrimSuffix(model.SQL, ";")
+	// Models must be a single SQL statement. Multi-statement files are rejected.
+	statements := splitStatements(fullSQL)
+	switch len(statements) {
+	case 0:
+		// handled below by empty SQL check
+	case 1:
+		model.SQL = statements[0]
+	default:
+		return nil, fmt.Errorf("model contains %d SQL statements (separated by ;), but only single-statement models are supported. Remove extra statements or split into separate models", len(statements))
+	}
 
 	// For events kind, parse body as column definitions instead of SQL
 	if model.Kind == "events" {
@@ -473,10 +573,14 @@ func validateModel(m *Model) error {
 		}
 	}
 
+	// Validate @sink directives
+	if m.Sink != "" && m.Kind == "events" {
+		return fmt.Errorf("@sink is not supported for events kind (events has its own ingest pipeline)")
+	}
+
 	// Validate unique_key if present
 	if m.UniqueKey != "" {
 		if strings.Contains(m.UniqueKey, ",") {
-			// Partition kind allows comma-separated unique_key columns
 			if m.Kind != "partition" {
 				return fmt.Errorf("only a single unique_key column is supported for %s kind", m.Kind)
 			}
@@ -607,6 +711,11 @@ func ValidateColumnName(s string) error {
 	validRe := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	if !validRe.MatchString(s) {
 		return fmt.Errorf("invalid column name %q: only letters, numbers, and underscores allowed (no dots)", s)
+	}
+
+	// Reject reserved internal names used by sink protocol
+	if strings.HasPrefix(s, "__ondatra_") {
+		return fmt.Errorf("column name %q is reserved (prefix __ondatra_ is used internally)", s)
 	}
 
 	return nil

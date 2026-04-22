@@ -1,0 +1,2 @@
+all_changes (detect_deletes=true): 4
+no_deletes (detect_deletes=false): 3

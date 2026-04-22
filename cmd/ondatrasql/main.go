@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.17.0"
+var version = "0.18.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -139,7 +139,7 @@ func run(args []string) error {
 		return runEdit(cfg, args[1])
 	case "new":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql new <schema.model[.sql|.star]>")
+			return fmt.Errorf("usage: ondatrasql new <schema.model[.sql]>")
 		}
 		return runNew(cfg, args[1])
 
@@ -233,7 +233,7 @@ Lineage:
   lineage <model.column>  Trace column through lineage
 
 Development:
-  new <model[.ext]>       Create model (.sql or .star)
+  new <model.sql>          Create model
   edit <target>           Open in $EDITOR (model, or one of:)
         env               .env
         macros/<name>     config/macros/<name>.sql

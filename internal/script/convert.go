@@ -100,8 +100,26 @@ func goToStarlark(v interface{}) (starlark.Value, error) {
 		return starlark.MakeInt64(int64(val)), nil
 	case int64:
 		return starlark.MakeInt64(val), nil
+	case int32:
+		return starlark.MakeInt64(int64(val)), nil
+	case int16:
+		return starlark.MakeInt64(int64(val)), nil
+	case int8:
+		return starlark.MakeInt64(int64(val)), nil
+	case uint:
+		return starlark.MakeUint64(uint64(val)), nil
+	case uint64:
+		return starlark.MakeUint64(val), nil
+	case uint32:
+		return starlark.MakeUint64(uint64(val)), nil
+	case uint16:
+		return starlark.MakeUint64(uint64(val)), nil
+	case uint8:
+		return starlark.MakeUint64(uint64(val)), nil
 	case float64:
 		return starlark.Float(val), nil
+	case float32:
+		return starlark.Float(float64(val)), nil
 	case bool:
 		return starlark.Bool(val), nil
 	case []interface{}:

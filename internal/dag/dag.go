@@ -42,12 +42,11 @@ type Graph struct {
 // modelInfo holds fields needed for dependency extraction from a parser.Model.
 type modelInfo struct {
 	sql      string
-	source   string
 	isScript bool
 }
 
 // NewGraph creates a new graph with a DuckDB session for AST-based dependency extraction.
-// An optional projectDir enables Starlark dependency extraction for YAML models.
+// An optional projectDir enables Starlark dependency extraction for lib/ blueprints.
 func NewGraph(sess *duckdb.Session, projectDir ...string) *Graph {
 	g := &Graph{
 		nodes: make(map[string]*Node),
@@ -67,7 +66,6 @@ func (g *Graph) Add(model *parser.Model) {
 		// Script model: extract deps from query() calls in Starlark code
 		info := &modelInfo{
 			sql:      model.SQL,
-			source:   model.Source,
 			isScript: true,
 		}
 		deps = g.extractStarlarkDeps(info)

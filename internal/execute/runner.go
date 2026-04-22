@@ -16,9 +16,12 @@ import (
 
 	duckdbdriver "github.com/duckdb/duckdb-go/v2"
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
+	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/lineage"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/script"
 	"github.com/ondatra-labs/ondatrasql/internal/validation"
 )
 
@@ -32,16 +35,18 @@ const (
 
 // Result contains the outcome of running a model.
 type Result struct {
-	Target        string
-	Kind          string
-	RunType       string // "incremental", "backfill", "full", or "skip"
-	RunReason     string // Human-readable reason for the run_type decision
-	RowsAffected  int64
-	Duration      time.Duration
-	Errors        []string
-	Warnings      []string
-	Trace         []TraceStep `json:"trace,omitempty"`
-	lastTraceEnd  time.Time   // internal: when last trace was recorded
+	Target         string
+	Kind           string
+	RunType        string // "incremental", "backfill", "full", or "skip"
+	RunReason      string // Human-readable reason for the run_type decision
+	RowsAffected   int64
+	Duration       time.Duration
+	Errors         []string
+	Warnings       []string
+	Trace          []TraceStep `json:"trace,omitempty"`
+	SyncSucceeded  int64       `json:"sync_succeeded,omitempty"`
+	SyncFailed     int64       `json:"sync_failed,omitempty"`
+	lastTraceEnd   time.Time   // internal: when last trace was recorded
 }
 
 // Runner executes SQL models.
@@ -56,6 +61,7 @@ type Runner struct {
 	astCache         map[string]string    // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
 	adminPort        string               // Admin port for event daemon (flush operations)
 	claimLimit       int                  // Max events per claim batch (0 = default 1000)
+	libRegistry      *libregistry.Registry // Registered lib functions from lib/*.star
 }
 
 // gitInfo holds Git repository metadata for the current run.
@@ -95,6 +101,11 @@ func (r *Runner) SetAdminPort(port string) {
 // Default is 1000 if not set.
 func (r *Runner) SetClaimLimit(limit int) {
 	r.claimLimit = limit
+}
+
+// SetLibRegistry sets the lib function registry for FROM lib_func() support.
+func (r *Runner) SetLibRegistry(reg *libregistry.Registry) {
+	r.libRegistry = reg
 }
 
 // SetProjectDir sets the project root directory for Starlark load() support.
@@ -167,9 +178,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		r.trace(result, "load_extensions", stepStart, "ok")
 	}
 
-	// Script models (Starlark) are executed differently
+	// Starlark script models (.star) are no longer supported as model files.
+	// Starlark is used only in lib/ blueprints via the API dict pattern.
 	if model.ScriptType != parser.ScriptTypeNone {
-		return r.runScript(ctx, model)
+		return nil, fmt.Errorf("Starlark script models (.star) are no longer supported. Use SQL models with lib/ blueprints instead")
 	}
 
 
@@ -243,8 +255,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 	}
 
-	// Skip: nothing changed, no work to do
+	// Skip: nothing changed, no work to do -- but check for pending sink work
 	if result.RunType == "skip" {
+		if model.Sink != "" {
+			// No delta table on skip -- only process existing Badger backlog
+			if err := r.executeSink(ctx, model, result, nil, 0); err != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("sink: %v", err))
+			}
+		}
 		result.Duration = time.Since(start)
 		return result, nil
 	}
@@ -257,8 +275,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Set incremental variables if @incremental is specified (for SQL models)
 	if model.Incremental != "" {
 		stepStart = time.Now()
-		incrState, _ := backfill.GetIncrementalState(
+		incrState, incrErr := backfill.GetIncrementalState(
 			r.sess, model.Target, model.Incremental, model.IncrementalInitial)
+		if incrErr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("incremental state: %v", incrErr))
+		}
 		if incrState != nil {
 			// Force is_backfill when the runner decided on backfill (e.g. hash changed).
 			// GetIncrementalState only checks table existence, but the runner may trigger
@@ -283,6 +304,174 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Auto-detect tables and column lineage from SQL (single AST query)
 	stepStart = time.Now()
 	astJSON, _ := r.getAST(model.SQL)
+
+	// Detect and execute lib function calls in FROM clause (e.g. FROM gam_fetch(...))
+	if r.libRegistry != nil && !r.libRegistry.Empty() {
+		parsedAST, parseErr := duckast.Parse(astJSON)
+		var libCalls []LibCall
+		if parseErr == nil {
+			libCalls = detectLibCalls(parsedAST, r.libRegistry)
+		}
+		// Also run SQL-based detection to find API dict libs hidden by
+		// macro expansion. Merge results, skipping duplicates by FuncName+Occurrence.
+		sqlCalls := detectLibCallsFromSQL(model.SQL, r.libRegistry)
+		if len(sqlCalls) > 0 {
+			seen := make(map[string]int)
+			for _, c := range libCalls {
+				seen[c.FuncName]++
+			}
+			for _, c := range sqlCalls {
+				if seen[c.FuncName] > 0 {
+					seen[c.FuncName]--
+					continue // already detected via AST
+				}
+				libCalls = append(libCalls, c)
+			}
+		}
+		if len(libCalls) > 0 {
+				// Mark model as having lib calls so materialize knows
+				// tmpTable contains all rows (not CDC-filtered)
+				model.Source = libCalls[0].FuncName
+
+				argOccurrence := make(map[string]int) // track per-function occurrence for arg extraction
+				for i := range libCalls {
+					call := &libCalls[i]
+
+					var kwargs map[string]any
+
+					if call.ASTNode != nil {
+						// AST-based detection: evaluate args from AST nodes
+						args, evalErr := r.evaluateArgs(call)
+						if evalErr != nil {
+							return nil, fmt.Errorf("lib %s args: %w", call.FuncName, evalErr)
+						}
+						dims, mets, cols, matchErr := matchColumns(parsedAST, call.Lib)
+						if matchErr != nil {
+							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, matchErr)
+						}
+						var typedCols []any
+						if call.Lib.DynamicColumns {
+							typedCols = extractTypedSelectColumns(parsedAST)
+						}
+						kwargs = buildLibCallKwargs(call.Lib, args, dims, mets, cols, typedCols)
+					} else {
+						// SQL-based detection (macro expansion hid the TABLE_FUNCTION node).
+						// Extract args from raw SQL: parse "func_name('arg1', 'arg2')" manually.
+						// Track occurrence per function name for multiple calls.
+						occ := argOccurrence[call.FuncName]
+						argOccurrence[call.FuncName]++
+						kwargs = r.extractArgsFromSQL(model.SQL, call.Lib, occ)
+					}
+
+					// Inject target name so fetch() can query existing state
+					kwargs["target"] = model.Target
+
+					// Inject typed columns for SQL-fallback path (AST path
+					// already has them via buildLibCallKwargs)
+					if _, hasColumns := kwargs["columns"]; !hasColumns && call.Lib.DynamicColumns {
+						if typedCols := extractTypedSelectColumns(parsedAST); typedCols != nil {
+							kwargs["columns"] = typedCols
+						}
+					}
+
+					// Create Starlark runtime with incremental state
+					incrState, incrErr := backfill.GetIncrementalState(
+						r.sess, model.Target, model.Incremental, model.IncrementalInitial)
+					if incrErr != nil {
+						result.Warnings = append(result.Warnings, fmt.Sprintf("lib %s incremental state: %v", call.FuncName, incrErr))
+					}
+					if incrState != nil && needsBackfill {
+						incrState.IsBackfill = true
+						incrState.LastValue = incrState.InitialValue
+					}
+
+					rt := script.NewRuntime(r.sess, incrState, r.projectDir)
+					if r.projectDir != "" && model.Kind != "table" {
+						rt.SetIngestDir(filepath.Join(r.projectDir, ".ondatra", "ingest"))
+					}
+
+					// Execute lib function (unique target per call to avoid temp table collision)
+					libTarget := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
+					var scriptResult *script.Result
+					var runErr error
+					if call.Lib.APIConfig != nil {
+						// API dict: always use paginated path (page_size=0 means single call)
+						httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.projectDir)
+						scriptResult, runErr = rt.RunSourcePaginated(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
+					} else {
+						// Legacy TABLE dict: use save.row() contract
+						scriptResult, runErr = rt.RunSource(ctx, libTarget, call.FuncName, kwargs)
+					}
+					if runErr != nil {
+						// Check for clean abort
+						var abortErr *script.AbortError
+						if errors.As(runErr, &abortErr) {
+							result.RowsAffected = 0
+							result.Duration = time.Since(start)
+							return result, nil
+						}
+						return nil, fmt.Errorf("lib %s: %w", call.FuncName, runErr)
+					}
+
+					// Create temp table from collected rows
+					if err := scriptResult.CreateTempTable(); err != nil {
+						return nil, fmt.Errorf("lib %s temp table: %w", call.FuncName, err)
+					}
+					call.TempTable = scriptResult.TempTable
+					r.trace(result, "lib."+call.FuncName, stepStart, "ok")
+					stepStart = time.Now()
+				}
+
+				// Rewrite SQL: replace lib function calls with temp table references
+				// Check if AST-based rewrite is possible. API dict libs use
+				// macros which DuckDB expands and reconstructs -- AST rewrite
+				// produces the original SQL, not the rewritten version. Use
+				// string-based rewrite for those.
+				hasASTNodes := false
+				for _, c := range libCalls {
+					if c.ASTNode != nil && c.Lib.APIConfig == nil {
+						hasASTNodes = true
+						break
+					}
+				}
+				if hasASTNodes {
+					// AST-based rewrite (legacy TABLE libs)
+					rewriteLibCalls(parsedAST, libCalls)
+					modified, serErr := parsedAST.Serialize()
+					if serErr != nil {
+						return nil, fmt.Errorf("serialize rewritten AST: %w", serErr)
+					}
+					rewrittenSQL, desErr := r.deserializeAST(modified)
+					if desErr != nil {
+						return nil, fmt.Errorf("deserialize rewritten AST: %w", desErr)
+					}
+					execSQL = rewrittenSQL
+				}
+
+				// String-based rewrite for API dict libs (macro-expanded, not
+				// visible in AST). Also handles the case where AST-based rewrite
+				// handled some calls but API dict calls remain unrewritten.
+				{
+					var stringCalls []LibCall
+					for _, c := range libCalls {
+						if c.TempTable != "" && (c.ASTNode == nil || c.Lib.APIConfig != nil) {
+							stringCalls = append(stringCalls, c)
+						}
+					}
+					if len(stringCalls) > 0 {
+						execSQL = rewriteLibCallsByString(execSQL, stringCalls)
+					}
+				}
+
+				// Re-parse AST for lineage/CDC (now references temp tables, not lib functions)
+				astJSON, _ = r.getAST(execSQL)
+			}
+	}  // end if r.libRegistry != nil
+
+	// Save the (possibly lib-rewritten) SQL so CDC fallback paths
+	// use the rewritten version, not the original model.SQL.
+	baseExecSQL := execSQL
+
 	tables, _ := lineage.ExtractTablesFromAST(astJSON)
 	colLineage, _ := lineage.ExtractFromAST(astJSON)
 
@@ -344,6 +533,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		snapshotID, snapshotErr := r.sess.GetDagStartSnapshot()
 		if snapshotErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("get snapshot warning: %v", snapshotErr))
+			// Cannot determine start snapshot — skip CDC gate, assume changes exist
+			hasChanges = true
+			insertOnly = false
 		}
 		r.trace(result, "cdc.get_snapshot", stepStart, "ok")
 
@@ -354,6 +546,8 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			result.Warnings = append(result.Warnings, fmt.Sprintf("get current snapshot: %v", currSnapErr))
 			hasChanges = true
 			insertOnly = false
+		} else if snapshotErr != nil {
+			// Already handled above — skip table-level checks
 		} else if snapshotID < currSnap {
 			for _, t := range cdcTables {
 				parts := strings.SplitN(t, ".", 2)
@@ -395,7 +589,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 			if schemaChanged {
 				result.Warnings = append(result.Warnings, "upstream schema changed, skipping CDC")
-				execSQL = model.SQL
+				execSQL = baseExecSQL
 				needsBackfill = true
 			} else if insertOnly {
 				// Phase 2: all source changes are inserts — apply CDC with
@@ -404,7 +598,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					execSQL = model.SQL
+					execSQL = baseExecSQL
 				} else {
 					r.trace(result, "cdc.applied_insert_only:"+strings.Join(cdcTables, ","), stepStart, "ok")
 				}
@@ -414,7 +608,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					execSQL = model.SQL
+					execSQL = baseExecSQL
 				} else {
 					r.trace(result, "cdc.applied:"+strings.Join(cdcTables, ","), stepStart, "ok")
 				}
@@ -425,7 +619,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			execSQL, emptyErr = r.applyEmptySmartCDC(astJSON, cdcTables)
 			if emptyErr != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("CDC empty failed, using full query: %v", emptyErr))
-				execSQL = model.SQL
+				execSQL = baseExecSQL
 			}
 		}
 	} else if tableExtractTime > time.Millisecond {
@@ -494,10 +688,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	if err := r.sess.Exec(createSQL); err != nil {
 		// CDC EXCEPT can fail on edge cases (e.g. DuckDB unicode stats after TRUNCATE+INSERT).
 		// Fall back to full query without CDC.
-		if isIncremental && execSQL != model.SQL {
+		if isIncremental && execSQL != baseExecSQL {
 			r.trace(result, "create_temp", stepStart, "retry")
 			result.Warnings = append(result.Warnings, fmt.Sprintf("CDC query failed (%v), retrying with full query", err))
-			execSQL = model.SQL
+			execSQL = baseExecSQL
 			needsBackfill = true
 			createSQL = fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, execSQL)
 			stepStart = time.Now()
@@ -576,6 +770,18 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return result, fmt.Errorf("audit parse errors")
 	}
 
+	// Capture pre-commit snapshot for sink delta (table_changes needs the range).
+	var preCommitSnapshot int64
+	if model.Sink != "" {
+		var snapErr error
+		preCommitSnapshot, snapErr = r.sess.GetCurrentSnapshot()
+		if snapErr != nil {
+			r.cleanup(tmpTable)
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("get pre-commit snapshot for sink delta: %w", snapErr)
+		}
+	}
+
 	// Execute based on kind (includes audits + commit metadata in same transaction)
 	stepStart = time.Now()
 	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, sqlHash, result.RunType, result, start)
@@ -602,6 +808,48 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	r.runWarnings(model, model.Target, result)
 	if len(model.Warnings) > 0 {
 		r.trace(result, "warnings", stepStart, "ok")
+	}
+
+	// Outbound sync: compute delta AFTER commit, then push.
+	// Delta is a list of SyncEvents (rowid + operation + snapshot).
+	// Row data is read from DuckLake at push time, not stored in Badger.
+	if model.Sink != "" {
+		// Get post-commit snapshot. All sink kinds need this:
+		// All sink-enabled kinds need table_changes() range
+		var postCommitSnapshot int64
+		if err := r.sess.RefreshSnapshot(); err == nil {
+			postCommitSnapshot, _ = r.sess.GetCurrentSnapshot()
+		}
+
+		// Set search_path so table_changes() can resolve bare table name
+		schema, _ := splitSchemaTable(model.Target)
+		if schema != "" {
+			r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
+				r.sess.CatalogAlias(), schema, r.sess.DefaultSearchPath()))
+		}
+
+		stepStart = time.Now()
+		sinkEvents, deltaErr := r.createSinkDelta(model, tmpTable, preCommitSnapshot, postCommitSnapshot)
+
+		if schema != "" {
+			r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+		}
+
+		if deltaErr != nil {
+			r.trace(result, "sink.delta", stepStart, "error")
+			result.Warnings = append(result.Warnings, fmt.Sprintf("sink: delta failed: %v", deltaErr))
+		} else if len(sinkEvents) > 0 {
+			r.trace(result, "sink.delta", stepStart, "ok")
+		}
+
+		// Run sink: processes new delta AND existing Badger backlog.
+		stepStart = time.Now()
+		if err := r.executeSink(ctx, model, result, sinkEvents, postCommitSnapshot); err != nil {
+			r.trace(result, "sink", stepStart, "error")
+			result.Warnings = append(result.Warnings, fmt.Sprintf("sink: %v", err))
+		} else {
+			r.trace(result, "sink", stepStart, "ok")
+		}
 	}
 
 	stepStart = time.Now()
@@ -643,15 +891,16 @@ func (r *Runner) buildAuditSQL(model *parser.Model) (string, []error) {
 }
 
 // cdcSchemaChanged checks if any CDC table's schema differs between current and snapshot.
-// CDC uses EXCEPT which requires matching column counts on both sides.
-// Returns true if any table has a different number of columns at the snapshot version.
+// CDC uses EXCEPT which requires matching column names and types on both sides.
+// Returns true if any table has different columns at the snapshot version.
 func (r *Runner) cdcSchemaChanged(cdcTables []string, snapshotID int64) bool {
 	for _, table := range cdcTables {
 		qt := quoteTableName(table)
-		// Compare column count: current vs snapshot version
+		// Compare column names and types: current vs snapshot version.
+		// A renamed or retyped column with the same count would break EXCEPT.
 		query := fmt.Sprintf(
-			"SELECT (SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM %s)) != "+
-				"(SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM %s AT (VERSION => %d)))",
+			"SELECT (SELECT list(column_name||':'||column_type ORDER BY column_name) FROM (DESCRIBE SELECT * FROM %s)) != "+
+				"(SELECT list(column_name||':'||column_type ORDER BY column_name) FROM (DESCRIBE SELECT * FROM %s AT (VERSION => %d)))",
 			qt, qt, snapshotID)
 		val, err := r.sess.QueryValue(query)
 		if err != nil {
@@ -795,6 +1044,107 @@ func escapeSQL(s string) string {
 }
 
 // sanitizeTableName converts a target name to a safe temp table name.
+// checkDeleteThresholdPreMaterialize counts how many target rows would be
+// extractArgsFromSQL parses lib function args from raw SQL text.
+// occurrence selects which match to extract (0-based) when the same
+// function appears multiple times in the query.
+func (r *Runner) extractArgsFromSQL(sql string, lib *libregistry.LibFunc, occurrence int) map[string]any {
+	kwargs := make(map[string]any)
+
+	// Find the N-th "func_name(" in SQL (skipping strings/comments)
+	cleaned := stripStringsAndComments(sql)
+	lower := strings.ToLower(cleaned)
+	pattern := strings.ToLower(lib.Name) + "("
+	searchFrom := 0
+	idx := -1
+	for n := 0; n <= occurrence; n++ {
+		i := strings.Index(lower[searchFrom:], pattern)
+		if i < 0 {
+			return kwargs
+		}
+		idx = searchFrom + i
+		searchFrom = idx + len(pattern)
+	}
+	// idx now points to the occurrence-th match in cleaned,
+	// but we need to extract args from the original SQL at the same position
+
+	// Extract content between parentheses, respecting string literals
+	start := idx + len(pattern)
+	end := findMatchingParen(sql, start)
+	// findMatchingParen returns position after the closing paren
+	if end > start {
+		end-- // point to the closing paren, not past it
+	}
+
+	argsStr := strings.TrimSpace(sql[start:end])
+	if argsStr == "" {
+		return kwargs
+	}
+
+	// Split by comma, respecting parentheses and quoted strings.
+	// Handles cases like: func('a,b'), func(json('{"x":1}'))
+	parts := splitArgsRespectingNesting(argsStr)
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		// Remove surrounding quotes
+		if len(part) >= 2 && ((part[0] == '\'' && part[len(part)-1] == '\'') || (part[0] == '"' && part[len(part)-1] == '"')) {
+			part = part[1 : len(part)-1]
+		}
+		if i < len(lib.Args) {
+			kwargs[lib.Args[i]] = part
+		}
+	}
+
+	return kwargs
+}
+
+// splitArgsRespectingNesting splits a comma-separated argument string while
+// respecting parentheses nesting and quoted strings. This correctly handles
+// cases like: 'a,b', json('{"x":1,"y":2}'), concat('a', 'b')
+func splitArgsRespectingNesting(s string) []string {
+	var parts []string
+	var current strings.Builder
+	depth := 0
+	inString := false
+	stringChar := byte(0)
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			current.WriteByte(c)
+			if c == stringChar {
+				// Handle escaped quotes ('')
+				if i+1 < len(s) && s[i+1] == stringChar {
+					current.WriteByte(s[i+1])
+					i++
+				} else {
+					inString = false
+				}
+			}
+		} else if c == '\'' || c == '"' {
+			inString = true
+			stringChar = c
+			current.WriteByte(c)
+		} else if c == '(' {
+			depth++
+			current.WriteByte(c)
+		} else if c == ')' {
+			depth--
+			current.WriteByte(c)
+		} else if c == ',' && depth == 0 {
+			parts = append(parts, current.String())
+			current.Reset()
+		} else {
+			current.WriteByte(c)
+		}
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+	return parts
+}
+
+
 func sanitizeTableName(target string) string {
 	// Replace dots with underscores
 	result := ""

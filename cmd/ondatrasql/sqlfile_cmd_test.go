@@ -65,6 +65,71 @@ func TestSplitStatements(t *testing.T) {
 	}
 }
 
+func TestSplitStatements_BlockComment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"semicolon inside block comment", "SELECT 1 /* ; */ AS id", 1},
+		{"block comment spanning lines", "SELECT /* multi\n; line */ 1", 1},
+		{"real semicolon after block comment", "SELECT /* x */ 1; SELECT 2", 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stmts := splitStatements(tt.input)
+			if len(stmts) != tt.want {
+				t.Errorf("splitStatements(%q) = %d stmts %v, want %d",
+					tt.input, len(stmts), stmts, tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitStatements_DoubleQuotedIdentifier(t *testing.T) {
+	t.Parallel()
+	stmts := splitStatements(`SELECT "col;name" FROM t`)
+	if len(stmts) != 1 {
+		t.Errorf("semicolon inside double-quoted identifier should not split, got %d: %v", len(stmts), stmts)
+	}
+}
+
+func TestSplitStatements_LineComment(t *testing.T) {
+	t.Parallel()
+	stmts := splitStatements("SELECT 1 -- ; comment\n; SELECT 2")
+	if len(stmts) != 2 {
+		t.Errorf("line comment should not consume real semicolon on next line, got %d: %v", len(stmts), stmts)
+	}
+}
+
+func TestSplitStatements_EscapedQuotes(t *testing.T) {
+	t.Parallel()
+	// Before fix: '' inside a string was treated as close+open, causing
+	// a semicolon between the two quotes to split the statement.
+	tests := []struct {
+		name string
+		input string
+		want int
+	}{
+		{"escaped single quote with semicolon", "SELECT 'it''s; here'", 1},
+		{"multiple escaped quotes", "SELECT 'a''b''c; still one'", 1},
+		{"escaped quote at end then new stmt", "SELECT 'val'''; SELECT 2", 2},
+		{"double-quoted with semicolon", `SELECT "col;name" FROM t`, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stmts := splitStatements(tt.input)
+			if len(stmts) != tt.want {
+				t.Errorf("splitStatements(%q) = %d statements %v, want %d",
+					tt.input, len(stmts), stmts, tt.want)
+			}
+		})
+	}
+}
+
 func TestTruncateSQL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
