@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,18 +33,20 @@ const (
 type Store struct {
 	db      *badger.DB
 	counter atomic.Uint64
+	wb      *badger.WriteBatch
+	wbMu    sync.Mutex
 }
 
 // Open opens or creates a Badger store at the given directory.
 func Open(dir string) (*Store, error) {
 	opts := badger.DefaultOptions(dir).
-		WithLogger(nil).       // Suppress Badger's built-in logging
-		WithSyncWrites(true)   // Fsync after every write for crash durability
+		WithLogger(nil).        // Suppress Badger's built-in logging
+		WithSyncWrites(false)   // Async writes — OS flushes to disk periodically
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, wb: db.NewWriteBatch()}
 
 	// Scan existing keys to find the max counter value, preventing
 	// key collisions on restart (Bug S31-32).
@@ -72,6 +75,8 @@ func Open(dir string) (*Store, error) {
 // Write stores an event for the given target (schema.table).
 // Key format: "evt:{target}:{nanoTimestamp}_{counter}"
 // Value: JSON-encoded event. TTL: 24h.
+// Uses WriteBatch for high throughput — writes are non-blocking and
+// batched automatically by Badger.
 func (s *Store) Write(target string, event map[string]any) error {
 	val, err := json.Marshal(event)
 	if err != nil {
@@ -81,10 +86,22 @@ func (s *Store) Write(target string, event map[string]any) error {
 	seq := s.counter.Add(1)
 	key := fmt.Sprintf("%s%s:%d_%d", prefixEvt, target, time.Now().UnixNano(), seq)
 
-	return s.db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry([]byte(key), val).WithTTL(eventTTL)
-		return txn.SetEntry(e)
-	})
+	s.wbMu.Lock()
+	defer s.wbMu.Unlock()
+	e := badger.NewEntry([]byte(key), val).WithTTL(eventTTL)
+	return s.wb.SetEntry(e)
+}
+
+// FlushWrites flushes pending WriteBatch entries to disk.
+// Called periodically by the server and on shutdown.
+func (s *Store) FlushWrites() error {
+	s.wbMu.Lock()
+	defer s.wbMu.Unlock()
+	if err := s.wb.Flush(); err != nil {
+		return err
+	}
+	s.wb = s.db.NewWriteBatch()
+	return nil
 }
 
 // WriteBatch stores multiple events for the given target in a single transaction.
@@ -110,6 +127,9 @@ func (s *Store) WriteBatch(target string, events []map[string]any) error {
 // HasPendingEvents returns true if there are claimable events (evt: prefix) for the target.
 // Does NOT count inflight batches -- those are from previous claims that haven't been acked.
 func (s *Store) HasPendingEvents(target string) (bool, error) {
+	if err := s.FlushWrites(); err != nil {
+		return false, err
+	}
 	evtPrefix := []byte(prefixEvt + target + ":")
 	found := false
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -196,6 +216,11 @@ func (s *Store) HasRecentInflight(target string) (bool, error) {
 // If ErrTxnTooBig occurs, the entire transaction is rolled back (nothing moved)
 // and an error is returned. The caller should retry with a smaller limit.
 func (s *Store) Claim(target string, limit int) (string, []map[string]any, error) {
+	// Flush buffered writes so they're visible to the claim scan
+	if err := s.FlushWrites(); err != nil {
+		return "", nil, fmt.Errorf("flush before claim: %w", err)
+	}
+
 	if limit <= 0 {
 		limit = defaultLimit
 	}
@@ -360,6 +385,9 @@ func (s *Store) hasRecentHeartbeat(claimID string) bool {
 // ClearPendingAndWrite atomically clears all pending events for a target and writes new ones.
 // Prevents the window where old backlog is cleared but new delta fails to write.
 func (s *Store) ClearPendingAndWrite(target string, events []map[string]any) error {
+	if err := s.FlushWrites(); err != nil {
+		return err
+	}
 	prefix := []byte(prefixEvt + target + ":")
 	return s.db.Update(func(txn *badger.Txn) error {
 		// Delete all existing pending events
@@ -396,6 +424,9 @@ func (s *Store) ClearPendingAndWrite(target string, events []map[string]any) err
 // and writes new events. Used by @kind: table sinks where a new full snapshot completely
 // replaces everything, including any in-progress inflight claims that are now stale.
 func (s *Store) ClearAllAndWrite(target string, events []map[string]any) error {
+	if err := s.FlushWrites(); err != nil {
+		return err
+	}
 	evtPrefix := []byte(prefixEvt + target + ":")
 	inflightPrefix := []byte(prefixInflight)
 	targetPrefix := target + ":"
@@ -465,6 +496,9 @@ func (s *Store) ClearAllAndWrite(target string, events []map[string]any) error {
 
 // ReadPending returns all pending (evt:) events for a target without claiming them.
 func (s *Store) ReadPending(target string) ([]map[string]any, error) {
+	if err := s.FlushWrites(); err != nil {
+		return nil, err
+	}
 	prefix := []byte(prefixEvt + target + ":")
 	var events []map[string]any
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -490,6 +524,9 @@ func (s *Store) ReadPending(target string) ([]map[string]any, error) {
 // inflight: (claimed) prefixes. Used by mergeBacklogWithDelta to build the
 // complete set of unsynced rows before ClearAllAndWrite replaces everything.
 func (s *Store) ReadAllEvents(target string) ([]map[string]any, error) {
+	if err := s.FlushWrites(); err != nil {
+		return nil, err
+	}
 	var events []map[string]any
 
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -545,6 +582,9 @@ func (s *Store) ReadAllEvents(target string) ([]map[string]any, error) {
 
 // ClearPending deletes all pending (evt:) events for a target without touching inflight.
 func (s *Store) ClearPending(target string) error {
+	if err := s.FlushWrites(); err != nil {
+		return err
+	}
 	prefix := []byte(prefixEvt + target + ":")
 	return s.db.Update(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -567,6 +607,9 @@ func (s *Store) ClearPending(target string) error {
 // Used by @kind: table sinks where a new full snapshot replaces everything.
 // Also clears any async job_ref since old jobs are invalidated.
 func (s *Store) ClearAll(target string) error {
+	if err := s.FlushWrites(); err != nil {
+		return err
+	}
 	evtPrefix := []byte(prefixEvt + target + ":")
 	inflightPrefix := []byte(prefixInflight)
 	targetPrefix := target + ":"
@@ -832,7 +875,10 @@ func (s *Store) DeleteJobRef(target string) error {
 
 // Close closes the Badger database.
 func (s *Store) Close() error {
-	return s.db.Close()
+	// Flush pending writes before closing
+	flushErr := s.FlushWrites()
+	dbErr := s.db.Close()
+	return errors.Join(flushErr, dbErr)
 }
 
 // RunGC triggers Badger's value log garbage collection.

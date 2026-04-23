@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -90,6 +91,22 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Periodically flush buffered writes to Badger
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := s.store.FlushWrites(); err != nil {
+					fmt.Fprintf(os.Stderr, "event flush: %v\n", err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	var serverErr error
 	select {
 	case serverErr = <-errCh:
@@ -136,6 +153,9 @@ func (s *Server) resolveTarget(r *http.Request) (string, *parser.Model, error) {
 
 // handleCollect receives a single event.
 // POST /collect/{schema}/{table}
+// Events are buffered in memory and flushed every 100ms for throughput.
+// Returns 202 Accepted immediately — a crash before flush loses buffered events.
+// Use /batch endpoint for durable writes.
 func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	target, model, err := s.resolveTarget(r)
 	if err != nil {

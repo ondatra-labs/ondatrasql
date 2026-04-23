@@ -25,6 +25,29 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
 
+// preloadEvents writes n events to the store using WriteBatch (1000 events per batch).
+func preloadEvents(store *collect.Store, target string, n int) {
+	batchSize := 1000
+	for start := 0; start < n; start += batchSize {
+		end := start + batchSize
+		if end > n {
+			end = n
+		}
+		batch := make([]map[string]any, 0, end-start)
+		for i := start; i < end; i++ {
+			batch = append(batch, map[string]any{
+				"event_name":  fmt.Sprintf("ev%d", i),
+				"page_url":    fmt.Sprintf("/p%d", i),
+				"user_id":     fmt.Sprintf("u%d", i%100),
+				"received_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		}
+		if err := store.WriteBatch(target, batch); err != nil {
+			panic("preload: " + err.Error())
+		}
+	}
+}
+
 // startDaemon starts an in-process event daemon and returns ports and cleanup.
 func startDaemon(t testing.TB, model *parser.Model) (*collect.Store, string, string, context.CancelFunc) {
 	t.Helper()
@@ -93,14 +116,7 @@ func TestE2E_EventsBench_FlushOnly(t *testing.T) {
 			defer cleanup()
 
 			// Pre-load events directly into Badger (skip HTTP overhead)
-			for i := 0; i < count; i++ {
-				store.Write("raw.events", map[string]any{
-					"event_name":  fmt.Sprintf("ev%d", i),
-					"page_url":    fmt.Sprintf("/p%d", i),
-					"user_id":     fmt.Sprintf("u%d", i%100),
-					"received_at": time.Now().UTC().Format(time.RFC3339Nano),
-				})
-			}
+			preloadEvents(store, "raw.events", count)
 
 			// Measure flush only
 			start := time.Now()
@@ -195,14 +211,7 @@ func TestE2E_EventsBench_ClaimLimit(t *testing.T) {
 			defer cleanup()
 
 			// Pre-load events
-			for i := 0; i < totalEvents; i++ {
-				store.Write("raw.events", map[string]any{
-					"event_name":  fmt.Sprintf("ev%d", i),
-					"page_url":    fmt.Sprintf("/p%d", i),
-					"user_id":     fmt.Sprintf("u%d", i%100),
-					"received_at": time.Now().UTC().Format(time.RFC3339Nano),
-				})
-			}
+			preloadEvents(store, "raw.events", totalEvents)
 
 			start := time.Now()
 

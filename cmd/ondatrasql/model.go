@@ -121,8 +121,6 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	if err := libReg.RegisterMacros(sess); err != nil {
 		return fmt.Errorf("register lib macros: %w", err)
 	}
-	// Outbound sync is handled via @sink directive + executeSink in runner.go.
-	// The legacy COPY TO integration (copyfunc.RegisterSink) has been removed.
 	// Initialize session with DuckLake catalog
 	if sandboxMode {
 		// Postgres backend: warn if other sessions will be terminated

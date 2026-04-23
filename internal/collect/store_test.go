@@ -1401,3 +1401,123 @@ func TestStore_ClearPendingAndWrite_PreservesJobRef(t *testing.T) {
 		t.Errorf("job_id = %v, want j1", ref["job_id"])
 	}
 }
+
+// --- Regression: WriteBatch visibility (buffered Write must be visible to reads) ---
+
+func TestStore_WriteBatch_VisibleToHasPending(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.Write("raw.events", map[string]any{"event": "pageview"})
+
+	// HasPendingEvents must see the buffered write without explicit flush
+	has, err := store.HasPendingEvents("raw.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("HasPendingEvents should return true after Write (buffered)")
+	}
+}
+
+func TestStore_WriteBatch_VisibleToReadPending(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.Write("raw.events", map[string]any{"event": "click"})
+
+	events, err := store.ReadPending("raw.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ReadPending got %d events, want 1", len(events))
+	}
+	if events[0]["event"] != "click" {
+		t.Errorf("event = %v, want click", events[0]["event"])
+	}
+}
+
+func TestStore_WriteBatch_VisibleToClaim(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.Write("raw.events", map[string]any{"event": "signup"})
+
+	_, events, err := store.Claim("raw.events", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("Claim got %d events, want 1", len(events))
+	}
+}
+
+func TestStore_WriteBatch_ClearAllAndWrite_NoGhosts(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Write a buffered event
+	store.Write("raw.events", map[string]any{"event": "old"})
+
+	// ClearAllAndWrite should clear the buffered event and write new ones
+	err = store.ClearAllAndWrite("raw.events", []map[string]any{{"event": "new"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the new event should exist — the buffered "old" must not resurrect
+	events, err := store.ReadPending("raw.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0]["event"] != "new" {
+		t.Errorf("event = %v, want new (old event resurrected)", events[0]["event"])
+	}
+}
+
+func TestStore_WriteBatch_ClearPendingAndWrite_NoGhosts(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.Write("raw.events", map[string]any{"event": "old"})
+
+	err = store.ClearPendingAndWrite("raw.events", []map[string]any{{"event": "new"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.ReadPending("raw.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0]["event"] != "new" {
+		t.Errorf("event = %v, want new", events[0]["event"])
+	}
+}
