@@ -519,7 +519,7 @@ SELECT id, name FROM raw.source
 	result := runModel(t, sbox, "staging/appended.sql")
 
 	// v0.12.0+: incremental kinds always run (incremental is the natural
-	// state for append/merge/scd2/partition/tracked — they always probe for
+	// state for append/merge/scd2/tracked — they always probe for
 	// new source rows). With nothing to add, rows_affected is 0. The old
 	// "skip" behaviour was an artefact of the empty-sandbox model.
 	if result.RunType != "incremental" {
@@ -612,8 +612,8 @@ SELECT id, name FROM raw.source
 func TestE2E_Sandbox_PartitionKind_CrossSchema(t *testing.T) {
 	sbox := setupSandboxWithSource(t)
 
-	sbox.AddModel("staging/partitioned.sql", `-- @kind: partition
--- @unique_key: name
+	sbox.AddModel("staging/partitioned.sql", `-- @kind: tracked
+-- @group_key: name
 SELECT id, name FROM raw.source
 `)
 
@@ -736,20 +736,20 @@ SELECT 1 AS id, 'Alice' AS name
 `)
 	runModel(t, prod, "raw/source.sql")
 
-	prod.AddModel("staging/partitioned.sql", `-- @kind: partition
--- @unique_key: name
+	prod.AddModel("staging/partitioned.sql", `-- @kind: tracked
+-- @group_key: name
 SELECT id, name FROM raw.source
 `)
 	runModel(t, prod, "staging/partitioned.sql")
 
 	sbox := testutil.NewSandboxProject(t, prod)
-	sbox.AddModel("staging/partitioned.sql", `-- @kind: partition
--- @unique_key: name
+	sbox.AddModel("staging/partitioned.sql", `-- @kind: tracked
+-- @group_key: name
 SELECT id, name FROM raw.source
 `)
 
 	result := runModel(t, sbox, "staging/partitioned.sql")
-	// v0.12.0+: with the catalog-fork sandbox, an unchanged partition model
+	// v0.12.0+: with the catalog-fork sandbox, an unchanged tracked model
 	// runs as "incremental" (incremental kinds always look for new source
 	// rows even when nothing changed). 0 rows are written. The pre-v0.12.0
 	// behaviour was to short-circuit to "skip" via the empty-sandbox skip
@@ -806,8 +806,8 @@ SELECT id, name, country FROM raw.customers
 -- @unique_key: id
 SELECT id, name, country FROM raw.customers
 `)
-	prod.AddModel("staging/by_country.sql", `-- @kind: partition
--- @unique_key: country
+	prod.AddModel("staging/by_country.sql", `-- @kind: tracked
+-- @group_key: country
 SELECT c.country, o.order_id, o.amount
 FROM raw.orders o
 JOIN raw.customers c ON o.customer_id = c.id
@@ -862,8 +862,8 @@ SELECT id, name, country FROM raw.customers
 -- @unique_key: id
 SELECT id, name, country FROM raw.customers
 `)
-	p.AddModel("staging/by_country.sql", `-- @kind: partition
--- @unique_key: country
+	p.AddModel("staging/by_country.sql", `-- @kind: tracked
+-- @group_key: country
 SELECT c.country, o.order_id, o.amount
 FROM raw.orders o
 JOIN raw.customers c ON o.customer_id = c.id
@@ -959,8 +959,8 @@ SELECT id, name, country FROM raw.customers
 -- @unique_key: id
 SELECT id, name, country FROM raw.customers
 `)
-	sbox.AddModel("staging/by_country.sql", `-- @kind: partition
--- @unique_key: country
+	sbox.AddModel("staging/by_country.sql", `-- @kind: tracked
+-- @group_key: country
 SELECT c.country, o.order_id, o.amount
 FROM raw.orders o
 JOIN raw.customers c ON o.customer_id = c.id
@@ -1040,8 +1040,8 @@ SELECT id, name, country FROM raw.customers
 -- @unique_key: id
 SELECT id, name, country FROM raw.customers
 `)
-	sbox.AddModel("staging/by_country.sql", `-- @kind: partition
--- @unique_key: country
+	sbox.AddModel("staging/by_country.sql", `-- @kind: tracked
+-- @group_key: country
 SELECT c.country, o.order_id, o.amount
 FROM raw.orders o
 JOIN raw.customers c ON o.customer_id = c.id
@@ -1087,7 +1087,7 @@ GROUP BY country
 		t.Errorf("DK total = %s, want 300", val)
 	}
 
-	// staging.by_country (partition): depends on raw.orders + raw.customers
+	// staging.by_country (tracked): depends on raw.orders + raw.customers
 	if results["staging.by_country"].RunType == "skip" {
 		t.Errorf("staging.by_country: should not skip when upstream changed")
 	}
@@ -1133,8 +1133,8 @@ SELECT id, name, country FROM raw.customers
 -- @unique_key: id
 SELECT id, name, country FROM raw.customers
 `)
-	sbox.AddModel("staging/by_country.sql", `-- @kind: partition
--- @unique_key: country
+	sbox.AddModel("staging/by_country.sql", `-- @kind: tracked
+-- @group_key: country
 SELECT c.country, o.order_id, o.amount
 FROM raw.orders o
 JOIN raw.customers c ON o.customer_id = c.id
@@ -2200,8 +2200,8 @@ SELECT 1 AS id, 'Bob' AS name
 func TestE2E_CommentOnPartition(t *testing.T) {
 	p := testutil.NewProject(t)
 
-	p.AddModel("staging/regional.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/regional.sql", `-- @kind: tracked
+-- @group_key: region
 -- @description: Regional sales data
 
 SELECT 'US' AS region, 100 AS amount
@@ -2210,9 +2210,9 @@ UNION ALL SELECT 'EU', 200
 
 	r1 := runModel(t, p, "staging/regional.sql")
 
-	// Run again (incremental partition replace)
-	p.AddModel("staging/regional.sql", `-- @kind: partition
--- @unique_key: region
+	// Run again (incremental tracked replace)
+	p.AddModel("staging/regional.sql", `-- @kind: tracked
+-- @group_key: region
 -- @description: Regional sales updated
 
 SELECT 'US' AS region, 300 AS amount
@@ -3005,7 +3005,7 @@ func TestE2E_ODataServer(t *testing.T) {
 
 	// Create test data
 	p.AddModel("mart/revenue.sql", `-- @kind: table
--- @expose
+-- @expose id
 SELECT * FROM (VALUES
     (1, 'Alice', 100.0),
     (2, 'Bob', 250.0),
@@ -3172,10 +3172,10 @@ func TestE2E_ODataServer_NameCollision(t *testing.T) {
 	// Create two models whose targets collide after dot→underscore mapping:
 	// a.b_c → a_b_c and a_b.c → a_b_c
 	p.AddModel("a/b_c.sql", `-- @kind: table
--- @expose
+-- @expose id
 SELECT 1 AS id`)
 	p.AddModel("a_b/c.sql", `-- @kind: table
--- @expose
+-- @expose id
 SELECT 1 AS id`)
 
 	// Materialize both
@@ -3184,8 +3184,8 @@ SELECT 1 AS id`)
 
 	// DiscoverSchemas should detect the collision
 	_, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
-		{Target: "a.b_c"},
-		{Target: "a_b.c"},
+		{Target: "a.b_c", KeyColumn: "id"},
+		{Target: "a_b.c", KeyColumn: "id"},
 	})
 	if err == nil {
 		t.Fatal("expected collision error")

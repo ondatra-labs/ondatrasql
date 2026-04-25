@@ -281,18 +281,11 @@ func GenerateMetadata(schemas []EntitySchema) ([]byte, error) {
 	for _, es := range schemas {
 		et := entityType{Name: es.ODataName}
 
-		// Key element: use explicit key column or all columns as composite key
+		// Key element: explicit key column (required by @expose <column>)
 		key := &entityKey{}
 		keyColumns := make(map[string]bool)
-		if es.KeyColumn != "" {
-			key.PropertyRefs = []propertyRef{{Name: es.KeyColumn}}
-			keyColumns[es.KeyColumn] = true
-		} else {
-			for _, col := range es.Columns {
-				key.PropertyRefs = append(key.PropertyRefs, propertyRef{Name: col.Name})
-				keyColumns[col.Name] = true
-			}
-		}
+		key.PropertyRefs = []propertyRef{{Name: es.KeyColumn}}
+		keyColumns[es.KeyColumn] = true
 		et.Key = key
 
 		notNullable := false

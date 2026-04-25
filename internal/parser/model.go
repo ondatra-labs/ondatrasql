@@ -47,8 +47,11 @@ type Model struct {
 	// ScriptType indicates the type of script (starlark) or empty for SQL.
 	ScriptType ScriptType
 
-	// UniqueKey is the column used for merge/scd2/tracked operations.
+	// UniqueKey is the column used for merge/scd2/partition operations.
 	UniqueKey string
+
+	// GroupKey is the column used for tracked kind (groups rows for content-hash detection).
+	GroupKey string
 
 	// PartitionedBy lists columns for DuckLake native storage partitioning.
 	// Set via @partitioned_by directive. Applied as ALTER TABLE SET PARTITIONED BY.
@@ -98,8 +101,8 @@ type Model struct {
 	// Expose marks the model for OData serving via `ondatrasql odata <port>`.
 	Expose bool
 
-	// ExposeKey is the optional primary key column for OData EntityType Key.
-	// Set via @expose <column>. If empty, all columns are used as composite key.
+	// ExposeKey is the required primary key column for OData EntityType Key.
+	// Set via @expose <column>.
 	ExposeKey string
 
 	// Columns holds column definitions for @kind: events models.
@@ -116,6 +119,10 @@ type Model struct {
 	// Sink is the name of the push function in lib/<sink>.star for outbound sync.
 	// Set via @sink directive. When set, runtime pushes delta rows to external API after materialization.
 	Sink string
+
+	// SinkArgs holds positional arguments from @sink: name('arg1', 'arg2').
+	// Mapped to push.args names in the API dict.
+	SinkArgs []string
 
 	// FilePath is the original file path (empty for database-stored models).
 	FilePath string
@@ -209,6 +216,7 @@ var (
 	kindRe               = regexp.MustCompile(`^` + c + `\s*@kind:\s*(.+)$`)
 	scriptRe             = regexp.MustCompile(`^` + c + `\s*@script\s*$`)
 	uniqueKeyRe          = regexp.MustCompile(`^` + c + `\s*@unique_key:\s*(.+)$`)
+	groupKeyRe           = regexp.MustCompile(`^` + c + `\s*@group_key:\s*(.+)$`)
 	partitionedByRe      = regexp.MustCompile(`^` + c + `\s*@partitioned_by:\s*(.+)$`)
 	incrementalRe        = regexp.MustCompile(`^` + c + `\s*@incremental:\s*(.+)$`)
 	incrementalInitialRe = regexp.MustCompile(`^` + c + `\s*@incremental_initial:\s*(.+)$`)
@@ -322,6 +330,10 @@ func ParseModel(path, projectDir string) (*Model, error) {
 			matches := uniqueKeyRe.FindStringSubmatch(trimmed)
 			model.UniqueKey = strings.TrimSpace(matches[1])
 
+		case groupKeyRe.MatchString(trimmed):
+			matches := groupKeyRe.FindStringSubmatch(trimmed)
+			model.GroupKey = strings.TrimSpace(matches[1])
+
 		case partitionedByRe.MatchString(trimmed):
 			matches := partitionedByRe.FindStringSubmatch(trimmed)
 			// Parse comma-separated partition expressions (paren-aware to support bucket(N, col))
@@ -377,9 +389,20 @@ func ParseModel(path, projectDir string) (*Model, error) {
 
 		case sinkRe.MatchString(trimmed):
 			matches := sinkRe.FindStringSubmatch(trimmed)
-			model.Sink = strings.TrimSpace(matches[1])
-			if model.Sink == "" {
+			sinkVal := strings.TrimSpace(matches[1])
+			if sinkVal == "" {
 				return nil, fmt.Errorf("@sink requires a lib function name (e.g. @sink: hubspot_push)")
+			}
+			// Parse @sink: name('arg1', 'arg2') → Sink="name", SinkArgs=["arg1", "arg2"]
+			if parenIdx := strings.Index(sinkVal, "("); parenIdx >= 0 {
+				model.Sink = strings.TrimSpace(sinkVal[:parenIdx])
+				argsStr := sinkVal[parenIdx+1:]
+				if endIdx := strings.LastIndex(argsStr, ")"); endIdx >= 0 {
+					argsStr = argsStr[:endIdx]
+				}
+				model.SinkArgs = parseSinkArgs(argsStr)
+			} else {
+				model.Sink = sinkVal
 			}
 
 		case sinkDetectDeletesRe.MatchString(trimmed):
@@ -499,12 +522,14 @@ func extractColumnTags(desc string) (string, []string) {
 func validateModel(m *Model) error {
 	// Validate kind
 	switch m.Kind {
-	case "table", "append", "merge", "scd2", "partition", "events", "tracked":
+	case "table", "append", "merge", "scd2", "events", "tracked":
 		// OK
+	case "partition":
+		return fmt.Errorf("@kind: partition was removed — use @kind: tracked with @group_key instead")
 	case "view":
 		return fmt.Errorf("the 'view' kind was removed in v0.14.0. Use '@kind: table' instead — DuckLake makes table storage essentially free, and you gain snapshots, sandbox, lineage, validation, and CDC")
 	default:
-		return fmt.Errorf("invalid kind %q: must be table, append, merge, scd2, partition, events, or tracked", m.Kind)
+		return fmt.Errorf("invalid kind %q: must be table, append, merge, scd2, events, or tracked", m.Kind)
 	}
 
 	// SQL models must have a non-empty body. Scripts and events kind have
@@ -524,15 +549,16 @@ func validateModel(m *Model) error {
 			return fmt.Errorf("@expose is only supported for SQL models (not scripts)")
 		}
 		switch m.Kind {
-		case "table", "merge", "scd2", "append", "partition", "tracked":
+		case "table", "merge", "scd2", "append", "tracked":
 			// OK — materialized with fixed schema
 		default:
-			return fmt.Errorf("@expose is not supported for %s kind (only table, merge, scd2, append, partition, tracked)", m.Kind)
+			return fmt.Errorf("@expose is not supported for %s kind (only table, merge, scd2, append, tracked)", m.Kind)
 		}
-		if m.ExposeKey != "" {
-			if err := ValidateColumnName(m.ExposeKey); err != nil {
-				return fmt.Errorf("invalid @expose key: %w", err)
-			}
+		if m.ExposeKey == "" {
+			return fmt.Errorf("@expose requires a key column (e.g. @expose id)")
+		}
+		if err := ValidateColumnName(m.ExposeKey); err != nil {
+			return fmt.Errorf("invalid @expose key: %w", err)
 		}
 	}
 
@@ -578,48 +604,53 @@ func validateModel(m *Model) error {
 		return fmt.Errorf("@sink is not supported for events kind (events has its own ingest pipeline)")
 	}
 
-	// Validate unique_key if present
+	// Validate unique_key if present (single column only — composite keys use @group_key)
 	if m.UniqueKey != "" {
 		if strings.Contains(m.UniqueKey, ",") {
-			if m.Kind != "partition" {
-				return fmt.Errorf("only a single unique_key column is supported for %s kind", m.Kind)
-			}
-			// Validate each column individually, reject empty segments
+			return fmt.Errorf("only a single unique_key column is supported for %s kind (use @group_key for composite keys with tracked kind)", m.Kind)
+		}
+		if err := ValidateColumnName(m.UniqueKey); err != nil {
+			return fmt.Errorf("invalid unique_key: %w", err)
+		}
+	}
+
+	// Validate group_key if present (supports composite: "region, year")
+	if m.GroupKey != "" {
+		if strings.Contains(m.GroupKey, ",") {
 			var validCols int
-			for _, col := range strings.Split(m.UniqueKey, ",") {
+			for _, col := range strings.Split(m.GroupKey, ",") {
 				col = strings.TrimSpace(col)
 				if col == "" {
-					return fmt.Errorf("invalid unique_key %q: empty column name (trailing or double comma)", m.UniqueKey)
+					return fmt.Errorf("invalid group_key %q: empty column name", m.GroupKey)
 				}
 				if err := ValidateColumnName(col); err != nil {
-					return fmt.Errorf("invalid unique_key: %w", err)
+					return fmt.Errorf("invalid group_key: %w", err)
 				}
 				validCols++
 			}
 			if validCols == 0 {
-				return fmt.Errorf("invalid unique_key %q: no valid columns", m.UniqueKey)
+				return fmt.Errorf("invalid group_key %q: no valid columns", m.GroupKey)
 			}
 		} else {
-			if err := ValidateColumnName(m.UniqueKey); err != nil {
-				return fmt.Errorf("invalid unique_key: %w", err)
+			if err := ValidateColumnName(m.GroupKey); err != nil {
+				return fmt.Errorf("invalid group_key: %w", err)
 			}
 		}
 	}
 
-	// Partition kind requires unique_key
-	if m.Kind == "partition" && m.UniqueKey == "" {
-		return fmt.Errorf("partition kind requires @unique_key directive")
+	// Tracked kind requires @group_key (not @unique_key)
+	if m.Kind == "tracked" {
+		if m.UniqueKey != "" {
+			return fmt.Errorf("tracked kind uses @group_key, not @unique_key (rename the directive)")
+		}
+		if m.GroupKey == "" {
+			return fmt.Errorf("tracked kind requires @group_key directive")
+		}
 	}
 
-	// Tracked kind requires unique_key (single column only)
-	if m.Kind == "tracked" && m.UniqueKey == "" {
-		return fmt.Errorf("tracked kind requires @unique_key directive")
-	}
-
-	// @partitioned_by is a storage hint — not supported on partition kind
-	// (partition kind uses @unique_key for DELETE+INSERT, not DuckLake file layout)
-	if m.Kind == "partition" && len(m.PartitionedBy) > 0 {
-		return fmt.Errorf("@partitioned_by is not supported for partition kind (use @unique_key for partition columns)")
+	// @group_key is only for tracked kind
+	if m.GroupKey != "" && m.Kind != "tracked" {
+		return fmt.Errorf("@group_key is only valid for tracked kind (use @unique_key for %s)", m.Kind)
 	}
 
 	// Validate partitioned_by expressions (column names or transforms like bucket(N, col))
@@ -832,4 +863,45 @@ func parseColumnDefs(body string) ([]ColumnDef, error) {
 	}
 
 	return cols, nil
+}
+
+// parseSinkArgs splits a sink argument string respecting quoted values.
+// "spreadsheet_id, 'Sheet1'" → ["spreadsheet_id", "Sheet1"]
+// "'value, with comma', 'other'" → ["value, with comma", "other"]
+func parseSinkArgs(s string) []string {
+	var args []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := byte(0)
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inQuote {
+			// Escaped quote: '' or "" inside same quote type
+			if ch == quoteChar && i+1 < len(s) && s[i+1] == quoteChar {
+				current.WriteByte(ch)
+				i++ // skip second quote
+			} else if ch == quoteChar {
+				inQuote = false
+			} else {
+				current.WriteByte(ch)
+			}
+		} else if ch == '\'' || ch == '"' {
+			inQuote = true
+			quoteChar = ch
+		} else if ch == ',' {
+			arg := strings.TrimSpace(current.String())
+			if arg != "" {
+				args = append(args, arg)
+			}
+			current.Reset()
+		} else {
+			current.WriteByte(ch)
+		}
+	}
+	arg := strings.TrimSpace(current.String())
+	if arg != "" {
+		args = append(args, arg)
+	}
+	return args
 }

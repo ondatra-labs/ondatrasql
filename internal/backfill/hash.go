@@ -29,6 +29,7 @@ func Hash(sql string) string {
 type ModelDirectives struct {
 	Kind               string
 	UniqueKey          string
+	GroupKey           string // tracked kind: group_key for content-hash dedup
 	PartitionedBy      []string
 	Incremental        string
 	IncrementalInitial string
@@ -50,6 +51,8 @@ func ModelHash(sql string, d ModelDirectives) string {
 	b.WriteString(d.Kind)
 	b.WriteString("\x00unique_key=")
 	b.WriteString(d.UniqueKey)
+	b.WriteString("\x00group_key=")
+	b.WriteString(d.GroupKey)
 	b.WriteString("\x00partitioned_by=")
 	b.WriteString(strings.Join(d.PartitionedBy, ","))
 	b.WriteString("\x00incremental=")

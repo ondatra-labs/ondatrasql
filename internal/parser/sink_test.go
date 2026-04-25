@@ -107,7 +107,7 @@ SELECT id FROM source
 	}
 }
 
-func TestParseSinkAllowsSCD2(t *testing.T) {
+func TestParseSinkAllowsSCD2Syntax(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -118,9 +118,11 @@ func TestParseSinkAllowsSCD2(t *testing.T) {
 SELECT id FROM source
 `)
 
+	// Parser allows scd2 + @sink (syntax is valid).
+	// Runtime's validate_sink blocks it later with a clear migration message.
 	_, err := ParseModel(path, dir)
 	if err != nil {
-		t.Fatalf("scd2 with @sink should be allowed, got: %v", err)
+		t.Fatalf("parser should allow scd2 + @sink syntax (runtime validates later), got: %v", err)
 	}
 }
 

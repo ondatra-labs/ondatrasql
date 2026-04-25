@@ -222,31 +222,15 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		// SCD2 handles its own transaction - return early
 		return r.materializeSCD2(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
 
-	case "partition":
-		if model.UniqueKey == "" {
-			return 0, fmt.Errorf("partition kind requires unique_key directive")
-		}
-		// Bug 16 + 22: validate unique_key columns exist and contain no NULLs.
-		// Partition uses unique_key as the partition identifier.
-		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
-			return 0, err
-		}
-		if err := r.ensureUniqueKeyNotNull(tmpTable, model.UniqueKey); err != nil {
-			return 0, err
-		}
-		// Partition handles its own transaction - return early
-		return r.materializePartition(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
-
 	case "tracked":
-		if model.UniqueKey == "" {
-			return 0, fmt.Errorf("tracked kind requires @unique_key directive")
+		if model.GroupKey == "" {
+			return 0, fmt.Errorf("tracked kind requires @group_key directive")
 		}
-		// Bug 16 + 22: validate unique_key columns exist and contain no NULLs.
-		// Tracked uses unique_key as the group identity for content-hash dedup.
-		if err := r.ensureColumnsExist(tmpTable, "@unique_key", model.UniqueKey); err != nil {
+		// Validate group_key column exists and contains no NULLs.
+		if err := r.ensureColumnsExist(tmpTable, "@group_key", model.GroupKey); err != nil {
 			return 0, err
 		}
-		if err := r.ensureUniqueKeyNotNull(tmpTable, model.UniqueKey); err != nil {
+		if err := r.ensureUniqueKeyNotNull(tmpTable, model.GroupKey); err != nil {
 			return 0, err
 		}
 		// Tracked handles its own transaction - return early
@@ -820,156 +804,37 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	return rowsAffected, nil
 }
 
-// materializePartition creates or updates a partition table.
-// Partition tables replace entire partitions (DELETE + INSERT) instead of row-by-row upserts.
-// On first run (isBackfill=true or table doesn't exist), creates the table.
-// On subsequent runs, deletes matching partitions and inserts new data.
-func (r *Runner) materializePartition(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
-	// Split UniqueKey on comma for partition column list
-	var partitionColList []string
-	for _, col := range strings.Split(model.UniqueKey, ",") {
-		col = strings.TrimSpace(col)
-		if col != "" {
-			partitionColList = append(partitionColList, col)
-		}
-	}
-	partitionCols := quoteIdentifiers(partitionColList)
-
-	// Ensure schema exists before creating table
-	if err := r.ensureSchemaExists(model.Target); err != nil {
-		return 0, fmt.Errorf("ensure schema: %w", err)
-	}
-
-	// Check if target table exists using macro
-	tableExists, err := r.tableExistsCheck(model.Target)
-	if err != nil {
-		return 0, fmt.Errorf("check table exists: %w", err)
-	}
-
-	// Count rows in temp table
-	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable)
-	countResult, err := r.sess.QueryValue(countSQL)
-	if err != nil {
-		return 0, fmt.Errorf("count rows: %w", err)
-	}
-	var rowsAffected int64
-	if _, err := fmt.Sscanf(countResult, "%d", &rowsAffected); err != nil {
-		return 0, fmt.Errorf("parse row count %q: %w", countResult, err)
-	}
-
-	// Build commit metadata
-	stepStart := time.Now()
-	columns, _ := backfill.CaptureSchema(r.sess, tmpTable)
-	schemaHash := backfill.ComputeSchemaHash(columns)
-	colLineage, tableDeps, _ := r.extractLineage(model.SQL)
-	r.trace(result, "metadata", stepStart, "ok")
-
-	endTime := time.Now()
-	steps := ConvertTraceToSteps(result.Trace)
-	info := backfill.CommitInfo{
-		Model:         model.Target,
-		SQLHash:       sqlHash,
-		SchemaHash:    schemaHash,
-		Columns:       columns,
-		ColumnLineage: colLineage,
-		RunType:       runType,
-		RowsAffected:  rowsAffected,
-		DagRunID:      r.dagRunID,
-		Depends:       tableDeps,
-		// Execution metadata
-		Kind:          model.Kind,
-		SourceFile:    model.FilePath,
-		StartTime:     startTime.UTC().Format(time.RFC3339),
-		EndTime:       endTime.UTC().Format(time.RFC3339),
-		DurationMs:    endTime.Sub(startTime).Milliseconds(),
-		DuckDBVersion: r.sess.GetVersion(),
-		// Execution trace
-		Steps:      steps,
-
-		// Git fields
-		GitCommit:  r.gitInfo.Commit,
-		GitBranch:  r.gitInfo.Branch,
-		GitRepoURL: r.gitInfo.RepoURL,
-	}
-	jsonBytes, err := json.Marshal(info)
-	if err != nil {
-		return 0, fmt.Errorf("marshal commit metadata: %w", err)
-	}
-	extraInfo := string(jsonBytes)
-
-	if !tableExists {
-		// First run: Create table from temp table
-		createSQL := sql.MustFormat("execute/table.sql", model.Target, tmpTable)
-
-		// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
-		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, auditSQL, model.Target, escapeSQL(extraInfo))
-
-		stepStart = time.Now()
-		if err := r.sess.Exec(txnSQL); err != nil {
-			r.trace(result, "commit", stepStart, "error")
-			return 0, fmt.Errorf("create partition table: %w", err)
-		}
-		r.trace(result, "commit", stepStart, "ok")
-
-		r.applyComments(model)
-		r.applyStorageHints(model)
-
-		return rowsAffected, nil
-	}
-
-	if isBackfill {
-		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain
-		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
-			model.Target, model.Target, tmpTable)
-		if schemaEvolutionSQL != "" {
-			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
-		}
-		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(extraInfo))
-
-		stepStart = time.Now()
-		if err := r.sess.Exec(txnSQL); err != nil {
-			r.trace(result, "commit", stepStart, "error")
-			return 0, fmt.Errorf("backfill partition table: %w", err)
-		}
-		r.trace(result, "commit", stepStart, "ok")
-
-		r.applyComments(model)
-		return rowsAffected, nil
-	}
-
-	// Incremental run: Delete matching partitions, then insert new data
-	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
-		escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
-
-	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes.
-	// auditSQL is folded into partition_delete.sql so a failing audit aborts
-	// the DELETE+INSERT atomically (same guarantee as commit.sql for the other kinds).
-	txnSQL := registrySQL + ";\n" + sql.MustFormat("execute/partition_delete.sql",
-		model.Target, partitionCols, partitionCols, tmpTable,
-		model.Target, tmpTable,
-		auditSQL, model.Target, escapeSQL(extraInfo))
-	if schemaEvolutionSQL != "" {
-		txnSQL = strings.Replace(txnSQL, "BEGIN;\n", "BEGIN;\n"+schemaEvolutionSQL+";\n", 1)
-	}
-
-	stepStart = time.Now()
-	if err := r.sess.Exec(txnSQL); err != nil {
-		r.trace(result, "commit", stepStart, "error")
-		return 0, fmt.Errorf("update partition table: %w", err)
-	}
-	r.trace(result, "commit", stepStart, "ok")
-
-	r.applyComments(model)
-
-	return rowsAffected, nil
-}
 
 // materializeTracked creates or updates a tracked table with content-hash change detection.
-// Groups rows by unique_key and computes an md5 hash of all non-key columns per group.
+// Groups rows by group_key and computes an md5 hash of all non-key columns per group.
 // On incremental runs, only groups with changed or new hashes are replaced (DELETE + INSERT).
 // The _content_hash column is added automatically, like SCD2's valid_from_snapshot.
 func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
-	uk := duckdb.QuoteIdentifier(model.UniqueKey)
+	// Parse composite group_key: "region, year" → ["region", "year"]
+	var keyParts []string
+	for _, part := range strings.Split(model.GroupKey, ",") {
+		keyParts = append(keyParts, strings.TrimSpace(part))
+	}
+	// Build quoted key column list: "region", "year"
+	var quotedKeys []string
+	for _, k := range keyParts {
+		quotedKeys = append(quotedKeys, duckdb.QuoteIdentifier(k))
+	}
+	uk := strings.Join(quotedKeys, ", ")
+
+	// Build JOIN condition: s."region" = g."region" AND s."year" = g."year"
+	var joinParts []string
+	for _, k := range keyParts {
+		qk := duckdb.QuoteIdentifier(k)
+		joinParts = append(joinParts, fmt.Sprintf("s.%s = g.%s", qk, qk))
+	}
+	joinCond := strings.Join(joinParts, " AND ")
+
+	// Build key column set for exclusion from hash
+	keyCols := make(map[string]bool)
+	for _, k := range keyParts {
+		keyCols[k] = true
+	}
 
 	// Ensure schema exists
 	if err := r.ensureSchemaExists(model.Target); err != nil {
@@ -994,10 +859,10 @@ func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBack
 		}
 	}
 
-	// Build hash columns (all except unique_key)
+	// Build hash columns (all except group_key columns)
 	var hashCols []string
 	for _, col := range cleanCols {
-		if col != model.UniqueKey {
+		if !keyCols[col] {
 			hashCols = append(hashCols, col)
 		}
 	}
@@ -1006,7 +871,6 @@ func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBack
 	// md5(string_agg(concat_ws('|', COALESCE(col1::VARCHAR,''), ...), '|' ORDER BY col1, col2, ...))
 	var hashAggExpr string
 	if len(hashCols) == 0 {
-		// Only unique_key column — no content to hash, use constant
 		hashAggExpr = "md5('')"
 	} else {
 		var concatParts []string
@@ -1037,9 +901,9 @@ WITH group_hash AS (
     SELECT %s, %s AS _content_hash FROM %s GROUP BY %s
 )
 SELECT %s, g._content_hash
-FROM %s s JOIN group_hash g ON s.%s = g.%s`,
+FROM %s s JOIN group_hash g ON %s`,
 		uk, hashAggExpr, tmpTable, uk,
-		qualifiedColList, tmpTable, uk, uk)
+		qualifiedColList, tmpTable, joinCond)
 
 	if err := r.sess.Exec(hashTmpSQL); err != nil {
 		return 0, fmt.Errorf("compute content hash: %w", err)
@@ -1129,21 +993,43 @@ FROM %s s JOIN group_hash g ON s.%s = g.%s`,
 	}
 
 	// Incremental: find changed/new/deleted groups
-	// - LEFT JOIN detects new and changed groups (in source but not matching target)
-	// - UNION detects deleted groups (in target but not in source)
+	// Build prefixed key lists and JOIN conditions
+	var nPrefixed []string // n."region", n."year"
+	var oPrefixed []string // o."region", o."year"
+	var nojoin []string    // n.key = o.key AND ...
+	var lojoin []string    // o.key = h.key AND ...
+	var nullcheck []string // o.key IS NULL
+	for _, k := range keyParts {
+		qk := duckdb.QuoteIdentifier(k)
+		nPrefixed = append(nPrefixed, "n."+qk)
+		oPrefixed = append(oPrefixed, "o."+qk)
+		nojoin = append(nojoin, fmt.Sprintf("n.%s = o.%s", qk, qk))
+		lojoin = append(lojoin, fmt.Sprintf("o.%s = h.%s", qk, qk))
+		nullcheck = append(nullcheck, fmt.Sprintf("o.%s IS NULL", qk))
+	}
+	nuk := strings.Join(nPrefixed, ", ")
+	ouk := strings.Join(oPrefixed, ", ")
 	detectSQL := fmt.Sprintf(`CREATE TEMP TABLE tracked_changes AS
-SELECT n.%[1]s, 'upsert' AS _action FROM (
-    SELECT DISTINCT %[1]s, _content_hash FROM tracked_hashed
+SELECT %[1]s, 'upsert' AS _action FROM (
+    SELECT DISTINCT %[3]s, _content_hash FROM tracked_hashed
 ) n
 LEFT JOIN (
-    SELECT DISTINCT %[1]s, _content_hash FROM %[2]s
-) o ON n.%[1]s = o.%[1]s AND n._content_hash = o._content_hash
-WHERE o.%[1]s IS NULL
+    SELECT DISTINCT %[3]s, _content_hash FROM %[4]s
+) o ON %[5]s AND n._content_hash = o._content_hash
+WHERE %[6]s
 UNION ALL
-SELECT o.%[1]s, 'delete' AS _action FROM (
-    SELECT DISTINCT %[1]s FROM %[2]s
+SELECT %[2]s, 'delete' AS _action FROM (
+    SELECT DISTINCT %[3]s FROM %[4]s
 ) o
-WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Target)
+LEFT JOIN (
+    SELECT DISTINCT %[3]s FROM tracked_hashed
+) h ON %[7]s
+WHERE h.%[8]s IS NULL`,
+		nuk, ouk, uk, model.Target,
+		strings.Join(nojoin, " AND "),
+		strings.Join(nullcheck, " AND "),
+		strings.Join(lojoin, " AND "),
+		quotedKeys[0])
 
 	if err := r.sess.Exec(detectSQL); err != nil {
 		return 0, fmt.Errorf("detect tracked changes: %w", err)
@@ -1180,7 +1066,18 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 	}
 
 	// Count rows being inserted (upsert groups only, not deletes)
-	rowCountSQL := fmt.Sprintf("SELECT COUNT(*) FROM tracked_hashed WHERE %s IN (SELECT %s FROM tracked_changes WHERE _action = 'upsert')", uk, uk)
+	// Build JOIN for composite key matching
+	var countJoin []string
+	var delJoin []string
+	var insJoin []string
+	for _, k := range keyParts {
+		qk := duckdb.QuoteIdentifier(k)
+		countJoin = append(countJoin, fmt.Sprintf("h.%s = c.%s", qk, qk))
+		delJoin = append(delJoin, fmt.Sprintf("t.%s = c.%s", qk, qk))
+		insJoin = append(insJoin, fmt.Sprintf("h.%s = c.%s", qk, qk))
+	}
+	rowCountSQL := fmt.Sprintf("SELECT COUNT(*) FROM tracked_hashed h JOIN tracked_changes c ON %s WHERE c._action = 'upsert'",
+		strings.Join(countJoin, " AND "))
 	rowCountResult, _ := r.sess.QueryValue(rowCountSQL)
 	var rowsAffected int64
 	fmt.Sscanf(rowCountResult, "%d", &rowsAffected)
@@ -1189,9 +1086,11 @@ WHERE o.%[1]s NOT IN (SELECT DISTINCT %[1]s FROM tracked_hashed)`, uk, model.Tar
 	jsonBytes, _ := json.Marshal(info)
 
 	// DELETE old rows for all changed/deleted groups, INSERT new rows for upsert groups only
-	mainSQL := fmt.Sprintf(`DELETE FROM %[1]s WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes);
-INSERT INTO %[1]s BY NAME SELECT * FROM tracked_hashed WHERE %[2]s IN (SELECT %[2]s FROM tracked_changes WHERE _action = 'upsert')`,
-		model.Target, uk)
+	mainSQL := fmt.Sprintf(`DELETE FROM %[1]s t USING tracked_changes c WHERE %[2]s;
+INSERT INTO %[1]s BY NAME SELECT h.* FROM tracked_hashed h JOIN tracked_changes c ON %[3]s WHERE c._action = 'upsert'`,
+		model.Target,
+		strings.Join(delJoin, " AND "),
+		strings.Join(insJoin, " AND "))
 	if schemaEvolutionSQL != "" {
 		mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
 	}

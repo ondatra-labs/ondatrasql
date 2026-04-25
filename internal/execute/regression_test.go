@@ -584,34 +584,94 @@ func TestExtractTypedSelectColumns_NilAST(t *testing.T) {
 	}
 }
 
-func TestDuckDBToJSONSchemaType_Mapping(t *testing.T) {
+func TestNormalizeType(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		duckdb, want string
+		duckdb   string
+		wantType string
 	}{
-		{"DECIMAL", "number"},
-		{"DOUBLE", "number"},
-		{"FLOAT", "number"},
+		{"DECIMAL", "decimal"},
+		{"DECIMAL(18,2)", "decimal"},
+		{"NUMERIC(10,4)", "decimal"},
+		{"DOUBLE", "float"},
+		{"FLOAT", "float"},
+		{"REAL", "float"},
 		{"INTEGER", "integer"},
 		{"BIGINT", "integer"},
+		{"INT8", "integer"},
+		{"INT16", "integer"},
+		{"INT32", "integer"},
+		{"INT64", "integer"},
+		{"INT128", "integer"},
 		{"BOOLEAN", "boolean"},
+		{"LOGICAL", "boolean"},
+		{"JSON", "json"},
+		{"VARCHAR", "string"},
+		{"TEXT", "string"},
+		{"DATE", "date"},
+		{"TIME", "time"},
+		{"TIMESTAMP", "timestamp"},
+		{"TIMESTAMPTZ", "timestamp"},
+		{"TIMESTAMP_NS", "timestamp"},
+		{"UUID", "uuid"},
+		{"BLOB", "blob"},
+		{"LIST", "list"},
+		{"MAP", "map"},
+		{"STRUCT", "struct"},
+		{"BIT", "bit"},
+		{"UNKNOWN_TYPE", "string"},
 	}
 	for _, tt := range tests {
-		got, ok := duckDBToJSONSchemaType[tt.duckdb]
-		if !ok || got != tt.want {
-			t.Errorf("%s: got %q, want %q", tt.duckdb, got, tt.want)
+		result := normalizeType(tt.duckdb)
+		got := result["type"].(string)
+		if got != tt.wantType {
+			t.Errorf("normalizeType(%q) type = %q, want %q", tt.duckdb, got, tt.wantType)
 		}
 	}
+}
 
-	// JSON maps to "array" (used by dynamic_columns for ::JSON casts)
-	if got, ok := duckDBToJSONSchemaType["JSON"]; !ok || got != "array" {
-		t.Errorf("JSON: got %q, want array", got)
+func TestNormalizeType_MalformedDecimal(t *testing.T) {
+	t.Parallel()
+	// Should not panic on malformed input
+	result := normalizeType("DECIMAL(18,2")
+	if result["type"] != "decimal" {
+		t.Errorf("malformed DECIMAL: type = %v, want decimal", result["type"])
+	}
+	result = normalizeType("DECIMAL(")
+	if result["type"] != "decimal" {
+		t.Errorf("DECIMAL(: type = %v, want decimal", result["type"])
+	}
+}
+
+func TestNormalizeType_DecimalPrecision(t *testing.T) {
+	t.Parallel()
+	result := normalizeType("DECIMAL(10,2)")
+	if result["precision"] != "10" || result["scale"] != "2" {
+		t.Errorf("DECIMAL(10,2): got precision=%v scale=%v", result["precision"], result["scale"])
 	}
 
-	// Types not in the map should default to "string"
-	for _, missing := range []string{"VARCHAR", "TIMESTAMP", "DATE"} {
-		if _, ok := duckDBToJSONSchemaType[missing]; ok {
-			t.Errorf("%s should not be in map", missing)
-		}
+	// Bare DECIMAL defaults to 18,3
+	result = normalizeType("DECIMAL")
+	if result["precision"] != "18" || result["scale"] != "3" {
+		t.Errorf("DECIMAL: got precision=%v scale=%v", result["precision"], result["scale"])
+	}
+}
+
+func TestNormalizeType_Timestamp(t *testing.T) {
+	t.Parallel()
+	result := normalizeType("TIMESTAMPTZ")
+	if result["tz"] != true {
+		t.Errorf("TIMESTAMPTZ: tz = %v, want true", result["tz"])
+	}
+	if result["precision"] != "us" {
+		t.Errorf("TIMESTAMPTZ: precision = %v, want us", result["precision"])
+	}
+
+	result = normalizeType("TIMESTAMP_NS")
+	if result["tz"] != false {
+		t.Errorf("TIMESTAMP_NS: tz = %v, want false", result["tz"])
+	}
+	if result["precision"] != "ns" {
+		t.Errorf("TIMESTAMP_NS: precision = %v, want ns", result["precision"])
 	}
 }

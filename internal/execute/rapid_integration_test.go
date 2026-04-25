@@ -19,7 +19,7 @@ import (
 // --- Generators ---
 
 func genModelKind() *rapid.Generator[string] {
-	return rapid.SampledFrom([]string{"table", "append", "merge", "scd2", "partition"})
+	return rapid.SampledFrom([]string{"table", "append", "merge", "scd2", "tracked"})
 }
 
 func genTarget() *rapid.Generator[string] {

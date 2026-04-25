@@ -36,15 +36,15 @@ SELECT * FROM nonexistent_source_table
 	}
 }
 
-// --- materializePartition: error mid-flow ---
+// --- materializeTracked: error mid-flow ---
 
 func TestRun_Partition_MissingTempTable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
-	p.AddModel("staging/bad_part.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/bad_part.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT * FROM nonexistent_source_table
 `)
 	result, err := runModelErr(t, p, "staging/bad_part.sql")
@@ -193,8 +193,8 @@ func TestRun_Partition_IncrementalRun_ErrorPaths(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First run: create partition table
-	p.AddModel("staging/part_test.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_test.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 'EU' AS region, 1 AS id, 100 AS amount
 UNION ALL SELECT 'US', 2, 200
 `)

@@ -30,9 +30,32 @@ func ValidateModelSinkCompat(models []*parser.Model, reg *libregistry.Registry) 
 		}
 		cfg := sink.SinkConfig
 
-		// merge/tracked + @sink requires @unique_key (needed by materialization)
-		if (model.Kind == "merge" || model.Kind == "tracked") && model.UniqueKey == "" {
-			return fmt.Errorf("model %s: @kind: %s with @sink %q requires @unique_key for delta deduplication", model.Target, model.Kind, model.Sink)
+		// scd2 + @sink is not supported — use @kind: table with WHERE is_current = true
+		if model.Kind == "scd2" {
+			return fmt.Errorf("model %s: @sink is not supported for scd2 kind — use @kind: table with WHERE is_current = true to push current state", model.Target)
+		}
+
+		// Validate supported_kinds if declared
+		if len(cfg.SupportedKinds) > 0 {
+			allowed := false
+			for _, k := range cfg.SupportedKinds {
+				if k == model.Kind {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("model %s: sink %q does not support @kind: %s (supported: %v)", model.Target, model.Sink, model.Kind, cfg.SupportedKinds)
+			}
+		}
+
+		// merge + @sink requires @unique_key
+		if model.Kind == "merge" && model.UniqueKey == "" {
+			return fmt.Errorf("model %s: @kind: merge with @sink %q requires @unique_key for delta deduplication", model.Target, model.Sink)
+		}
+		// tracked + @sink requires @group_key
+		if model.Kind == "tracked" && model.GroupKey == "" {
+			return fmt.Errorf("model %s: @kind: tracked with @sink %q requires @group_key for delta deduplication", model.Target, model.Sink)
 		}
 
 		// poll_interval/poll_timeout only valid with async batch_mode

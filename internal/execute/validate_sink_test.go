@@ -74,16 +74,16 @@ func TestValidate_MergeWithoutUniqueKey(t *testing.T) {
 	}
 }
 
-func TestValidate_TrackedWithoutUniqueKey(t *testing.T) {
+func TestValidate_TrackedWithoutGroupKey(t *testing.T) {
 	t.Parallel()
 	reg := makeReg(map[string]*libregistry.LibFunc{"push": syncSink("sync")})
 	models := []*parser.Model{{Target: "sync.invoices", Kind: "tracked", Sink: "push"}}
 
 	err := ValidateModelSinkCompat(models, reg)
 	if err == nil {
-		t.Fatal("expected error for tracked + sink without unique_key")
+		t.Fatal("expected error for tracked + sink without group_key")
 	}
-	if !strings.Contains(err.Error(), "unique_key") {
+	if !strings.Contains(err.Error(), "group_key") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

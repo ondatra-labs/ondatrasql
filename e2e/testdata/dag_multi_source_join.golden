@@ -17,9 +17,9 @@ rows_affected: 4
 run_reason: sql changed
 ---
 target: staging.by_country
-kind: partition
+kind: tracked
 run_type: incremental
-rows_affected: 1
+rows_affected: 3
 run_reason: incremental run
 ---
 target: staging.enriched

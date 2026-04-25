@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -77,24 +78,35 @@ func fileOptions() *syntax.FileOptions {
 }
 
 // libraryPredeclared returns the predeclared globals available to library modules.
-// This excludes save (write side effects — must be passed explicitly as a parameter)
-// but includes incremental (read-only state, safe as a global like env/http/json).
+// This excludes save (write side effects — must be passed explicitly as a parameter).
 func (r *Runtime) libraryPredeclared(ctx context.Context, httpCfg ...*apiHTTPConfig) starlark.StringDict {
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
 	}
 	return starlark.StringDict{
-		"incremental": incrementalModule(r.incrState),
-		"http":        httpModule(ctx, cfg),
-		"env":         envModule(),
-		"getvariable": getvariableBuiltin(r.sess),
-		"query":       queryBuiltin(r.sess),
-		"url":         urlModule(),
-		"crypto":      cryptoModule(),
-		"xml":         xmlModule(),
-		"csv":         csvModule(),
-		"oauth":       oauthModule(ctx, r.projectDir),
+		// Core I/O
+		"http": httpModule(ctx, cfg),
+		"env":  envModule(),
+		"xml":  xmlModule(),
+		"csv":  csvModule(),
+
+		// DuckDB-backed builtins
+		"glob":        globBuiltin(r.sess),
+		"md5_file":    md5FileBuiltin(r.sess),
+		"read_text":   readTextBuiltin(r.sess),
+		"read_blob":   readBlobBuiltin(r.sess),
+		"file_exists": fileExistsBuiltin(r.sess),
+		"md5":         md5Builtin(r.sess),
+		"sha256":      sha256Builtin(r.sess),
+		"uuid":        uuidBuiltin(r.sess),
+		"lookup":      lookupBuiltin(r.sess),
+
+		// Crypto builtins (Go-native, not DuckDB)
+		"hmac_sha256":   hmacSha256Builtin(),
+		"base64_encode": base64EncodeBuiltin(),
+		"base64_decode": base64DecodeBuiltin(),
+
 		"time":        starlarktime.Module,
 		"json":        starlarkjson.Module,
 		"abort": starlark.NewBuiltin("abort", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -512,20 +524,20 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 
 	// Pagination loop
 	var cursor starlark.Value = starlark.None
-	pageNum := 1
+	pageNum := 1 // internal counter for error messages only
 
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		page := pageModule(cursor, pageSize, pageNum)
+		page := pageModule(cursor, pageSize)
 
 		// Call fetch(**kwargs, page=page) -- page passed as keyword arg
 		allKwargs := make([]starlark.Tuple, len(kwargs)+1)
 		copy(allKwargs, kwargs)
 		allKwargs[len(kwargs)] = starlark.Tuple{starlark.String("page"), page}
-		retVal, err := starlark.Call(thread, callable, nil, allKwargs)
+		retVal, err := starlark.Call(thread, callable, nil, filterKwargs(callable, allKwargs))
 		if err != nil {
 			return nil, fmt.Errorf("fetch page %d: %w", pageNum, err)
 		}
@@ -597,6 +609,254 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 	return result, nil
 }
 
+// RunSourceAsync executes an async fetch blueprint: submit() → poll check() → fetch_result().
+// Runtime handles the poll loop with interval, backoff, and timeout from API config.
+func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, config map[string]any, pageSize int, pollInterval, pollTimeout time.Duration, pollBackoff int, httpCfg ...*apiHTTPConfig) (*Result, error) {
+	start := time.Now()
+	var cfg *apiHTTPConfig
+	if len(httpCfg) > 0 {
+		cfg = httpCfg[0]
+	}
+
+	// Create collector: Badger-backed (durable) or in-memory
+	var collector rowCollector
+	var bc *badgerCollector
+	if r.ingestDir != "" {
+		var err error
+		bc, err = newBadgerCollector(target, r.ingestDir, r.sess)
+		if err != nil {
+			return nil, fmt.Errorf("create ingest collector: %w", err)
+		}
+		collector = bc
+	} else {
+		collector = &saveCollector{target: target, sess: r.sess}
+	}
+
+	// Track whether we returned successfully so defer can close bc on error
+	var succeeded bool
+	if bc != nil {
+		defer func() {
+			if !succeeded {
+				bc.close()
+			}
+		}()
+	}
+
+	libPredeclared := r.libraryPredeclared(ctx, cfg)
+
+	loadCache := make(map[string]starlark.StringDict)
+	loadFunc := r.makeLoadFunc(ctx, libPredeclared, loadCache)
+
+	thread := &starlark.Thread{
+		Name: target,
+		Print: func(_ *starlark.Thread, msg string) {
+			fmt.Fprintln(os.Stderr, RedactSecrets(msg))
+		},
+		Load: loadFunc,
+	}
+	thread.SetLocal("ctx", ctx)
+	thread.SetLocal("sess", r.sess)
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel(ctx.Err().Error())
+		case <-done:
+		}
+	}()
+
+	modulePath := "lib/" + source + ".star"
+	globals, err := loadFunc(thread, modulePath)
+	if err != nil {
+		return nil, fmt.Errorf("load source %q: %w", source, err)
+	}
+
+	submitFn, err := getCallable(globals, "submit", source)
+	if err != nil {
+		return nil, err
+	}
+	checkFn, err := getCallable(globals, "check", source)
+	if err != nil {
+		return nil, err
+	}
+	fetchResultFn, err := getCallable(globals, "fetch_result", source)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build kwargs from config for submit()
+	var submitKwargs []starlark.Tuple
+	for key, val := range config {
+		sv, err := goToStarlark(val)
+		if err != nil {
+			return nil, fmt.Errorf("source %q: config key %q: %w", source, key, err)
+		}
+		submitKwargs = append(submitKwargs, starlark.Tuple{starlark.String(key), sv})
+	}
+
+	// Phase 1: submit()
+	submitRet, err := starlark.Call(thread, submitFn, nil, filterKwargs(submitFn, submitKwargs))
+	if err != nil {
+		return nil, fmt.Errorf("submit: %w", err)
+	}
+	if submitRet == nil || submitRet == starlark.None {
+		// abort() in submit — 0 rows
+		return &Result{Duration: time.Since(start)}, nil
+	}
+
+	// Phase 2: poll check() until done
+	checkKwargs := []starlark.Tuple{
+		{starlark.String("job_ref"), submitRet},
+	}
+	currentInterval := pollInterval
+	pollStart := time.Now()
+
+	var resultRef starlark.Value
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		// Context-aware sleep — responds to cancellation during poll interval
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(currentInterval):
+		}
+
+		checkRet, err := starlark.Call(thread, checkFn, nil, filterKwargs(checkFn, checkKwargs))
+		if err != nil {
+			return nil, fmt.Errorf("check: %w", err)
+		}
+
+		if checkRet != nil && checkRet != starlark.None {
+			resultRef = checkRet
+			break
+		}
+
+		if time.Since(pollStart) > pollTimeout {
+			return nil, fmt.Errorf("async fetch timed out after %v", pollTimeout)
+		}
+
+		if pollBackoff > 1 {
+			currentInterval = currentInterval * time.Duration(pollBackoff)
+			if currentInterval > 30*time.Second {
+				currentInterval = 30 * time.Second
+			}
+		}
+	}
+
+	// Phase 3: fetch_result() with pagination
+	var cursor starlark.Value = starlark.None
+	pageNum := 1
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		page := pageModule(cursor, pageSize)
+		fetchKwargs := []starlark.Tuple{
+			{starlark.String("result_ref"), resultRef},
+			{starlark.String("page"), page},
+		}
+
+		retVal, err := starlark.Call(thread, fetchResultFn, nil, filterKwargs(fetchResultFn, fetchKwargs))
+		if err != nil {
+			return nil, fmt.Errorf("fetch_result page %d: %w", pageNum, err)
+		}
+
+		retDict, ok := retVal.(*starlark.Dict)
+		if !ok {
+			return nil, fmt.Errorf("fetch_result page %d: must return dict, got %s", pageNum, retVal.Type())
+		}
+
+		rowsVal, found, err := retDict.Get(starlark.String("rows"))
+		if err != nil || !found {
+			return nil, fmt.Errorf("fetch_result page %d: must include 'rows' key", pageNum)
+		}
+		rowsList, ok := rowsVal.(*starlark.List)
+		if !ok {
+			return nil, fmt.Errorf("fetch_result page %d: 'rows' must be a list", pageNum)
+		}
+
+		for i := 0; i < rowsList.Len(); i++ {
+			goVal, err := starlarkToGo(rowsList.Index(i))
+			if err != nil {
+				return nil, fmt.Errorf("fetch_result page %d row %d: %w", pageNum, i, err)
+			}
+			m, ok := goVal.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("fetch_result page %d row %d: expected dict", pageNum, i)
+			}
+			if addErr := collector.add(m); addErr != nil {
+				return nil, fmt.Errorf("fetch_result page %d row %d: %w", pageNum, i, addErr)
+			}
+		}
+
+		nextVal, _, _ := retDict.Get(starlark.String("next"))
+		if nextVal == nil || nextVal == starlark.None {
+			break
+		}
+		if s, ok := starlark.AsString(nextVal); ok && s == "" {
+			break
+		}
+		cursor = nextVal
+		pageNum++
+	}
+
+	result := &Result{
+		Duration: time.Since(start),
+		RowCount: int64(collector.count()),
+		badger:   bc,
+	}
+	if sc, ok := collector.(*saveCollector); ok {
+		result.collector = sc
+	}
+
+	succeeded = true
+	return result, nil
+}
+
+// getCallable finds a callable function in globals by name.
+func getCallable(globals starlark.StringDict, name, source string) (starlark.Callable, error) {
+	fn, ok := globals[name]
+	if !ok {
+		return nil, fmt.Errorf("source %q: no %s() function", source, name)
+	}
+	callable, ok := fn.(starlark.Callable)
+	if !ok {
+		return nil, fmt.Errorf("source %q: %s is not callable", source, name)
+	}
+	return callable, nil
+}
+
+// filterKwargs returns only the kwargs that the function accepts.
+// If the function has **kwargs, all kwargs are passed through.
+func filterKwargs(fn starlark.Callable, kwargs []starlark.Tuple) []starlark.Tuple {
+	sf, ok := fn.(*starlark.Function)
+	if !ok {
+		return kwargs // built-in or wrapper — pass all
+	}
+	if sf.HasKwargs() {
+		return kwargs // function accepts **kwargs — pass all
+	}
+	accepted := make(map[string]bool, sf.NumParams())
+	for i := 0; i < sf.NumParams(); i++ {
+		name, _ := sf.Param(i)
+		accepted[name] = true
+	}
+	filtered := make([]starlark.Tuple, 0, len(kwargs))
+	for _, kv := range kwargs {
+		if name, ok := starlark.AsString(kv[0]); ok && accepted[name] {
+			filtered = append(filtered, kv)
+		}
+	}
+	return filtered
+}
+
 // SinkResult holds the return value from a push() call.
 type SinkResult struct {
 	// PerRow maps sync_key -> "ok" or "error: message" (sync mode).
@@ -610,17 +870,16 @@ type SinkResult struct {
 }
 
 // RunSink executes a SINK push function from lib/<sink>.star.
-// It calls push(rows) with the given batch and returns the Starlark return value.
+// It calls push(rows, batch_number, kind, key_columns, columns, sink args...) with the given batch.
 // Optional httpCfg injects API dict defaults (base_url, headers, etc.) into http module.
-func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, httpCfg ...*apiHTTPConfig) (*SinkResult, error) {
+func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (*SinkResult, error) {
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
 	}
 	libPredeclared := r.libraryPredeclared(ctx, cfg)
 
-	// Add sink module to predeclared
-	libPredeclared["sink"] = sinkModule(batchNumber)
+	// sink module removed — batch_number passed as kwarg to push()
 
 	loadCache := make(map[string]starlark.StringDict)
 	loadFunc := r.makeLoadFunc(ctx, libPredeclared, loadCache)
@@ -676,8 +935,47 @@ func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[strin
 		return nil, fmt.Errorf("sink %q: convert rows: %w", sinkName, err)
 	}
 
-	// Call push(rows)
-	retVal, err := starlark.Call(thread, callable, starlark.Tuple{starlarkRows}, nil)
+	// Build columns list from ALL rows (excluding internal fields)
+	// Sort for deterministic order — blueprints use this for header ordering
+	colSet := make(map[string]bool)
+	for _, row := range rows {
+		for k := range row {
+			if !strings.HasPrefix(k, "_") {
+				colSet[k] = true
+			}
+		}
+	}
+	var colNames []string
+	for k := range colSet {
+		colNames = append(colNames, k)
+	}
+	sort.Strings(colNames)
+	colsList := make([]starlark.Value, len(colNames))
+	for i, name := range colNames {
+		colsList[i] = starlark.String(name)
+	}
+
+	// Build unique_key as list (handles composite keys like "region, year")
+	var keyList []starlark.Value
+	if uniqueKey != "" {
+		for _, part := range strings.Split(uniqueKey, ",") {
+			keyList = append(keyList, starlark.String(strings.TrimSpace(part)))
+		}
+	}
+
+	// Call push(rows=..., batch_number=..., kind=..., key_columns=..., columns=..., sink_args...) — kwargs-only
+	pushKwargs := []starlark.Tuple{
+		{starlark.String("rows"), starlarkRows},
+		{starlark.String("batch_number"), starlark.MakeInt(batchNumber)},
+		{starlark.String("kind"), starlark.String(kind)},
+		{starlark.String("key_columns"), starlark.NewList(keyList)},
+		{starlark.String("columns"), starlark.NewList(colsList)},
+	}
+	// Add sink args as named kwargs
+	for name, val := range sinkArgs {
+		pushKwargs = append(pushKwargs, starlark.Tuple{starlark.String(name), starlark.String(val)})
+	}
+	retVal, err := starlark.Call(thread, callable, nil, filterKwargs(callable, pushKwargs))
 	if err != nil {
 		return nil, fmt.Errorf("push: %w", err)
 	}
@@ -768,10 +1066,11 @@ func (r *Runtime) RunSinkFinalize(ctx context.Context, sinkName string, succeede
 		return fmt.Errorf("sink %q: finalize is not a function", sinkName)
 	}
 
-	_, err = starlark.Call(thread, callable, starlark.Tuple{
-		starlark.MakeInt64(succeeded),
-		starlark.MakeInt64(failed),
-	}, nil)
+	finalizeKwargs := []starlark.Tuple{
+		{starlark.String("succeeded"), starlark.MakeInt64(succeeded)},
+		{starlark.String("failed"), starlark.MakeInt64(failed)},
+	}
+	_, err = starlark.Call(thread, callable, nil, filterKwargs(callable, finalizeKwargs))
 	if err != nil {
 		return fmt.Errorf("finalize: %w", err)
 	}
@@ -830,7 +1129,10 @@ func (r *Runtime) RunSinkPoll(ctx context.Context, sinkName string, jobRef map[s
 		return false, nil, fmt.Errorf("convert job_ref: %w", err)
 	}
 
-	retVal, err := starlark.Call(thread, callable, starlark.Tuple{jobRefVal}, nil)
+	pollKwargs := []starlark.Tuple{
+		{starlark.String("job_ref"), jobRefVal},
+	}
+	retVal, err := starlark.Call(thread, callable, nil, filterKwargs(callable, pollKwargs))
 	if err != nil {
 		return false, nil, fmt.Errorf("poll: %w", err)
 	}

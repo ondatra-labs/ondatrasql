@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ondatra-labs/ondatrasql/internal/backfill"
+
 	"go.starlark.net/starlark"
 )
 
@@ -135,97 +135,11 @@ for i in range(10000000000):
 	}
 }
 
-func TestIncrementalModule(t *testing.T) {
-	t.Parallel()
-	// Test incremental module with state
-	state := &backfill.IncrementalState{
-		IsBackfill:   false,
-		Cursor:       "updated_at",
-		LastValue:    "2024-03-15T10:00:00Z",
-		LastRun:      "2024-03-15T09:00:00Z",
-		InitialValue: "2024-01-01T00:00:00Z",
-	}
+// Incremental state is now passed as kwargs to fetch(), not as a module.
+// See runner.go where is_backfill, last_value, etc. are injected into kwargs.
+// Legacy tests for incremental module removed — tested via integration tests.
 
-	rt := NewRuntime(nil, state)
-
-	code := `
-if incremental.is_backfill:
-    fail("expected is_backfill to be false")
-
-if incremental.cursor != "updated_at":
-    fail("expected cursor to be updated_at, got: " + incremental.cursor)
-
-if incremental.last_value != "2024-03-15T10:00:00Z":
-    fail("expected last_value to be 2024-03-15T10:00:00Z, got: " + incremental.last_value)
-
-if incremental.last_run != "2024-03-15T09:00:00Z":
-    fail("expected last_run to be 2024-03-15T09:00:00Z, got: " + incremental.last_run)
-
-if incremental.initial_value != "2024-01-01T00:00:00Z":
-    fail("expected initial_value to be 2024-01-01T00:00:00Z, got: " + incremental.initial_value)
-`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := rt.Run(ctx, "test.target", code)
-	if err != nil {
-		t.Fatalf("incremental module test failed: %v", err)
-	}
-}
-
-func TestIncrementalModuleBackfill(t *testing.T) {
-	t.Parallel()
-	// Test incremental module when it's a backfill (first run)
-	state := &backfill.IncrementalState{
-		IsBackfill:   true,
-		Cursor:       "id",
-		LastValue:    "0",
-		InitialValue: "0",
-	}
-
-	rt := NewRuntime(nil, state)
-
-	code := `
-if not incremental.is_backfill:
-    fail("expected is_backfill to be true")
-
-if incremental.last_value != "0":
-    fail("expected last_value to be 0, got: " + incremental.last_value)
-`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := rt.Run(ctx, "test.target", code)
-	if err != nil {
-		t.Fatalf("incremental backfill test failed: %v", err)
-	}
-}
-
-func TestIncrementalModuleNil(t *testing.T) {
-	t.Parallel()
-	// Test incremental module without state (nil)
-	rt := NewRuntime(nil, nil)
-
-	code := `
-# With nil state, is_backfill should be true (default)
-if not incremental.is_backfill:
-    fail("expected is_backfill to be true when no state")
-
-# All string values should be empty
-if incremental.cursor != "":
-    fail("expected cursor to be empty")
-`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := rt.Run(ctx, "test.target", code)
-	if err != nil {
-		t.Fatalf("incremental nil state test failed: %v", err)
-	}
-}
+// TestIncrementalModuleNil removed — incremental is now kwargs, not a module.
 
 func TestTimeModule(t *testing.T) {
 	t.Parallel()
@@ -505,48 +419,6 @@ if val != "hello123":
 	os.Unsetenv("TEST_ONDATRA_VAR")
 }
 
-func TestOAuthBasicAuthFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-
-	code := `
-auth = oauth.basic_auth("user", "pass")
-if not auth.startswith("Basic "):
-    fail("expected Basic prefix, got: " + auth)
-`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestOAuthTokenFromStarlark(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"access_token": "my-tok", "expires_in": 3600}`))
-	}))
-	defer srv.Close()
-
-	rt := NewRuntime(nil, nil)
-
-	code := fmt.Sprintf(`
-tok = oauth.token(token_url="%s", client_id="id", client_secret="secret")
-val = tok.access_token
-if val != "my-tok":
-    fail("expected my-tok, got: " + val)
-`, srv.URL)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // --- CSV module tests ---
 
@@ -713,153 +585,16 @@ if "Alice" not in result:
 
 // --- URL module tests ---
 
-func TestURLBuildFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = url.build(base="https://api.example.com/v1", params={"page": "2", "limit": "10"})
-if "page=2" not in result:
-    fail("missing page: " + result)
-if "limit=10" not in result:
-    fail("missing limit: " + result)
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestURLBuildNoParamsFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = url.build(base="https://example.com")
-if result != "https://example.com":
-    fail("got: " + result)
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestURLEncodeFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = url.encode("hello world&foo=bar")
-if "hello" not in result:
-    fail("got: " + result)
-if " " in result:
-    fail("space not encoded: " + result)
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestURLEncodeParamsFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = url.encode_params({"foo": "bar", "baz": "qux"})
-if "foo=bar" not in result:
-    fail("missing foo: " + result)
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestURLParseFromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-u = url.parse("https://api.example.com/v1/data?key=val")
-if u.scheme != "https":
-    fail("scheme: " + u.scheme)
-if u.host != "api.example.com":
-    fail("host: " + u.host)
-if u.path != "/v1/data":
-    fail("path: " + u.path)
-if u.query.key != "val":
-    fail("query.key: " + str(u.query.key))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // --- Crypto module tests ---
 
-func TestCryptoBase64FromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-encoded = crypto.base64_encode("hello world")
-decoded = crypto.base64_decode(encoded)
-if decoded != "hello world":
-    fail("roundtrip failed: " + decoded)
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoSHA256FromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-h = crypto.sha256("hello")
-if len(h) != 64:
-    fail("expected 64 hex chars, got " + str(len(h)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoMD5FromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-h = crypto.md5("hello")
-if len(h) != 32:
-    fail("expected 32 hex chars, got " + str(len(h)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoHMACSHA256FromStarlark(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-h = crypto.hmac_sha256("secret", "message")
-if len(h) != 64:
-    fail("expected 64 hex chars, got " + str(len(h)))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
 
 
@@ -1021,9 +756,8 @@ func TestHTTPWithBasicAuthHeader(t *testing.T) {
 	defer srv.Close()
 
 	rt := NewRuntime(nil, nil)
-	// Use oauth.basic_auth to generate auth header since Starlark tuple kwarg is tricky
 	code := fmt.Sprintf(`
-auth_header = oauth.basic_auth("user", "pass")
+auth_header = "Basic " + base64_encode("user:pass")
 resp = http.get("%s", headers={"Authorization": auth_header})
 `, srv.URL)
 
@@ -1586,65 +1320,21 @@ if val != "":
 	}
 }
 
-func TestURLBuildInvalidBase(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `url.build(base="://invalid", params={"a": "1"})`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := rt.Run(ctx, "test", code)
-	// url.Parse is very lenient, so this may not error - just verify no panic
-	_ = err
-}
 
-func TestURLParseMultiValue(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = url.parse("https://example.com/path?foo=1&foo=2&bar=3")
-if result.scheme != "https":
-    fail("expected https scheme")
-if result.host != "example.com":
-    fail("expected example.com host")
-if result.path != "/path":
-    fail("expected /path")
-# foo has multiple values, should be a list
-if type(result.query.foo) != "list":
-    fail("expected list for multi-value param, got " + type(result.query.foo))
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestURLEncodeUnicode(t *testing.T) {
-	t.Parallel()
-	rt := NewRuntime(nil, nil)
-	code := `
-result = url.encode("héllo wörld")
-if "h" not in result:
-    fail("expected h in encoded result")
-if " " in result:
-    fail("space should be encoded")
-`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := rt.Run(ctx, "test", code); err != nil {
-		t.Fatal(err)
-	}
-}
 
-func TestCryptoBase64DecodeInvalid(t *testing.T) {
+func TestBase64DecodeInvalid(t *testing.T) {
 	t.Parallel()
 	rt := NewRuntime(nil, nil)
-	code := `crypto.base64_decode("!!!invalid!!!")`
+	code := `base64_decode("!!!invalid!!!")`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := rt.Run(ctx, "test", code)
 	if err == nil {
 		t.Fatal("expected error for invalid base64")
+	}
+	if !strings.Contains(err.Error(), "base64") {
+		t.Errorf("expected base64 error, got: %v", err)
 	}
 }
 
@@ -1965,9 +1655,8 @@ func TestHTTPWithAuthBasicViaHeader(t *testing.T) {
 	defer srv.Close()
 
 	rt := NewRuntime(nil, nil)
-	// Use oauth.basic_auth() to generate the header since auth= kwarg has Starlark tuple limitation
 	code := fmt.Sprintf(`
-auth_header = oauth.basic_auth("user", "pass")
+auth_header = "Basic " + base64_encode("user:pass")
 resp = http.get("%s", headers={"Authorization": auth_header})
 if resp.status_code != 200:
     fail("expected 200 with basic auth header")
@@ -2446,60 +2135,10 @@ func TestXMLEncodeError(t *testing.T) {
 
 // --- Tests for module UnpackArgs error paths ---
 
-func TestCryptoBase64EncodeWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := cryptoModule()
-	fn := mod.Members["base64_encode"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to base64_encode")
-	}
-}
 
-func TestCryptoBase64DecodeWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := cryptoModule()
-	fn := mod.Members["base64_decode"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to base64_decode")
-	}
-}
 
-func TestCryptoSHA256WrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := cryptoModule()
-	fn := mod.Members["sha256"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to sha256")
-	}
-}
 
-func TestCryptoMD5WrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := cryptoModule()
-	fn := mod.Members["md5"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to md5")
-	}
-}
 
-func TestCryptoHMACWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := cryptoModule()
-	fn := mod.Members["hmac_sha256"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for wrong args to hmac_sha256")
-	}
-}
 
 
 func TestCSVDecodeWrongArgs(t *testing.T) {
@@ -2546,38 +2185,8 @@ func TestEnvSetWrongArgs(t *testing.T) {
 	}
 }
 
-func TestURLBuildWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := urlModule()
-	fn := mod.Members["build"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to url.build")
-	}
-}
 
-func TestURLEncodeWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := urlModule()
-	fn := mod.Members["encode"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to url.encode")
-	}
-}
 
-func TestURLParseWrongArgs(t *testing.T) {
-	t.Parallel()
-	mod := urlModule()
-	fn := mod.Members["parse"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to url.parse")
-	}
-}
 
 func TestXMLDecodeWrongArgs(t *testing.T) {
 	t.Parallel()
@@ -2601,17 +2210,6 @@ func TestXMLEncodeWrongArgs(t *testing.T) {
 	}
 }
 
-func TestOAuthBasicAuthWrongArgs(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	mod := oauthModule(ctx, "")
-	fn := mod.Members["basic_auth"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	_, err := fn.CallInternal(thread, starlark.Tuple{starlark.MakeInt(42)}, nil)
-	if err == nil {
-		t.Error("expected error for int arg to oauth.basic_auth")
-	}
-}
 
 func TestSaveRowWrongArgs(t *testing.T) {
 	t.Parallel()
@@ -2747,20 +2345,6 @@ func TestStarlarkToGoLargeInt(t *testing.T) {
 	}
 }
 
-func TestURLParseInvalid(t *testing.T) {
-	t.Parallel()
-	mod := urlModule()
-	fn := mod.Members["parse"].(*starlark.Builtin)
-	thread := &starlark.Thread{Name: "test"}
-	// Valid call but weird URL
-	result, err := fn.CallInternal(thread, starlark.Tuple{starlark.String("://bad")}, nil)
-	if err != nil {
-		// parse error
-		_ = err
-	} else {
-		_ = result
-	}
-}
 
 func TestHTTPBackoffInt(t *testing.T) {
 	t.Parallel()
@@ -3139,29 +2723,7 @@ secret = "leaked"
 	}
 }
 
-func TestLoad_IncrementalAsGlobal(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "lib"), 0755)
-	// Library module accesses incremental as a global (not parameter)
-	os.WriteFile(filepath.Join(dir, "lib", "incr_source.star"), []byte(`
-def incr_source(save):
-    if incremental.is_backfill:
-        save.row({"id": 1, "mode": "backfill"})
-    else:
-        save.row({"id": 1, "mode": "incremental"})
-`), 0644)
-
-	state := &backfill.IncrementalState{IsBackfill: true, InitialValue: "2020-01-01"}
-	rt := NewRuntime(nil, state, dir)
-	result, err := rt.RunSource(context.Background(), "test.target", "incr_source", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RowCount != 1 {
-		t.Fatalf("expected 1 row, got %d", result.RowCount)
-	}
-}
+// TestLoad_IncrementalAsGlobal removed — incremental is now kwargs, not a global module.
 
 func TestLoad_SourceWithoutIncremental(t *testing.T) {
 	t.Parallel()

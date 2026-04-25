@@ -130,6 +130,17 @@ func TestModelHash(t *testing.T) {
 		}
 	})
 
+	t.Run("changing group_key changes hash", func(t *testing.T) {
+		t.Parallel()
+		d := baseDirectives
+		d.GroupKey = "source_file"
+		h1 := ModelHash(baseSQL, baseDirectives)
+		h2 := ModelHash(baseSQL, d)
+		if h1 == h2 {
+			t.Error("changing @group_key should produce different hash")
+		}
+	})
+
 	t.Run("changing partitioned_by changes hash", func(t *testing.T) {
 		t.Parallel()
 		d := baseDirectives

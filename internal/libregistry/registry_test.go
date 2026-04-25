@@ -29,12 +29,6 @@ API = {
     "base_url": "https://api.google.com",
     "fetch": {
         "args": ["network_code", "key_file"],
-        "columns": {
-            "AD_UNIT_NAME": {"type": "VARCHAR", "category": "dimension"},
-            "DATE": {"type": "VARCHAR", "category": "dimension"},
-            "AD_SERVER_IMPRESSIONS": {"type": "BIGINT", "category": "metric"},
-            "AD_SERVER_REVENUE": {"type": "DOUBLE", "category": "metric"},
-        },
     },
 }
 
@@ -64,26 +58,8 @@ def fetch(network_code, key_file, page):
 	if lf.Args[0] != "network_code" || lf.Args[1] != "key_file" {
 		t.Errorf("unexpected args: %v", lf.Args)
 	}
-	if len(lf.Columns) != 4 {
-		t.Fatalf("expected 4 columns, got %d", len(lf.Columns))
-	}
-
-	// Check column details
-	dimCount := 0
-	metCount := 0
-	for _, c := range lf.Columns {
-		if c.Category == "dimension" {
-			dimCount++
-		}
-		if c.Category == "metric" {
-			metCount++
-		}
-	}
-	if dimCount != 2 {
-		t.Errorf("expected 2 dimensions, got %d", dimCount)
-	}
-	if metCount != 2 {
-		t.Errorf("expected 2 metrics, got %d", metCount)
+	if !lf.DynamicColumns {
+		t.Error("expected DynamicColumns=true for API dict")
 	}
 
 	if !reg.IsLibFunction("gam_fetch") {
@@ -139,7 +115,6 @@ API = {
     "base_url": "https://api.mistral.ai",
     "fetch": {
         "args": ["api_key", "files"],
-        "dynamic_columns": True,
     },
 }
 
@@ -189,7 +164,6 @@ API = {
     "base_url": "https://api.example.com",
     "fetch": {
         "args": ["key"],
-        "columns": {"col": {"type": "VARCHAR"}},
     },
 }
 # No fetch() function defined
@@ -208,7 +182,6 @@ API = {
     "base_url": "https://api.example.com",
     "fetch": {
         "args": ["network_code", "key_file"],
-        "columns": {"col": {"type": "VARCHAR"}},
     },
 }
 
@@ -296,7 +269,7 @@ func TestRegisterMacros(t *testing.T) {
 	writeLib(t, dir, "api_fetch.star", `
 API = {
     "base_url": "https://api.example.com",
-    "fetch": {"args": ["url"], "columns": {"name": {"type": "VARCHAR"}}},
+    "fetch": {"args": ["url"]},
 }
 def fetch(url, page):
     pass
@@ -343,7 +316,7 @@ func TestScan_FetchAndPushFuncs(t *testing.T) {
 	writeLib(t, dir, "fetch_api.star", `
 API = {
     "base_url": "https://api.example.com",
-    "fetch": {"args": ["url"], "dynamic_columns": True},
+    "fetch": {"args": ["url"]},
 }
 def fetch(url, page):
     pass

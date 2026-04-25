@@ -56,7 +56,7 @@ func parseColumnList(s string) []string {
 // masking macros for tagged columns.
 //
 //   - Tags matching masking prefixes (mask, hash, redact) are treated as macro names.
-//   - unique_key columns are never masked (required for merge/partition/tracked matching).
+//   - unique_key columns are never masked (required for merge/tracked matching).
 //   - If no applicable masking tags are found, the input SQL is returned unchanged.
 //   - Complex SQL (CTEs, subqueries) is wrapped as a derived table: FROM (<original_sql>).
 //   - REPLACE overrides are sorted by column name for deterministic output.
@@ -71,14 +71,17 @@ func applyColumnMasking(sql string, model *parser.Model) string {
 		name  string
 		macro string
 	}
-	// Build set of key columns (may be comma-separated for partition kind)
+	// Build set of key columns (may be comma-separated for composite keys)
 	keyCols := make(map[string]bool)
 	for _, col := range parseColumnList(model.UniqueKey) {
 		keyCols[col] = true
 	}
+	for _, col := range parseColumnList(model.GroupKey) {
+		keyCols[col] = true
+	}
 
 	for colName, tags := range model.ColumnTags {
-		// Never mask key columns (needed for merge/partition/tracked matching)
+		// Never mask key columns (needed for merge/tracked matching)
 		if keyCols[colName] {
 			continue
 		}

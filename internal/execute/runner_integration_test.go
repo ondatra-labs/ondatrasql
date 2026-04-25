@@ -315,8 +315,8 @@ func TestRun_PartitionKind(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First run: creates table
-	p.AddModel("staging/daily_sales.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/daily_sales.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 'US' AS region, 100 AS amount
 UNION ALL SELECT 'EU', 200
 `)
@@ -326,8 +326,8 @@ UNION ALL SELECT 'EU', 200
 	}
 
 	// Second run: only includes US → deletes old US rows, inserts new US, EU preserved
-	p.AddModel("staging/daily_sales.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/daily_sales.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 'US' AS region, 150 AS amount
 UNION ALL SELECT 'EU', 250
 `)
@@ -1023,8 +1023,8 @@ func TestRun_Partition_IncrementalUpsert(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 
-	sql := `-- @kind: partition
--- @unique_key: region
+	sql := `-- @kind: tracked
+-- @group_key: region
 SELECT 'US' AS region, 100 AS amount
 UNION ALL SELECT 'EU', 200
 `
@@ -1036,13 +1036,13 @@ UNION ALL SELECT 'EU', 200
 		t.Errorf("run1 rows = %d, want 2", r1.RowsAffected)
 	}
 
-	// Second run with same SQL → incremental partition (DELETE matching partitions + INSERT)
+	// Second run with same SQL → incremental tracked (content hash unchanged → 0 rows)
 	r2 := runModel(t, p, "staging/part_incr.sql")
 	if r2.RunType != "incremental" {
 		t.Errorf("run2 type = %q, want incremental", r2.RunType)
 	}
-	if r2.RowsAffected != 2 {
-		t.Errorf("run2 rows = %d, want 2", r2.RowsAffected)
+	if r2.RowsAffected != 0 {
+		t.Errorf("run2 rows = %d, want 0 (nothing changed)", r2.RowsAffected)
 	}
 
 	// Data should still be intact
@@ -1234,22 +1234,42 @@ SELECT 1 AS id, 200 AS amount
 	}
 }
 
-func TestRun_Partition_RequiresUniqueKey(t *testing.T) {
+func TestRun_Tracked_RequiresGroupKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
 
-	// Partition kind without @unique_key should fail at parse time
-	p.AddModel("staging/no_part.sql", `-- @kind: partition
+	// Tracked kind without @group_key should fail at parse time
+	p.AddModel("staging/no_gk.sql", `-- @kind: tracked
 SELECT 'US' AS region, 100 AS amount
 `)
-	modelPath := filepath.Join(p.Dir, "models", "staging/no_part.sql")
+	modelPath := filepath.Join(p.Dir, "models", "staging/no_gk.sql")
 	_, err := parser.ParseModel(modelPath, p.Dir)
 	if err == nil {
-		t.Fatal("expected parse error for partition without unique_key")
+		t.Fatal("expected parse error for tracked without group_key")
 	}
-	if !strings.Contains(err.Error(), "partition kind requires @unique_key") {
+	if !strings.Contains(err.Error(), "tracked kind requires @group_key") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRun_Partition_Removed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	p.AddModel("staging/old_part.sql", `-- @kind: partition
+-- @unique_key: region
+SELECT 'US' AS region, 100 AS amount
+`)
+	modelPath := filepath.Join(p.Dir, "models", "staging/old_part.sql")
+	_, err := parser.ParseModel(modelPath, p.Dir)
+	if err == nil {
+		t.Fatal("expected parse error for removed partition kind")
+	}
+	if !strings.Contains(err.Error(), "partition was removed") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1314,15 +1334,15 @@ func TestRun_SchemaEvolution_AddColumn_Partition(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First run: 2 columns
-	p.AddModel("staging/part_evo.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_evo.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 'US' AS region, 100 AS amount
 `)
 	runModel(t, p, "staging/part_evo.sql")
 
 	// Second run: add a new column
-	p.AddModel("staging/part_evo.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_evo.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 'US' AS region, 200 AS amount, 'extra' AS note
 `)
 	r2 := runModel(t, p, "staging/part_evo.sql")
@@ -1608,8 +1628,8 @@ func TestRun_Partition_IncrementalUpdate(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First run: create partition table
-	p.AddModel("staging/part_incr.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_incr.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 1 AS id, 'US' AS region, 100 AS amount
 UNION ALL SELECT 2, 'EU', 200
 `)
@@ -1955,8 +1975,8 @@ func TestComputeSingleRunType_PartitionKind(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 
-	p.AddModel("staging/pk.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/pk.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 1 AS id, 'eu' AS region
 `)
 	model, err := parser.ParseModel(filepath.Join(p.Dir, "models", "staging/pk.sql"), p.Dir)
@@ -2017,8 +2037,8 @@ func TestRun_Partition_MultiColumnUniqueKey(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
-	p.AddModel("staging/pmc.sql", `-- @kind: partition
--- @unique_key: region, year
+	p.AddModel("staging/pmc.sql", `-- @kind: tracked
+-- @group_key: region, year
 SELECT 1 AS id, 'eu' AS region, 2024 AS year
 UNION ALL SELECT 2, 'us', 2024
 UNION ALL SELECT 3, 'eu', 2025
@@ -2030,8 +2050,8 @@ UNION ALL SELECT 3, 'eu', 2025
 	}
 
 	// Incremental: add new partition combination
-	p.AddModel("staging/pmc.sql", `-- @kind: partition
--- @unique_key: region, year
+	p.AddModel("staging/pmc.sql", `-- @kind: tracked
+-- @group_key: region, year
 SELECT 1 AS id, 'eu' AS region, 2024 AS year
 UNION ALL SELECT 2, 'us', 2024
 UNION ALL SELECT 3, 'eu', 2025
@@ -2252,15 +2272,15 @@ func TestRun_Partition_SchemaEvolution(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First run
-	p.AddModel("staging/part_evo.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_evo.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 1 AS id, 'US' AS region, 100 AS amount
 `)
 	runModel(t, p, "staging/part_evo.sql")
 
 	// Second run: add new column
-	p.AddModel("staging/part_evo.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_evo.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 2 AS id, 'EU' AS region, 200 AS amount, 'active' AS status
 `)
 	r2 := runModel(t, p, "staging/part_evo.sql")
@@ -2268,13 +2288,13 @@ SELECT 2 AS id, 'EU' AS region, 200 AS amount, 'active' AS status
 		t.Errorf("rows = %d, want 1", r2.RowsAffected)
 	}
 
-	// Verify 4 columns
+	// Verify 5 columns (id, region, amount, status + _content_hash from tracked)
 	val, err := p.Sess.QueryValue("SELECT COUNT(*) FROM (DESCRIBE staging.part_evo)")
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
-	if val != "4" {
-		t.Errorf("columns = %s, want 4", val)
+	if val != "5" {
+		t.Errorf("columns = %s, want 5 (incl _content_hash)", val)
 	}
 }
 
@@ -2656,8 +2676,8 @@ func TestRun_InvalidSQLSyntax_Partition(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
-	p.AddModel("staging/bad_part.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/bad_part.sql", `-- @kind: tracked
+-- @group_key: region
 INVALID SQL GOES HERE
 `)
 	_, err := runModelErr(t, p, "staging/bad_part.sql")
@@ -2789,8 +2809,8 @@ func TestRun_Partition_NullPartitionKey_Rejected(t *testing.T) {
 	// silently across runs. Post-fix: NULL @unique_key rejected upfront.
 	p := testutil.NewProject(t)
 
-	p.AddModel("staging/null_part.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/null_part.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 1::INTEGER AS id, NULL::VARCHAR AS region, 100 AS amount
 UNION ALL SELECT 2, 'US', 200
 `)
@@ -2810,8 +2830,8 @@ func TestRun_Partition_OnlyNullPartition_Rejected(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 
-	p.AddModel("staging/all_null_part.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/all_null_part.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 1::INTEGER AS id, NULL::VARCHAR AS region
 `)
 
@@ -3542,8 +3562,8 @@ UNION ALL SELECT 'B', 3, 300
 	runModel(t, p, "raw/part_src.sql")
 
 	// Partition model
-	p.AddModel("staging/part_tgt.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_tgt.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT region, id, amount FROM raw.part_src
 `)
 
@@ -4075,8 +4095,8 @@ SELECT 1 AS id`, "backfill"},
 		{"scd2_first", `-- @kind: scd2
 -- @unique_key: id
 SELECT 1 AS id`, "backfill"},
-		{"partition_first", `-- @kind: partition
--- @unique_key: id
+		{"partition_first", `-- @kind: tracked
+-- @group_key: id
 SELECT 1 AS id`, "backfill"},
 	}
 
@@ -4557,8 +4577,8 @@ func TestRun_CommentOnTable_Partition(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 	p := testutil.NewProject(t)
-	p.AddModel("staging/part_desc.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_desc.sql", `-- @kind: tracked
+-- @group_key: region
 -- @description: Regional sales partitioned by region
 
 SELECT 'US' AS region, 100 AS amount
@@ -4619,16 +4639,16 @@ func TestRun_CommentOnTable_Partition_Incremental(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First run: create without description
-	p.AddModel("staging/part_inc.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_inc.sql", `-- @kind: tracked
+-- @group_key: region
 
 SELECT 'US' AS region, 100 AS amount
 `)
 	runModel(t, p, "staging/part_inc.sql")
 
 	// Second run: add description (incremental)
-	p.AddModel("staging/part_inc.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/part_inc.sql", `-- @kind: tracked
+-- @group_key: region
 -- @description: Regional sales updated
 
 SELECT 'US' AS region, 200 AS amount
@@ -4707,13 +4727,13 @@ SELECT id, customer, region, amount, status FROM staging.orders_v
 SELECT id, customer, region, amount, status FROM staging.orders_v
 `)
 
-	p.AddModel("mart/orders_partition.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("mart/orders_partition.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT id, customer, region, amount, status FROM staging.orders_v
 `)
 
 	p.AddModel("mart/orders_tracked.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 SELECT id, customer, region, amount, status FROM staging.orders_v
 `)
 
@@ -4851,12 +4871,11 @@ UNION ALL SELECT 5, 'Eve', 'NO', 500, 'active'
 		t.Errorf("RUN 3: merge id=1 amount = %s, want 150", mergeAmount1)
 	}
 
-	// Partition: CDC gives 2 changed rows (regions SE, NO).
-	// DELETE old SE rows (ids 1,3), keep US unchanged (ids 2,4), INSERT new SE+NO rows.
-	// Result: US(2,4) + SE(1) + NO(5) = 4 rows
+	// Tracked (was partition): content-hash change detection.
+	// Source has 3 rows after change → tracked reflects source exactly.
 	partCount3 := mustQuery(t, p, "SELECT COUNT(*) FROM mart.orders_partition")
-	if partCount3 != "4" {
-		t.Errorf("RUN 3: partition count = %s, want 4", partCount3)
+	if partCount3 != "3" {
+		t.Errorf("RUN 3: tracked (partition) count = %s, want 3", partCount3)
 	}
 
 	// Tracked: 3 rows (reflects current source state)
@@ -5050,14 +5069,14 @@ func TestRun_AtomicSchemaEvolution_TrackedKind_AuditRollback(t *testing.T) {
 
 	// Run 1: create tracked table with id, amount
 	p.AddModel("staging/inventory.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 SELECT 1 AS id, 100 AS amount
 `)
 	runModel(t, p, "staging/inventory.sql")
 
 	// Run 2: add column "warehouse" + audit that ALWAYS fails
 	p.AddModel("staging/inventory.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 -- @audit: row_count(=, 0)
 SELECT 1 AS id, 100 AS amount, 'SE' AS warehouse
 `)
@@ -5085,15 +5104,15 @@ func TestRun_AtomicSchemaEvolution_PartitionKind_AuditRollback(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Run 1: create partition table with region, amount
-	p.AddModel("staging/sales.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/sales.sql", `-- @kind: tracked
+-- @group_key: region
 SELECT 'SE' AS region, 100 AS amount
 `)
 	runModel(t, p, "staging/sales.sql")
 
 	// Run 2: add column "channel" + audit that ALWAYS fails
-	p.AddModel("staging/sales.sql", `-- @kind: partition
--- @unique_key: region
+	p.AddModel("staging/sales.sql", `-- @kind: tracked
+-- @group_key: region
 -- @audit: row_count(=, 0)
 SELECT 'SE' AS region, 200 AS amount, 'web' AS channel
 `)
@@ -5168,8 +5187,8 @@ func TestRun_AtomicSchemaEvolution_SuccessCommitsBoth(t *testing.T) {
 	// Run 1: create tables for all kinds
 	p.AddModel("staging/t_table.sql", "-- @kind: table\nSELECT 1 AS id, 100 AS amount\n")
 	p.AddModel("staging/t_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\nSELECT 1 AS id, 100 AS amount\n")
-	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\nSELECT 1 AS id, 100 AS amount\n")
-	p.AddModel("staging/t_partition.sql", "-- @kind: partition\n-- @unique_key: region\nSELECT 'SE' AS region, 100 AS amount\n")
+	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @group_key: id\nSELECT 1 AS id, 100 AS amount\n")
+	p.AddModel("staging/t_partition.sql", "-- @kind: tracked\n-- @group_key: region\nSELECT 'SE' AS region, 100 AS amount\n")
 	runModel(t, p, "staging/t_table.sql")
 	runModel(t, p, "staging/t_scd2.sql")
 	runModel(t, p, "staging/t_tracked.sql")
@@ -5178,8 +5197,8 @@ func TestRun_AtomicSchemaEvolution_SuccessCommitsBoth(t *testing.T) {
 	// Run 2: add column + passing audit (row_count >= 1)
 	p.AddModel("staging/t_table.sql", "-- @kind: table\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
 	p.AddModel("staging/t_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
-	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
-	p.AddModel("staging/t_partition.sql", "-- @kind: partition\n-- @unique_key: region\n-- @audit: row_count(>=, 1)\nSELECT 'SE' AS region, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_tracked.sql", "-- @kind: tracked\n-- @group_key: id\n-- @audit: row_count(>=, 1)\nSELECT 1 AS id, 100 AS amount, 'web' AS channel\n")
+	p.AddModel("staging/t_partition.sql", "-- @kind: tracked\n-- @group_key: region\n-- @audit: row_count(>=, 1)\nSELECT 'SE' AS region, 100 AS amount, 'web' AS channel\n")
 	runModel(t, p, "staging/t_table.sql")
 	runModel(t, p, "staging/t_scd2.sql")
 	runModel(t, p, "staging/t_tracked.sql")

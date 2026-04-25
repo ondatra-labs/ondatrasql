@@ -251,7 +251,7 @@ func TestASTCDC_AllValidKinds(t *testing.T) {
 	}
 	p := testutil.NewProject(t)
 
-	for _, kind := range []string{"append", "merge", "scd2", "partition"} {
+	for _, kind := range []string{"append", "merge", "scd2"} {
 		t.Run(kind, func(t *testing.T) {
 			result := cdcHelper(t, p,
 				"SELECT * FROM staging.orders",

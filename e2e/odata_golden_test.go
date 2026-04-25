@@ -38,9 +38,9 @@ SELECT * FROM (VALUES
 ) AS t(order_id, customer, amount, order_date, created_at, active, big_num, float_val, double_val)
 `)
 
-	// Model 2: customers — composite key (no explicit), NULL vs empty string
+	// Model 2: customers — explicit key, NULL vs empty string
 	p.AddModel("mart/customers.sql", `-- @kind: table
--- @expose
+-- @expose id
 SELECT * FROM (VALUES
     (1, 'Alice', 'Premium', 42),
     (2, 'Bob',   NULL::VARCHAR, NULL::INTEGER),
@@ -60,7 +60,7 @@ SELECT 1 AS secret_id, 'hidden' AS data
 
 	schemas, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
 		{Target: "mart.revenue", KeyColumn: "order_id"},
-		{Target: "mart.customers"},
+		{Target: "mart.customers", KeyColumn: "id"},
 	})
 	if err != nil {
 		t.Fatalf("DiscoverSchemas: %v", err)
@@ -789,9 +789,9 @@ func TestE2E_OData_SingleEntity(t *testing.T) {
 	status := odataGetStatus(t, url+"/odata/mart_revenue(99)")
 	snap.addLine(fmt.Sprintf("entity_99: %d", status))
 
-	// No key on entity
+	// Key on customers entity
 	status = odataGetStatus(t, url+"/odata/mart_customers(1)")
-	snap.addLine(fmt.Sprintf("entity_no_key: %d", status))
+	snap.addLine(fmt.Sprintf("entity_customers_1: %d", status))
 
 	assertGolden(t, "odata_single_entity", snap)
 }

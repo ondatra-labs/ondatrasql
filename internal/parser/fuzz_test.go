@@ -90,11 +90,11 @@ SELECT 1`)
 	f.Add(`-- @extension: spatial FROM core
 SELECT 1`)
 	f.Add(`-- @kind: table
--- @expose
-SELECT 1`)
+-- @expose id
+SELECT 1 AS id`)
 	f.Add(`-- @kind: table
--- @expose
-SELECT 1`)
+-- @expose name
+SELECT 'a' AS name`)
 
 	f.Fuzz(func(t *testing.T, content string) {
 		dir := t.TempDir()

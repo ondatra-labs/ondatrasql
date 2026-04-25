@@ -77,21 +77,45 @@ type APIHTTPConfig struct {
 // apiHTTPConfig is an alias for internal use.
 type apiHTTPConfig = APIHTTPConfig
 
-// injectAPIAuth resolves auth config from API dict and sets headers or query params.
-func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *string, cfg *apiHTTPConfig) error {
-	// Google service account: google_key_file or google_key_file_env
-	keyFile, _ := auth["google_key_file"].(string)
-	if envName, ok := auth["google_key_file_env"].(string); ok && envName != "" {
-		keyFile = os.Getenv(envName)
+// resolveEnvValue extracts a value from an auth config entry.
+// If the entry is a map with an "env" key, the value is read from the environment.
+// If it's a plain string, it's returned as-is.
+func resolveEnvValue(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case map[string]any:
+		if envName, ok := val["env"].(string); ok && envName != "" {
+			return os.Getenv(envName)
+		}
 	}
-	if keyFile != "" {
+	return ""
+}
+
+// injectAPIAuth resolves auth config from API dict and sets headers or query params.
+//
+// Supported auth patterns:
+//
+//	{"env": "API_KEY"}                                          — Bearer token from env
+//	{"env": "API_KEY", "header": "X-Api-Key"}                   — Custom header from env
+//	{"env": "API_KEY", "param": "api_key"}                      — Query parameter from env
+//	{"provider": "fortnox"}                                     — OAuth2 managed token
+//	{"service_account": {"env": "GCP_SA_PATH"}, "scope": "..."} — Google service account
+//	{"user": {"env": "USER"}, "pass": {"env": "PASS"}}          — Basic auth
+func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *string, cfg *apiHTTPConfig) error {
+	// service_account: Google service account key file
+	if sa := auth["service_account"]; sa != nil {
+		keyFile := resolveEnvValue(sa)
+		if keyFile == "" {
+			return fmt.Errorf("auth: service_account resolved to empty value")
+		}
 		keyData, err := os.ReadFile(keyFile)
 		if err != nil {
-			return fmt.Errorf("auth: read google_key_file %q: %w", keyFile, err)
+			return fmt.Errorf("auth: read service_account %q: %w", keyFile, err)
 		}
 		var key ServiceAccountKey
 		if err := json.Unmarshal(keyData, &key); err != nil {
-			return fmt.Errorf("auth: parse google_key_file %q: %w", keyFile, err)
+			return fmt.Errorf("auth: parse service_account %q: %w", keyFile, err)
 		}
 		scope, _ := auth["scope"].(string)
 		tp := &tokenProvider{
@@ -122,6 +146,16 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 		return nil
 	}
 
+	// user + pass: basic auth
+	if auth["user"] != nil && auth["pass"] != nil {
+		user := resolveEnvValue(auth["user"])
+		pass := resolveEnvValue(auth["pass"])
+		if user != "" {
+			headers["Authorization"] = BasicAuth(user, pass)
+		}
+		return nil
+	}
+
 	// env: API key from environment variable
 	if envKey, ok := auth["env"].(string); ok && envKey != "" {
 		token := os.Getenv(envKey)
@@ -145,16 +179,6 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 		}
 	}
 
-	// env_user + env_pass: basic auth
-	if userKey, ok := auth["env_user"].(string); ok && userKey != "" {
-		if passKey, ok := auth["env_pass"].(string); ok && passKey != "" {
-			user := os.Getenv(userKey)
-			pass := os.Getenv(passKey)
-			if user != "" {
-				headers["Authorization"] = BasicAuth(user, pass)
-			}
-		}
-	}
 	return nil
 }
 

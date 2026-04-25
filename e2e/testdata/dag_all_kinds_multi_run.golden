@@ -25,7 +25,7 @@ run_type: backfill
 rows_affected: 4
 run_reason: first run
 target: mart.orders_partition
-kind: partition
+kind: tracked
 run_type: backfill
 rows_affected: 4
 run_reason: first run
@@ -68,7 +68,7 @@ run_type: incremental
 rows_affected: 0
 run_reason: incremental run
 target: mart.orders_partition
-kind: partition
+kind: tracked
 run_type: incremental
 rows_affected: 0
 run_reason: incremental run
@@ -111,9 +111,9 @@ run_type: incremental
 rows_affected: 2
 run_reason: incremental run
 target: mart.orders_partition
-kind: partition
+kind: tracked
 run_type: incremental
-rows_affected: 2
+rows_affected: 3
 run_reason: incremental run
 target: mart.orders_tracked
 kind: tracked
@@ -123,7 +123,7 @@ run_reason: incremental run
 run3_raw: 3
 run3_append: 6
 run3_merge: 5
-run3_partition: 4
+run3_partition: 3
 run3_tracked: 3
 run3_scd2_total: 6
 run3_scd2_current: 3
@@ -183,11 +183,10 @@ rows_affected: 3
 run_reason: incremental run
 warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_partition
-kind: partition
+kind: tracked
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
-warning: upstream schema changed, skipping CDC
 warning: schema evolution: + channel (VARCHAR)
 target: mart.orders_tracked
 kind: tracked
@@ -237,11 +236,10 @@ rows_affected: 0
 run_reason: incremental run
 warning: schema evolution: - channel
 target: mart.orders_partition
-kind: partition
+kind: tracked
 run_type: incremental
 rows_affected: 3
 run_reason: incremental run
-warning: upstream schema changed, skipping CDC
 warning: schema evolution: - channel
 target: mart.orders_tracked
 kind: tracked
@@ -283,7 +281,7 @@ run_type: incremental
 rows_affected: 0
 run_reason: incremental run
 target: mart.orders_partition
-kind: partition
+kind: tracked
 run_type: incremental
 rows_affected: 0
 run_reason: incremental run

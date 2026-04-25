@@ -240,71 +240,288 @@ func buildSelectExprAST(exprNode *duckast.Node) map[string]any {
 	}
 }
 
-// matchColumns extracts all column references from the query (SELECT, WHERE,
-// JOIN ON, GROUP BY, ORDER BY, HAVING) and matches them against the lib
-// function's TABLE.columns. For category-based libs (GAM), splits into
-// dimensions and metrics. For dynamic_columns, passes all through.
-func matchColumns(ast *duckast.AST, lib *libregistry.LibFunc) (dims, mets, cols []string, err error) {
+// matchColumns extracts all column references from the query and validates
+// against supported_columns if declared. API dict blueprints are always dynamic.
+func matchColumns(ast *duckast.AST, lib *libregistry.LibFunc) ([]string, error) {
 	if ast == nil {
-		return nil, nil, nil, nil
+		return nil, nil
 	}
 
-	// Extract column names from entire query (not just SELECT)
 	selectCols := extractAllColumnNames(ast)
 	if len(selectCols) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil
 	}
 
-	// Dynamic columns: pass all through with type info from AST
 	if lib.DynamicColumns {
-		return nil, nil, selectCols, nil
+		// Validate SELECT-list columns against supported_columns whitelist if declared.
+		// Only check SELECT columns, not JOIN/WHERE references from other tables.
+		if len(lib.SupportedColumns) > 0 {
+			allowed := make(map[string]bool, len(lib.SupportedColumns))
+			for _, c := range lib.SupportedColumns {
+				allowed[strings.ToUpper(c)] = true
+			}
+			typedCols := extractTypedSelectColumns(ast)
+			for _, col := range typedCols {
+				colMap, ok := col.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := colMap["name"].(string)
+				if name != "" && !allowed[strings.ToUpper(name)] {
+					return nil, fmt.Errorf("column %q is not in supported_columns for %s()", name, lib.Name)
+				}
+			}
+		}
+		return selectCols, nil
 	}
 
-	// Build lookup from TABLE.columns
+	// Match against declared columns
 	colMap := make(map[string]*libregistry.Column, len(lib.Columns))
 	for i := range lib.Columns {
 		colMap[strings.ToUpper(lib.Columns[i].Name)] = &lib.Columns[i]
 	}
 
+	var cols []string
 	for _, name := range selectCols {
 		upper := strings.ToUpper(name)
 		col, ok := colMap[upper]
 		if !ok {
-			// Column not in TABLE.columns — could be from a JOINed table, skip
 			continue
 		}
 		cols = append(cols, col.Name)
-		switch col.Category {
-		case "dimension":
-			dims = append(dims, col.Name)
-		case "metric":
-			mets = append(mets, col.Name)
-		}
 	}
 
-	return dims, mets, cols, nil
+	return cols, nil
 }
 
-// duckDBToJSONSchemaType maps DuckDB type names to JSON Schema types.
-// Used to pass schema-ready type info to fetch() so blueprints don't
-// need their own type mapping.
-var duckDBToJSONSchemaType = map[string]string{
-	"DECIMAL":  "number",
-	"DOUBLE":   "number",
-	"FLOAT":    "number",
-	"REAL":     "number",
-	"INTEGER":  "integer",
-	"BIGINT":   "integer",
-	"SMALLINT": "integer",
-	"TINYINT":  "integer",
-	"HUGEINT":  "integer",
-	"BOOLEAN":  "boolean",
-	"JSON":     "array",
+// normalizeType maps a DuckDB type name to a normalized type representation.
+// Returns a map with "type" and optional extra fields (precision, scale, tz, etc.).
+func normalizeType(duckdbType string) map[string]any {
+	upper := strings.ToUpper(strings.TrimSpace(duckdbType))
+
+	// DECIMAL(p,s) / NUMERIC(p,s)
+	if strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC") {
+		result := map[string]any{"type": "decimal", "json_schema_type": "number"}
+		if idx := strings.Index(upper, "("); idx >= 0 {
+			endIdx := strings.Index(upper, ")")
+			if endIdx < 0 {
+				endIdx = len(upper)
+			}
+			inner := upper[idx+1 : endIdx]
+			parts := strings.Split(inner, ",")
+			if len(parts) >= 1 {
+				result["precision"] = strings.TrimSpace(parts[0])
+			}
+			if len(parts) >= 2 {
+				result["scale"] = strings.TrimSpace(parts[1])
+			}
+		} else {
+			result["precision"] = "18"
+			result["scale"] = "3"
+		}
+		return result
+	}
+
+	// Timestamp variants
+	switch upper {
+	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
+		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": true, "precision": "us"}
+	case "TIMESTAMP_NS":
+		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "ns"}
+	case "TIMESTAMP_MS":
+		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "ms"}
+	case "TIMESTAMP_S":
+		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "s"}
+	case "TIMESTAMP", "DATETIME", "TIMESTAMP_US":
+		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "us"}
+	}
+
+	// Simple type mapping
+	simpleMap := map[string]string{
+		// Integers
+		"TINYINT": "integer", "INT1": "integer",
+		"SMALLINT": "integer", "INT2": "integer", "INT16": "integer", "SHORT": "integer",
+		"INTEGER": "integer", "INT": "integer", "INT4": "integer", "INT32": "integer", "SIGNED": "integer",
+		"BIGINT": "integer", "INT8": "integer", "INT64": "integer", "LONG": "integer",
+		"HUGEINT": "integer", "INT128": "integer",
+		"UTINYINT":  "integer", "UINT8": "integer",
+		"USMALLINT": "integer", "UINT16": "integer",
+		"UINTEGER":  "integer", "UINT32": "integer",
+		"UBIGINT":   "integer", "UINT64": "integer",
+		"UHUGEINT":  "integer", "UINT128": "integer",
+		// Floats
+		"FLOAT": "float", "FLOAT4": "float", "REAL": "float",
+		"DOUBLE": "float", "FLOAT8": "float",
+		// Boolean
+		"BOOLEAN": "boolean", "BOOL": "boolean", "LOGICAL": "boolean",
+		// Temporal
+		"DATE":                "date",
+		"TIME":                "time",
+		"TIMETZ":              "time",
+		"TIME WITH TIME ZONE": "time",
+		"TIME_NS":             "time",
+		"INTERVAL":            "interval",
+		// Text
+		"VARCHAR": "string", "CHAR": "string", "BPCHAR": "string",
+		"TEXT": "string", "STRING": "string", "NVARCHAR": "string",
+		// Structured
+		"JSON": "json",
+		"UUID": "uuid",
+		"BLOB": "blob", "BYTEA": "blob", "BINARY": "blob", "VARBINARY": "blob",
+		"BIT": "bit", "BITSTRING": "bit",
+		// Composite (simple fallback — recursive extraction via normalizeTypeFromAST)
+		"LIST": "list", "ARRAY": "list",
+		"MAP":     "map",
+		"STRUCT":  "struct", "ROW": "struct",
+		"UNION":   "union",
+		"VARIANT": "variant",
+		// Bignum / decimal aliases
+		"BIGNUM": "decimal", "DEC": "decimal",
+		// Integer aliases
+		"INTEGRAL": "integer", "OID": "integer",
+		// Enum
+		"ENUM": "string",
+	}
+
+	if mapped, ok := simpleMap[upper]; ok {
+		return map[string]any{"type": mapped, "json_schema_type": toJSONSchemaType(mapped)}
+	}
+
+	// Unrecognized — default to string
+	return map[string]any{"type": "string", "json_schema_type": "string"}
 }
 
-// extractTypedSelectColumns extracts column names and JSON Schema types from the SELECT list.
-// Returns []map[string]any where each entry has "name" and "type" keys.
-// Types are JSON Schema types (string, number, integer, boolean), not DuckDB types.
+// toJSONSchemaType maps a normalized type to its JSON Schema equivalent.
+// JSON Schema has: string, number, integer, boolean, array, object, null.
+func toJSONSchemaType(normalized string) string {
+	switch normalized {
+	case "integer":
+		return "integer"
+	case "float", "decimal":
+		return "number"
+	case "boolean":
+		return "boolean"
+	case "json", "list":
+		return "array"
+	case "map", "struct":
+		return "object"
+	default:
+		return "string"
+	}
+}
+
+// normalizeTypeFromAST extracts a normalized type from a DuckDB cast_type AST node.
+// Handles composite types recursively: LIST element, STRUCT fields, MAP key/value.
+func normalizeTypeFromAST(castType *duckast.Node) map[string]any {
+	if castType == nil {
+		return map[string]any{"type": "string", "json_schema_type": "string"}
+	}
+
+	id := castType.String("id")
+	typeInfo := castType.Field("type_info")
+
+	switch id {
+	case "LIST", "ARRAY":
+		result := map[string]any{"type": "list", "json_schema_type": "array"}
+		if typeInfo != nil {
+			childType := typeInfo.Field("child_type")
+			if childType != nil {
+				result["element"] = normalizeTypeFromAST(childType)
+			}
+		}
+		return result
+
+	case "STRUCT":
+		result := map[string]any{"type": "struct", "json_schema_type": "object"}
+		if typeInfo != nil {
+			childTypes := typeInfo.FieldList("child_types")
+			var fields []any
+			for _, ct := range childTypes {
+				fieldName := ct.String("first")
+				fieldType := ct.Field("second")
+				field := normalizeTypeFromAST(fieldType)
+				field["name"] = fieldName
+				fields = append(fields, field)
+			}
+			if len(fields) > 0 {
+				result["fields"] = fields
+			}
+		}
+		return result
+
+	case "MAP":
+		// DuckDB internally represents MAP as LIST(STRUCT(key, value))
+		result := map[string]any{"type": "map", "json_schema_type": "object"}
+		if typeInfo != nil {
+			childType := typeInfo.Field("child_type")
+			if childType != nil {
+				structInfo := childType.Field("type_info")
+				if structInfo != nil {
+					childTypes := structInfo.FieldList("child_types")
+					for _, ct := range childTypes {
+						name := ct.String("first")
+						typeNode := ct.Field("second")
+						if name == "key" {
+							result["key"] = normalizeTypeFromAST(typeNode)
+						} else if name == "value" {
+							result["value"] = normalizeTypeFromAST(typeNode)
+						}
+					}
+				}
+			}
+		}
+		return result
+
+	case "UNION":
+		result := map[string]any{"type": "union", "json_schema_type": "string"}
+		if typeInfo != nil {
+			childTypes := typeInfo.FieldList("child_types")
+			var members []any
+			for _, ct := range childTypes {
+				memberName := ct.String("first")
+				memberType := ct.Field("second")
+				member := normalizeTypeFromAST(memberType)
+				member["name"] = memberName
+				members = append(members, member)
+			}
+			if len(members) > 0 {
+				result["members"] = members
+			}
+		}
+		return result
+
+	case "DECIMAL", "NUMERIC":
+		result := map[string]any{"type": "decimal", "json_schema_type": "number"}
+		if typeInfo != nil {
+			if w := typeInfo.String("width"); w != "" {
+				result["precision"] = w
+			}
+			if s := typeInfo.String("scale"); s != "" {
+				result["scale"] = s
+			}
+		}
+		if result["precision"] == nil {
+			result["precision"] = "18"
+			result["scale"] = "3"
+		}
+		return result
+
+	case "UNBOUND":
+		// User-defined types (JSON, etc.)
+		if typeInfo != nil {
+			if name := typeInfo.String("name"); name != "" {
+				return normalizeType(name)
+			}
+		}
+		return map[string]any{"type": "string", "json_schema_type": "string"}
+
+	default:
+		return normalizeType(id)
+	}
+}
+
+// extractTypedSelectColumns extracts column names and normalized types from the SELECT list.
+// Returns []map[string]any where each entry has "name", "type", and optional extra fields.
 func extractTypedSelectColumns(ast *duckast.AST) []any {
 	if ast == nil {
 		return nil
@@ -322,22 +539,14 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 
 	var result []any
 	for _, item := range selectList {
-		var name, colType string
+		var name string
+
+		var normalized map[string]any
 
 		if item.Class() == "CAST" {
-			// SELECT col::TYPE AS alias
+			// SELECT col::TYPE AS alias — extract type recursively from AST
 			castType := item.Field("cast_type")
-			if castType != nil {
-				colType = castType.String("id")
-				// User-defined types (JSON, etc.) have id=UNBOUND with name in type_info
-				if colType == "UNBOUND" {
-					if typeInfo := castType.Field("type_info"); typeInfo != nil {
-						if name := typeInfo.String("name"); name != "" {
-							colType = name
-						}
-					}
-				}
-			}
+			normalized = normalizeTypeFromAST(castType)
 			child := item.Field("child")
 			if child != nil && child.Class() == "COLUMN_REF" {
 				names := child.ColumnNames()
@@ -345,7 +554,6 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 					name = names[len(names)-1]
 				}
 			}
-			// Use alias if present (SELECT total::DECIMAL AS amount)
 			if alias := item.Alias(); alias != "" {
 				name = alias
 			}
@@ -354,22 +562,17 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 			if len(names) > 0 {
 				name = names[len(names)-1]
 			}
-			colType = "VARCHAR"
+			normalized = map[string]any{"type": "string"}
 		} else {
-			// Expression (CASE, function, etc.) — use alias
 			if alias := item.Alias(); alias != "" {
 				name = alias
 			}
-			colType = "VARCHAR"
+			normalized = map[string]any{"type": "string"}
 		}
 
 		if name != "" {
-			// Map DuckDB type to JSON Schema type
-			jsonType := "string"
-			if mapped, ok := duckDBToJSONSchemaType[colType]; ok {
-				jsonType = mapped
-			}
-			result = append(result, map[string]any{"name": name, "type": jsonType})
+			normalized["name"] = name
+			result = append(result, normalized)
 		}
 	}
 	return result
@@ -399,66 +602,21 @@ func extractAllColumnNames(ast *duckast.AST) []string {
 	return names
 }
 
-// extractSelectColumnNames pulls column reference names from the SELECT list.
-// Kept for backwards compatibility but matchColumns now uses extractAllColumnNames.
-func extractSelectColumnNames(ast *duckast.AST) []string {
-	stmts := ast.Statements()
-	if len(stmts) == 0 {
-		return nil
-	}
 
-	var names []string
-	for _, expr := range stmts[0].SelectList() {
-		// Direct column reference: SELECT col_name
-		if expr.Class() == "COLUMN_REF" {
-			colNames := expr.ColumnNames()
-			if len(colNames) > 0 {
-				names = append(names, colNames[len(colNames)-1]) // last part is the column name
-			}
-			continue
-		}
-		// Cast expression: SELECT col_name::TYPE — unwrap to find the column ref
-		// DuckDB represents :: casts as class=CAST with a child column ref
-		if expr.Class() == "CAST" || (expr.Class() == "OPERATOR" && expr.FunctionName() == "cast") {
-			child := expr.Field("child")
-			if child.IsNil() {
-				// Try children array (older DuckDB versions)
-				children := expr.Children()
-				if len(children) > 0 {
-					child = children[0]
-				}
-			}
-			if !child.IsNil() && child.Class() == "COLUMN_REF" {
-				colNames := child.ColumnNames()
-				if len(colNames) > 0 {
-					names = append(names, colNames[len(colNames)-1])
-				}
-			}
-		}
-	}
-	return names
-}
 
 // buildLibCallKwargs builds the kwargs map for calling a Starlark lib function.
-func buildLibCallKwargs(lib *libregistry.LibFunc, args []any, dims, mets, cols []string, typedCols []any) map[string]any {
+func buildLibCallKwargs(lib *libregistry.LibFunc, args []any, cols []string, typedCols []any) map[string]any {
 	kwargs := make(map[string]any)
 
-	// Positional args mapped to TABLE.args names
+	// Args mapped to API.fetch.args names — all as kwargs
 	for i, argName := range lib.Args {
 		if i < len(args) {
 			kwargs[argName] = args[i]
 		}
 	}
 
-	// Column selections (convert []string to []interface{} for goToStarlark)
-	if len(dims) > 0 {
-		kwargs["dimensions"] = toInterfaceSlice(dims)
-	}
-	if len(mets) > 0 {
-		kwargs["metrics"] = toInterfaceSlice(mets)
-	}
+	// Column selections
 	if len(cols) > 0 {
-		// For dynamic_columns, pass typed column info if available
 		if lib.DynamicColumns && typedCols != nil {
 			kwargs["columns"] = typedCols
 		} else {

@@ -112,7 +112,7 @@ func TestE2E_CDC_TrackedToAppend(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.source AS SELECT * FROM (VALUES (1,'Alice',100),(2,'Bob',200)) AS t(id,customer,amount)")
 
 	p.AddModel("raw/orders.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 SELECT * FROM raw.source
 `)
 

@@ -92,6 +92,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	scriptHash := backfill.ModelHash(model.SQL, backfill.ModelDirectives{
 		Kind:               model.Kind,
 		UniqueKey:          model.UniqueKey,
+		GroupKey:           model.GroupKey,
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
@@ -190,19 +191,24 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// When a script crashes after save.row() but before materialization, Badger retains
 	// the rows. On the next run, the script produces the same rows again, resulting in
 	// duplicates in the temp table. Dedup keeps only the last row per key column.
-	if model.UniqueKey != "" {
+	// Determine the key column for dedup
+	dedupKey := model.UniqueKey
+	if model.Kind == "tracked" {
+		dedupKey = model.GroupKey
+	}
+	if dedupKey != "" {
 		switch model.Kind {
-		case "merge", "tracked", "scd2", "partition":
-			// Handle composite key (comma-separated, used by partition kind)
+		case "merge", "tracked", "scd2":
+			// Handle composite key (comma-separated)
 			var groupByCols string
-			if strings.Contains(model.UniqueKey, ",") {
+			if strings.Contains(dedupKey, ",") {
 				var parts []string
-				for _, col := range strings.Split(model.UniqueKey, ",") {
+				for _, col := range strings.Split(dedupKey, ",") {
 					parts = append(parts, duckdb.QuoteIdentifier(strings.TrimSpace(col)))
 				}
 				groupByCols = strings.Join(parts, ", ")
 			} else {
-				groupByCols = duckdb.QuoteIdentifier(model.UniqueKey)
+				groupByCols = duckdb.QuoteIdentifier(dedupKey)
 			}
 			dedupSQL := fmt.Sprintf(
 				"DELETE FROM %s WHERE rowid NOT IN (SELECT MAX(rowid) FROM %s GROUP BY %s)",

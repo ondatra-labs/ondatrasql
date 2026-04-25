@@ -1,5 +1,5 @@
 target: staging.partitioned
-kind: partition
+kind: tracked
 run_type: backfill
 rows_affected: 3
 run_reason: first run

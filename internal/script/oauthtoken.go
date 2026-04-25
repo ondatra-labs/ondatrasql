@@ -6,7 +6,6 @@ package script
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -189,72 +188,3 @@ func (tp *tokenProvider) fetchGoogleToken() (map[string]interface{}, error) {
 	return ExchangeJWTForToken(tp.ctx, tp.googleSAKey.TokenURI, jwt)
 }
 
-// newTokenProvider creates a managed token from Starlark kwargs.
-func newTokenProvider(ctx context.Context, projectDir string, kwargs []starlark.Tuple) (*tokenProvider, error) {
-	var providerName string
-	var tokenURL, clientID, clientSecret, scope string
-	var googleServiceAccount, googleKeyFile string
-
-	if err := starlark.UnpackArgs("oauth.token", nil, kwargs,
-		"provider?", &providerName,
-		"token_url?", &tokenURL,
-		"client_id?", &clientID,
-		"client_secret?", &clientSecret,
-		"scope?", &scope,
-		"google_service_account?", &googleServiceAccount,
-		"google_key_file?", &googleKeyFile,
-	); err != nil {
-		return nil, err
-	}
-
-	// Provider flow (via oauth2.ondatra.sh)
-	if providerName != "" {
-		if err := oauth2host.ValidateProvider(providerName); err != nil {
-			return nil, fmt.Errorf("oauth.token: %w", err)
-		}
-		if projectDir == "" {
-			return nil, fmt.Errorf("oauth.token: provider flow requires a project directory")
-		}
-		return &tokenProvider{
-			ctx:        ctx,
-			provider:   providerName,
-			projectDir: projectDir,
-		}, nil
-	}
-
-	tp := &tokenProvider{
-		ctx:          ctx,
-		tokenURL:     tokenURL,
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		scope:        scope,
-	}
-
-	// Google service account flow
-	if googleServiceAccount != "" || googleKeyFile != "" {
-		var keyData []byte
-		var err error
-		if googleKeyFile != "" {
-			keyData, err = os.ReadFile(googleKeyFile)
-			if err != nil {
-				return nil, fmt.Errorf("read key file: %w", err)
-			}
-		} else {
-			keyData = []byte(googleServiceAccount)
-		}
-
-		var saKey ServiceAccountKey
-		if err := json.Unmarshal(keyData, &saKey); err != nil {
-			return nil, fmt.Errorf("parse service account key: %w", err)
-		}
-		tp.googleSAKey = &saKey
-		return tp, nil
-	}
-
-	// Client credentials flow requires token_url, client_id, client_secret
-	if tokenURL == "" || clientID == "" || clientSecret == "" {
-		return nil, fmt.Errorf("oauth.token: client_credentials requires token_url, client_id, client_secret")
-	}
-
-	return tp, nil
-}

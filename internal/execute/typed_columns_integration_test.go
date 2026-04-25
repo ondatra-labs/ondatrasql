@@ -32,8 +32,8 @@ func TestExtractTypedSelectColumns_CastTypes(t *testing.T) {
 	}
 
 	col0 := cols[0].(map[string]any)
-	if col0["name"] != "total" || col0["type"] != "number" {
-		t.Errorf("col 0: name=%v type=%v, want total/number", col0["name"], col0["type"])
+	if col0["name"] != "total" || col0["type"] != "decimal" {
+		t.Errorf("col 0: name=%v type=%v, want total/decimal", col0["name"], col0["type"])
 	}
 
 	col1 := cols[1].(map[string]any)
@@ -64,8 +64,8 @@ func TestExtractTypedSelectColumns_AliasOverrides(t *testing.T) {
 	if col["name"] != "unit_price" {
 		t.Errorf("name = %v, want unit_price (alias should override)", col["name"])
 	}
-	if col["type"] != "number" {
-		t.Errorf("type = %v, want number", col["type"])
+	if col["type"] != "float" {
+		t.Errorf("type = %v, want float", col["type"])
 	}
 }
 

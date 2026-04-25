@@ -65,7 +65,10 @@ func TestInjectAPIAuth_BasicAuth(t *testing.T) {
 	t.Setenv("TEST_PASS_BA", "s3cret")
 	headers := make(map[string]string)
 	urlStr := "https://api.example.com/data"
-	auth := map[string]any{"env_user": "TEST_USER_BA", "env_pass": "TEST_PASS_BA"}
+	auth := map[string]any{
+		"user": map[string]any{"env": "TEST_USER_BA"},
+		"pass": map[string]any{"env": "TEST_PASS_BA"},
+	}
 
 	_ = injectAPIAuth(auth, headers, &urlStr, &apiHTTPConfig{})
 
@@ -101,6 +104,41 @@ func TestInjectAPIAuth_EmptyAuth(t *testing.T) {
 	}
 }
 
+func TestResolveEnvValue(t *testing.T) {
+	t.Setenv("RESOLVE_TEST_VAR", "resolved_value")
+
+	// Plain string passthrough
+	if v := resolveEnvValue("literal"); v != "literal" {
+		t.Errorf("plain string: got %q, want %q", v, "literal")
+	}
+	// Nested env lookup
+	if v := resolveEnvValue(map[string]any{"env": "RESOLVE_TEST_VAR"}); v != "resolved_value" {
+		t.Errorf("env lookup: got %q, want %q", v, "resolved_value")
+	}
+	// Missing env
+	if v := resolveEnvValue(map[string]any{"env": "NONEXISTENT_VAR_XYZ"}); v != "" {
+		t.Errorf("missing env: got %q, want empty", v)
+	}
+	// Wrong type
+	if v := resolveEnvValue(42); v != "" {
+		t.Errorf("int: got %q, want empty", v)
+	}
+}
+
+func TestInjectAPIAuth_ServiceAccount_EmptyResolve(t *testing.T) {
+	t.Parallel()
+	headers := make(map[string]string)
+	urlStr := "https://api.example.com"
+	auth := map[string]any{
+		"service_account": map[string]any{"env": "NONEXISTENT_SA_PATH"},
+	}
+
+	err := injectAPIAuth(auth, headers, &urlStr, &apiHTTPConfig{})
+	if err == nil {
+		t.Fatal("expected error when service_account env resolves to empty")
+	}
+}
+
 // --- RunSink PerRow regression tests ---
 
 func TestRunSink_PerRow_EmptyStringValue(t *testing.T) {
@@ -112,12 +150,12 @@ API = {
     "push": {"batch_size": 100},
 }
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"1.0": ""}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0}}
-	result, err := rt.RunSink(context.Background(), "emptyval_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "emptyval_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -138,12 +176,12 @@ API = {
     "push": {"batch_size": 100},
 }
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"1.0": 42}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0}}
-	result, err := rt.RunSink(context.Background(), "intval_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "intval_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -461,7 +499,7 @@ API = {
     "push": {"batch_size": 100, "batch_mode": "async"},
 }
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "123"}
 
 def poll(job_ref):

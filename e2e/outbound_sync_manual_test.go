@@ -39,7 +39,7 @@ func TestOutboundSync_TableChanges_Delta(t *testing.T) {
 
 	// Tracked model -- simulates a sync target
 	p.AddModel("sync/contacts.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.customers
 `)
@@ -126,7 +126,7 @@ func TestOutboundSync_TableChanges_DetectDeletesFilter(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.users AS SELECT * FROM (VALUES (1,'Alice'),(2,'Bob'),(3,'Carol')) AS t(id,name)")
 
 	p.AddModel("sync/users.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.users
 `)
@@ -346,7 +346,7 @@ func TestOutboundSync_EndToEnd_MockAPI(t *testing.T) {
 
 	// Create tracked model
 	p.AddModel("sync/contacts.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.contacts
 `)
@@ -448,7 +448,7 @@ func TestOutboundSync_TableChanges_Deduplication(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.contacts AS SELECT * FROM (VALUES (1,'Alice','alice@co.com'),(2,'Bob','bob@co.com'),(3,'Carol','carol@co.com')) AS t(id,name,email)")
 
 	p.AddModel("sync/contacts.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.contacts
 `)
@@ -1520,7 +1520,7 @@ def push(rows):
 	p.Sess.Exec("CREATE TABLE raw.del_src AS SELECT * FROM (VALUES (1,'Alice'),(2,'Bob'),(3,'Carol')) AS t(id,name)")
 
 	p.AddModel("sync/del.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 -- @sink: del_push
 
 SELECT * FROM raw.del_src
@@ -1583,7 +1583,7 @@ def push(rows):
 		SELECT * FROM (VALUES (1,'a'),(2,'b'),(3,'c')) AS t(id,val)`)
 
 	p.AddModel("sync/autodel.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 -- @sink: autodel_push
 
 SELECT * FROM raw.autodel_src
@@ -1694,7 +1694,7 @@ def push(rows):
 	) AS t(item_id, order_id, price)`)
 
 	p.AddModel("sync/order_items.sql", `-- @kind: tracked
--- @unique_key: order_id
+-- @group_key: order_id
 -- @sink: grp_push
 
 SELECT * FROM raw.order_items
@@ -1771,7 +1771,7 @@ def push(rows):
 	) AS t(item_id, order_id, price)`)
 
 	p.AddModel("sync/grp_items.sql", `-- @kind: tracked
--- @unique_key: order_id
+-- @group_key: order_id
 -- @sink: grpdel_push
 
 SELECT * FROM raw.grp_items

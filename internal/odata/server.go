@@ -439,7 +439,7 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, sess *duckdb.Ses
 		return
 	}
 	if entity.KeyColumn == "" {
-		writeError(w, 400, "BadRequest", fmt.Sprintf("Entity '%s' has no key column; use @expose with a key column or query the collection with $filter", entityName))
+		writeError(w, 400, "BadRequest", fmt.Sprintf("Entity '%s' has no key column; @expose requires a key column", entityName))
 		return
 	}
 

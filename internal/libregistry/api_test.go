@@ -5,6 +5,7 @@
 package libregistry
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -15,10 +16,6 @@ API = {
     "base_url": "https://api.example.com",
     "fetch": {
         "args": ["resource"],
-        "columns": {
-            "id": {"type": "BIGINT"},
-            "name": {"type": "VARCHAR"},
-        },
     },
 }
 
@@ -40,9 +37,6 @@ def fetch(save, resource):
 	}
 	if len(lf.Args) != 1 || lf.Args[0] != "resource" {
 		t.Errorf("Args = %v, want [resource]", lf.Args)
-	}
-	if len(lf.Columns) != 2 {
-		t.Errorf("expected 2 columns, got %d", len(lf.Columns))
 	}
 	if lf.SinkConfig != nil {
 		t.Error("expected SinkConfig=nil for fetch-only API")
@@ -103,7 +97,6 @@ API = {
     "base_url": "https://api.hubapi.com",
     "fetch": {
         "args": ["object_type"],
-        "dynamic_columns": True,
     },
     "push": {
         "batch_size": 100,
@@ -348,7 +341,7 @@ API = {
 	}
 }
 
-func TestAPIDict_DynamicColumnsWithColumns(t *testing.T) {
+func TestAPIDict_ColumnsRejected(t *testing.T) {
 	t.Parallel()
 	code := `
 API = {
@@ -356,16 +349,18 @@ API = {
     "fetch": {
         "args": [],
         "columns": {"id": {"type": "BIGINT"}},
-        "dynamic_columns": True,
     },
 }
 
-def fetch(save):
+def fetch(page):
     pass
 `
 	_, err := parseLibFile("bad_cols", "lib/bad_cols.star", code)
 	if err == nil {
-		t.Fatal("expected error for dynamic_columns + columns")
+		t.Fatal("expected error for columns in API dict")
+	}
+	if !strings.Contains(err.Error(), "columns was removed") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -401,5 +396,83 @@ def push(rows):
 	_, err := parseLibFile("bad_mode", "lib/bad_mode.star", code)
 	if err == nil {
 		t.Fatal("expected error for invalid batch_mode")
+	}
+}
+
+func TestAPIDict_NestedAuth(t *testing.T) {
+	t.Parallel()
+	code := `
+API = {
+    "base_url": "https://api.example.com",
+    "auth": {
+        "service_account": {"env": "GCP_SA_PATH"},
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+    },
+    "fetch": {
+        "args": [],
+    },
+}
+
+def fetch(page):
+    pass
+`
+	lf, err := parseLibFile("nested_auth", "lib/nested_auth.star", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := lf.APIConfig
+	if cfg == nil || cfg.Auth == nil {
+		t.Fatal("expected Auth config")
+	}
+	sa, ok := cfg.Auth["service_account"].(map[string]any)
+	if !ok {
+		t.Fatalf("service_account not a nested dict, got %T", cfg.Auth["service_account"])
+	}
+	if sa["env"] != "GCP_SA_PATH" {
+		t.Errorf("service_account.env = %v, want GCP_SA_PATH", sa["env"])
+	}
+	if cfg.Auth["scope"] != "https://www.googleapis.com/auth/cloud-platform" {
+		t.Errorf("scope = %v", cfg.Auth["scope"])
+	}
+}
+
+func TestAPIDict_BasicAuth(t *testing.T) {
+	t.Parallel()
+	code := `
+API = {
+    "base_url": "https://api.example.com",
+    "auth": {
+        "user": {"env": "API_USER"},
+        "pass": {"env": "API_PASS"},
+    },
+    "fetch": {
+        "args": [],
+    },
+}
+
+def fetch(page):
+    pass
+`
+	lf, err := parseLibFile("basic_auth", "lib/basic_auth.star", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := lf.APIConfig
+	if cfg == nil || cfg.Auth == nil {
+		t.Fatal("expected Auth config")
+	}
+	user, ok := cfg.Auth["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("user not a nested dict, got %T", cfg.Auth["user"])
+	}
+	if user["env"] != "API_USER" {
+		t.Errorf("user.env = %v, want API_USER", user["env"])
+	}
+	pass, ok := cfg.Auth["pass"].(map[string]any)
+	if !ok {
+		t.Fatalf("pass not a nested dict, got %T", cfg.Auth["pass"])
+	}
+	if pass["env"] != "API_PASS" {
+		t.Errorf("pass.env = %v, want API_PASS", pass["env"])
 	}
 }

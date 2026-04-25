@@ -13,13 +13,12 @@ import (
 // Usage in Starlark:
 //
 //	resp = http.get(url, params={"limit": page.size, "after": page.cursor})
-func pageModule(cursor starlark.Value, size int, number int) *starlarkstruct.Struct {
+func pageModule(cursor starlark.Value, size int) *starlarkstruct.Struct {
 	if cursor == nil {
 		cursor = starlark.None
 	}
 	return starlarkstruct.FromStringDict(starlark.String("page"), starlark.StringDict{
 		"cursor": cursor,
 		"size":   starlark.MakeInt(size),
-		"number": starlark.MakeInt(number),
 	})
 }

@@ -84,7 +84,6 @@ API = {
     "auth": {"env": "KEY", "verify": False, "retries": 0, "prefix": ""},
     "fetch": {
         "args": [],
-        "dynamic_columns": True,
     },
 }
 
@@ -138,7 +137,6 @@ API = {
     "base_url": "https://api.example.com",
     "fetch": {
         "args": ["key"],
-        "dynamic_columns": True,
     },
 }
 
@@ -164,7 +162,6 @@ API = {
     "auth": {"env": "API_KEY", "header": "X-Auth"},
     "fetch": {
         "args": ["query"],
-        "dynamic_columns": True,
     },
 }
 

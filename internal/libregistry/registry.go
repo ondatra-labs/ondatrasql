@@ -15,13 +15,14 @@ import (
 
 // Column describes a column that a lib function can produce.
 type Column struct {
-	Name     string // column name (e.g. "AD_UNIT_NAME")
-	Type     string // DuckDB type (e.g. "VARCHAR", "BIGINT")
-	Category string // optional: "dimension" or "metric"
+	Name string // column name (e.g. "AD_UNIT_NAME")
+	Type string // DuckDB type (e.g. "VARCHAR", "BIGINT")
 }
 
 // SinkConfig holds SINK-specific configuration extracted from the SINK dict.
 type SinkConfig struct {
+	Args            []string          // parameter names mapped from @sink: name('arg1', 'arg2')
+	SupportedKinds  []string          // optional whitelist of valid model kinds (validated at startup)
 	BatchSize    int               // rows per push call (default 1)
 	BatchMode    string            // "sync", "atomic", "async" (default "sync")
 	RateLimit    *RateLimitConfig  // proactive rate limiting (nil = unlimited)
@@ -39,13 +40,16 @@ type RateLimitConfig struct {
 // APIConfig holds shared configuration from the API dict.
 // Injected into the http module at runtime (base_url, auth, headers, etc.).
 type APIConfig struct {
-	BaseURL   string            // prepended to relative URLs
-	Auth      map[string]any    // auth config (provider, env, cert, etc.)
-	Headers   map[string]string // default headers for all requests
-	Timeout   int               // default request timeout (seconds)
-	Retry     int               // default retry count
-	Backoff   int               // default backoff multiplier
-	RateLimit *RateLimitConfig  // default rate limit
+	BaseURL           string            // prepended to relative URLs
+	Auth              map[string]any    // auth config (provider, env, cert, etc.)
+	Headers           map[string]string // default headers for all requests
+	Timeout           int               // default request timeout (seconds)
+	Retry             int               // default retry count
+	Backoff           int               // default backoff multiplier
+	RateLimit         *RateLimitConfig  // default rate limit
+	FetchPollInterval string            // async fetch: min wait between check() calls (e.g. "5s")
+	FetchPollTimeout  string            // async fetch: max total poll duration (e.g. "5m")
+	FetchPollBackoff  int               // async fetch: backoff multiplier for poll interval
 }
 
 // LibFunc describes a Starlark lib function registered as a SQL source or sink.
@@ -59,8 +63,10 @@ type LibFunc struct {
 	FuncName       string      // Starlark function name ("fetch" or "push")
 	SinkConfig     *SinkConfig // SINK-specific config (nil for TABLE libs)
 	APIConfig      *APIConfig  // shared API config (nil for legacy TABLE/SINK)
-	PageSize       int         // fetch pagination: rows per page (0 = single call)
-	FetchMode      string      // "sync" (default) or "async"
+	PageSize         int         // fetch pagination: rows per page (0 = single call)
+	FetchMode        string      // "sync" (default) or "async"
+	SupportedColumns []string    // optional whitelist of valid column names (validated at startup)
+	SupportedKinds   []string    // optional whitelist of valid model kinds (validated at startup)
 }
 
 // Registry holds all discovered lib functions.
@@ -341,14 +347,14 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 			switch key {
 			case "args":
 				lf.Args = extractStringList(kv.Value)
+			case "supported_columns":
+				lf.SupportedColumns = extractStringList(kv.Value)
+			case "supported_kinds":
+				lf.SupportedKinds = extractStringList(kv.Value)
 			case "columns":
-				cols, err := extractColumns(kv.Value)
-				if err != nil {
-					return nil, fmt.Errorf("API.fetch.columns: %w", err)
-				}
-				lf.Columns = cols
+				return nil, fmt.Errorf("API.fetch.columns was removed — SQL controls the schema. Use supported_columns for validation")
 			case "dynamic_columns":
-				lf.DynamicColumns = literalBool(kv.Value)
+				return nil, fmt.Errorf("API.fetch.dynamic_columns was removed — API dict blueprints are always dynamic. Remove the field")
 			case "page_size":
 				if v := literalInt(kv.Value); v > 0 {
 					lf.PageSize = v
@@ -357,10 +363,22 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 				if v := literalString(kv.Value); v != "" {
 					lf.FetchMode = v
 				}
+			case "async":
+				if literalBool(kv.Value) {
+					lf.FetchMode = "async"
+				}
 			case "poll_interval":
-				// stored for runtime
+				if v := literalString(kv.Value); v != "" {
+					lfAPI.FetchPollInterval = v
+				}
 			case "poll_timeout":
-				// stored for runtime
+				if v := literalString(kv.Value); v != "" {
+					lfAPI.FetchPollTimeout = v
+				}
+			case "poll_backoff":
+				if v := literalInt(kv.Value); v > 0 {
+					lfAPI.FetchPollBackoff = v
+				}
 			// Inheritable overrides
 			case "headers":
 				lfAPI.Headers = extractStringDict(kv.Value)
@@ -385,14 +403,41 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 			}
 		}
 
-		// Validate: dynamic_columns + columns together is an error
-		if lf.DynamicColumns && len(lf.Columns) > 0 {
-			return nil, fmt.Errorf("API.fetch: dynamic_columns and columns are mutually exclusive")
-		}
+		// API dict blueprints are always dynamic — SQL controls the schema
+		lf.DynamicColumns = true
 
-		// Validate fetch() function exists
-		if err := validateFunc(lf, false, f); err != nil {
-			return nil, err
+		// Validate function(s) exist
+		if lf.FetchMode == "async" {
+			// Async requires submit/check/fetch_result — not fetch
+			for _, fn := range []string{"submit", "check", "fetch_result"} {
+				if !hasFuncDef(f, fn) {
+					return nil, fmt.Errorf("async fetch requires %s() function", fn)
+				}
+			}
+			if hasFuncDef(f, "fetch") {
+				return nil, fmt.Errorf("async fetch uses submit/check/fetch_result, not fetch")
+			}
+			// Validate submit() accepts all declared args
+			for _, arg := range lf.Args {
+				if err := validateAsyncParam(f, "submit", arg); err != nil {
+					return nil, err
+				}
+			}
+			// Validate check() accepts job_ref
+			if err := validateAsyncParam(f, "check", "job_ref"); err != nil {
+				return nil, err
+			}
+			// Validate fetch_result() accepts result_ref and page
+			if err := validateAsyncParam(f, "fetch_result", "result_ref"); err != nil {
+				return nil, err
+			}
+			if err := validateAsyncParam(f, "fetch_result", "page"); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := validateFunc(lf, false, f); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -418,6 +463,10 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 			}
 			key := literalString(kv.Key)
 			switch key {
+			case "args":
+				sinkCfg.Args = extractStringList(kv.Value)
+			case "supported_kinds":
+				sinkCfg.SupportedKinds = extractStringList(kv.Value)
 			case "batch_size":
 				if v := literalInt(kv.Value); v > 0 {
 					sinkCfg.BatchSize = v
@@ -485,8 +534,38 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 					}
 				}
 			}
-			if len(paramNames) != 1 {
-				return nil, fmt.Errorf("push() must take exactly one parameter (rows), got %d", len(paramNames))
+			validPushParams := map[string]bool{"rows": true, "batch_number": true, "kind": true, "key_columns": true, "columns": true}
+			for _, arg := range sinkCfg.Args {
+				validPushParams[arg] = true
+			}
+			for _, p := range paramNames {
+				if !validPushParams[p] {
+					return nil, fmt.Errorf("push() has unknown parameter %q", p)
+				}
+			}
+			if len(paramNames) == 0 {
+				return nil, fmt.Errorf("push() must declare at least 'rows' parameter")
+			}
+			// Verify push() declares all sink args
+			hasKwargs := false
+			for _, p := range def.Params {
+				if _, ok := p.(*syntax.UnaryExpr); ok {
+					hasKwargs = true
+				}
+			}
+			if !hasKwargs {
+				for _, arg := range sinkCfg.Args {
+					found := false
+					for _, p := range paramNames {
+						if p == arg {
+							found = true
+							break
+						}
+					}
+					if !found {
+						return nil, fmt.Errorf("push() must declare parameter %q (declared in push.args)", arg)
+					}
+				}
 			}
 			break
 		}
@@ -504,6 +583,43 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 	return lf, nil
 }
 
+// validateAsyncParam checks that an async function has a required parameter.
+func validateAsyncParam(f *syntax.File, funcName, paramName string) error {
+	for _, stmt := range f.Stmts {
+		def, ok := stmt.(*syntax.DefStmt)
+		if !ok || def.Name.Name != funcName {
+			continue
+		}
+		for _, p := range def.Params {
+			switch v := p.(type) {
+			case *syntax.Ident:
+				if v.Name == paramName {
+					return nil
+				}
+			case *syntax.BinaryExpr:
+				if ident, ok := v.X.(*syntax.Ident); ok && ident.Name == paramName {
+					return nil
+				}
+			case *syntax.UnaryExpr:
+				return nil // **kwargs accepts anything
+			}
+		}
+		return fmt.Errorf("%s() must accept %q parameter", funcName, paramName)
+	}
+	return fmt.Errorf("no %s() function defined", funcName)
+}
+
+// hasFuncDef checks if a function definition exists in the Starlark file.
+func hasFuncDef(f *syntax.File, name string) bool {
+	for _, stmt := range f.Stmts {
+		def, ok := stmt.(*syntax.DefStmt)
+		if ok && def.Name.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // validateFunc validates that the expected function exists and its params match.
 func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 	expectedFunc := lf.FuncName
@@ -515,7 +631,7 @@ func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 		}
 		funcFound = true
 
-		// Extract param names (skip "save" for fetch, "rows" for push)
+		// Extract param names
 		var paramNames []string
 		for _, p := range def.Params {
 			switch v := p.(type) {
@@ -530,21 +646,17 @@ func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 			}
 		}
 
-		// Validate TABLE.args match function params (TABLE only).
-		// SINK push functions take only (rows) -- auth is via oauth.token()/env.get() inside push.
+		// Validate args match function params (fetch only).
 		if !isSink {
+			// API dict: skip "page" (runtime-injected kwarg).
 			// Legacy TABLE: first param is "save", skip it.
-			// API dict with page_size: first param is first arg, last is "page", skip "page".
-			// API dict without page_size: same as legacy (first param is "save").
 			if lf.PageSize > 0 {
 				// API paginated: skip "page" (last param)
 				if len(paramNames) > 0 && paramNames[len(paramNames)-1] == "page" {
 					paramNames = paramNames[:len(paramNames)-1]
 				}
 			} else if lf.APIConfig != nil {
-				// API non-paginated: first param is "page" with size=0, skip it
-				// Actually: non-paginated API fetch has (page) as first arg too
-				// since all API fetches use the return-value contract.
+				// API non-paginated: page is still injected with size=0
 				if len(paramNames) > 0 && paramNames[len(paramNames)-1] == "page" {
 					paramNames = paramNames[:len(paramNames)-1]
 				}
@@ -570,7 +682,9 @@ func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 			}
 			// Check for undeclared params (excluding runtime-injected ones like save/page)
 			for _, p := range paramNames {
-				if p == "save" || p == "page" || p == "target" || p == "columns" {
+				if p == "save" || p == "page" || p == "target" || p == "columns" ||
+					p == "is_backfill" || p == "last_value" || p == "last_run" ||
+					p == "cursor" || p == "initial_value" {
 					continue
 				}
 				found := false
@@ -586,9 +700,20 @@ func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 				}
 			}
 		} else {
-			// SINK: validate push takes exactly one param (rows)
-			if len(paramNames) != 1 {
-				return fmt.Errorf("push() must take exactly one parameter (rows), got %d", len(paramNames))
+			// SINK: validate push takes rows + optional runtime kwargs + sink args
+			validPushParams := map[string]bool{"rows": true, "batch_number": true, "kind": true, "key_columns": true, "columns": true}
+			if lf.SinkConfig != nil {
+				for _, arg := range lf.SinkConfig.Args {
+					validPushParams[arg] = true
+				}
+			}
+			for _, p := range paramNames {
+				if !validPushParams[p] {
+					return fmt.Errorf("push() has unknown parameter %q", p)
+				}
+			}
+			if len(paramNames) == 0 {
+				return fmt.Errorf("push() must declare at least 'rows' parameter")
 			}
 		}
 		break
@@ -645,7 +770,8 @@ func extractStringDict(expr syntax.Expr) map[string]string {
 }
 
 // extractAnyDict extracts a dict of string→any from a Starlark dict expression.
-// Values are extracted as strings or ints depending on their literal type.
+// Values are extracted recursively: nested dicts become map[string]any, lists become []any,
+// and leaf values are strings, ints, or bools.
 func extractAnyDict(expr syntax.Expr) map[string]any {
 	dict, ok := expr.(*syntax.DictExpr)
 	if !ok {
@@ -669,7 +795,7 @@ func extractAnyDict(expr syntax.Expr) map[string]any {
 }
 
 // literalValue extracts a typed value from a Starlark literal expression.
-// Returns (value, true) for string/int/bool literals, (nil, false) for others.
+// Handles string/int/bool literals, nested dicts (recursively), and lists.
 func literalValue(expr syntax.Expr) (any, bool) {
 	// Check for bool (True/False are Ident nodes, not Literal)
 	if ident, ok := expr.(*syntax.Ident); ok {
@@ -681,6 +807,37 @@ func literalValue(expr syntax.Expr) (any, bool) {
 		}
 		return nil, false
 	}
+
+	// Nested dict → recursive extraction
+	if dict, ok := expr.(*syntax.DictExpr); ok {
+		m := make(map[string]any)
+		for _, entry := range dict.List {
+			kv, ok := entry.(*syntax.DictEntry)
+			if !ok {
+				continue
+			}
+			k := literalString(kv.Key)
+			if k == "" {
+				continue
+			}
+			if v, ok := literalValue(kv.Value); ok {
+				m[k] = v
+			}
+		}
+		return m, true
+	}
+
+	// List → recursive extraction
+	if list, ok := expr.(*syntax.ListExpr); ok {
+		items := make([]any, 0, len(list.List))
+		for _, item := range list.List {
+			if v, ok := literalValue(item); ok {
+				items = append(items, v)
+			}
+		}
+		return items, true
+	}
+
 	lit, ok := expr.(*syntax.Literal)
 	if !ok {
 		return nil, false
@@ -775,52 +932,4 @@ func extractStringList(expr syntax.Expr) []string {
 		}
 	}
 	return result
-}
-
-// extractColumns extracts column definitions from a TABLE.columns dict expression.
-func extractColumns(expr syntax.Expr) ([]Column, error) {
-	dict, ok := expr.(*syntax.DictExpr)
-	if !ok {
-		return nil, fmt.Errorf("expected dict, got %T", expr)
-	}
-
-	var cols []Column
-	for _, entry := range dict.List {
-		kv, ok := entry.(*syntax.DictEntry)
-		if !ok {
-			continue
-		}
-		colName := literalString(kv.Key)
-		if colName == "" {
-			continue
-		}
-
-		col := Column{Name: colName}
-
-		// Value is a dict: {"type": "VARCHAR", "category": "dimension"}
-		if valDict, ok := kv.Value.(*syntax.DictExpr); ok {
-			for _, ve := range valDict.List {
-				vkv, ok := ve.(*syntax.DictEntry)
-				if !ok {
-					continue
-				}
-				vkey := literalString(vkv.Key)
-				vval := literalString(vkv.Value)
-				switch vkey {
-				case "type":
-					col.Type = vval
-				case "category":
-					col.Category = vval
-				}
-			}
-		}
-
-		if col.Type == "" {
-			col.Type = "VARCHAR" // default
-		}
-
-		cols = append(cols, col)
-	}
-
-	return cols, nil
 }

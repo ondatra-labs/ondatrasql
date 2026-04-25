@@ -147,14 +147,6 @@ func TestTokenProviderStarlarkAttr(t *testing.T) {
 	}
 }
 
-func TestNewTokenProviderValidation(t *testing.T) {
-	// Missing required fields for client_credentials
-	_, err := newTokenProvider(context.Background(), "", nil)
-	if err == nil {
-		t.Fatal("expected error for missing fields")
-	}
-}
-
 func TestTokenProvider_StarlarkInterface(t *testing.T) {
 	tp := &tokenProvider{}
 
@@ -175,102 +167,6 @@ func TestTokenProvider_StarlarkInterface(t *testing.T) {
 	names := tp.AttrNames()
 	if len(names) != 1 || names[0] != "access_token" {
 		t.Errorf("AttrNames() = %v, want [access_token]", names)
-	}
-}
-
-func TestNewTokenProvider_GoogleServiceAccount(t *testing.T) {
-	// Create a minimal (invalid but parseable) service account JSON
-	saJSON := `{
-		"type": "service_account",
-		"project_id": "test",
-		"private_key_id": "key123",
-		"private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGcY5unA67hqxnfZoGMaEclq\npRfMGOG0IS3sWMYkNy5Nw1BF4bR1ELGi0iGPIF1VEgr+5m3V9JMo1XUMqvKlp3nT\n-----END RSA PRIVATE KEY-----\n",
-		"client_email": "test@test.iam.gserviceaccount.com",
-		"token_uri": "https://oauth2.googleapis.com/token"
-	}`
-
-	kwargs := []starlark.Tuple{
-		{starlark.String("google_service_account"), starlark.String(saJSON)},
-		{starlark.String("scope"), starlark.String("https://www.googleapis.com/auth/cloud-platform")},
-	}
-
-	tp, err := newTokenProvider(context.Background(), "", kwargs)
-	if err != nil {
-		t.Fatalf("newTokenProvider: %v", err)
-	}
-	if tp.googleSAKey == nil {
-		t.Error("expected googleSAKey to be set")
-	}
-}
-
-func TestNewTokenProvider_ClientCredentials(t *testing.T) {
-	kwargs := []starlark.Tuple{
-		{starlark.String("token_url"), starlark.String("https://auth.example.com/token")},
-		{starlark.String("client_id"), starlark.String("my-client")},
-		{starlark.String("client_secret"), starlark.String("my-secret")},
-		{starlark.String("scope"), starlark.String("read write")},
-	}
-
-	tp, err := newTokenProvider(context.Background(), "", kwargs)
-	if err != nil {
-		t.Fatalf("newTokenProvider: %v", err)
-	}
-	if tp.tokenURL != "https://auth.example.com/token" {
-		t.Errorf("tokenURL = %q", tp.tokenURL)
-	}
-	if tp.scope != "read write" {
-		t.Errorf("scope = %q", tp.scope)
-	}
-}
-
-func TestNewTokenProvider_GoogleKeyFile(t *testing.T) {
-	// Write a valid service account JSON to a temp file
-	saJSON := `{"type":"service_account","token_uri":"https://oauth2.googleapis.com/token","client_email":"test@test.iam.gserviceaccount.com","private_key":"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGcY5unA67hqxnfZoGMaEclq\n-----END RSA PRIVATE KEY-----\n"}`
-	tmpFile := t.TempDir() + "/sa.json"
-	if err := os.WriteFile(tmpFile, []byte(saJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	kwargs := []starlark.Tuple{
-		{starlark.String("google_key_file"), starlark.String(tmpFile)},
-	}
-	tp, err := newTokenProvider(context.Background(), "", kwargs)
-	if err != nil {
-		t.Fatalf("newTokenProvider: %v", err)
-	}
-	if tp.googleSAKey == nil {
-		t.Error("expected googleSAKey to be set")
-	}
-}
-
-func TestNewTokenProvider_GoogleKeyFile_NotFound(t *testing.T) {
-	kwargs := []starlark.Tuple{
-		{starlark.String("google_key_file"), starlark.String("/nonexistent/file.json")},
-	}
-	_, err := newTokenProvider(context.Background(), "", kwargs)
-	if err == nil {
-		t.Fatal("expected error for missing key file")
-	}
-}
-
-func TestNewTokenProvider_InvalidJSON(t *testing.T) {
-	kwargs := []starlark.Tuple{
-		{starlark.String("google_service_account"), starlark.String("{invalid json")},
-	}
-	_, err := newTokenProvider(context.Background(), "", kwargs)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestNewTokenProvider_PartialClientCredentials(t *testing.T) {
-	// Only token_url, missing client_id and client_secret
-	kwargs := []starlark.Tuple{
-		{starlark.String("token_url"), starlark.String("https://example.com/token")},
-	}
-	_, err := newTokenProvider(context.Background(), "", kwargs)
-	if err == nil {
-		t.Fatal("expected error for partial client credentials")
 	}
 }
 
@@ -331,45 +227,6 @@ func TestTokenProviderFreeze(t *testing.T) {
 	tp := &tokenProvider{}
 	// Freeze should not panic
 	tp.Freeze()
-}
-
-func TestNewTokenProvider_Provider(t *testing.T) {
-	t.Parallel()
-	kwargs := []starlark.Tuple{
-		{starlark.String("provider"), starlark.String("fortnox")},
-	}
-	tp, err := newTokenProvider(context.Background(), "/tmp/test-project", kwargs)
-	if err != nil {
-		t.Fatalf("newTokenProvider: %v", err)
-	}
-	if tp.provider != "fortnox" {
-		t.Errorf("provider = %q, want fortnox", tp.provider)
-	}
-	if tp.projectDir != "/tmp/test-project" {
-		t.Errorf("projectDir = %q, want /tmp/test-project", tp.projectDir)
-	}
-}
-
-func TestNewTokenProvider_ProviderNoProjectDir(t *testing.T) {
-	t.Parallel()
-	kwargs := []starlark.Tuple{
-		{starlark.String("provider"), starlark.String("fortnox")},
-	}
-	_, err := newTokenProvider(context.Background(), "", kwargs)
-	if err == nil {
-		t.Fatal("expected error for provider without project dir")
-	}
-}
-
-func TestNewTokenProvider_ProviderInvalid(t *testing.T) {
-	t.Parallel()
-	kwargs := []starlark.Tuple{
-		{starlark.String("provider"), starlark.String("../evil")},
-	}
-	_, err := newTokenProvider(context.Background(), "/tmp/test", kwargs)
-	if err == nil {
-		t.Fatal("expected error for invalid provider name")
-	}
 }
 
 func TestFetchProviderToken(t *testing.T) {

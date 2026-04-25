@@ -1,12 +1,12 @@
 --- run 1 (backfill) ---
 target: staging.regional
-kind: partition
+kind: tracked
 run_type: backfill
 rows_affected: 2
 run_reason: first run
 --- run 2 (incremental) ---
 target: staging.regional
-kind: partition
+kind: tracked
 run_type: backfill
 rows_affected: 1
 run_reason: sql changed

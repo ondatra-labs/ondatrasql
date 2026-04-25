@@ -273,8 +273,8 @@ SELECT 1 AS id, 'a' AS name
 		},
 		{
 			"partition",
-			`-- @kind: partition
--- @unique_key: id
+			`-- @kind: tracked
+-- @group_key: id
 -- @audit: row_count(>=, 999)
 SELECT 1 AS id, 'a' AS name
 `,
@@ -339,12 +339,12 @@ SELECT 1 AS id, 'alice updated' AS name UNION ALL SELECT 2, 'bob updated' UNION 
 		},
 		{
 			"partition_incremental",
-			`-- @kind: partition
--- @unique_key: region
+			`-- @kind: tracked
+-- @group_key: region
 SELECT 'EU' AS region, 1 AS id, 100 AS amount UNION ALL SELECT 'US', 2, 200
 `,
-			`-- @kind: partition
--- @unique_key: region
+			`-- @kind: tracked
+-- @group_key: region
 -- @audit: row_count(>=, 999)
 SELECT 'EU' AS region, 1 AS id, 999 AS amount UNION ALL SELECT 'US', 2, 999
 `,

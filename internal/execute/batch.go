@@ -53,6 +53,7 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, confi
 			currentHash: backfill.ModelHash(m.SQL, backfill.ModelDirectives{
 				Kind:               m.Kind,
 				UniqueKey:          m.UniqueKey,
+				GroupKey:           m.GroupKey,
 				PartitionedBy:      m.PartitionedBy,
 				Incremental:        m.Incremental,
 				IncrementalInitial: m.IncrementalInitial,
@@ -122,6 +123,7 @@ func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model, configHash 
 	hash := strings.ReplaceAll(backfill.ModelHash(model.SQL, backfill.ModelDirectives{
 		Kind:               model.Kind,
 		UniqueKey:          model.UniqueKey,
+		GroupKey:           model.GroupKey,
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,

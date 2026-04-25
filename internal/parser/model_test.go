@@ -23,7 +23,7 @@ func TestParseModel_Kind(t *testing.T) {
 		{"append", "-- @kind: append\nSELECT 1", "append"},
 		{"merge", "-- @kind: merge\nSELECT 1", "merge"},
 		{"scd2", "-- @kind: scd2\nSELECT 1", "scd2"},
-		{"partition", "-- @kind: partition\n-- @unique_key: id\nSELECT 1", "partition"},
+		{"tracked", "-- @kind: tracked\n-- @group_key: id\nSELECT 1", "tracked"},
 		{"with spaces", "-- @kind:   table  \nSELECT 1", "table"},
 		{"events", "-- @kind: events\nevent_name VARCHAR NOT NULL,\npage_url VARCHAR", "events"},
 	}
@@ -244,9 +244,10 @@ FROM staging.events`
 	}
 }
 
-func TestParseModel_PartitionKind_RequiresUniqueKey(t *testing.T) {
+func TestParseModel_PartitionKind_Removed(t *testing.T) {
 	t.Parallel()
 	content := `-- @kind: partition
+-- @unique_key: region
 
 SELECT 1 AS id`
 
@@ -258,17 +259,17 @@ SELECT 1 AS id`
 
 	_, err := ParseModel(modelFile, tmpDir)
 	if err == nil {
-		t.Error("expected error for partition kind without unique_key")
+		t.Error("expected error for removed partition kind")
 	}
-	if !strings.Contains(err.Error(), "partition kind requires @unique_key") {
+	if !strings.Contains(err.Error(), "partition was removed") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
 
-func TestParseModel_PartitionKind_UniqueKey(t *testing.T) {
+func TestParseModel_TrackedKind_CompositeGroupKey(t *testing.T) {
 	t.Parallel()
-	content := `-- @kind: partition
--- @unique_key: year, month
+	content := `-- @kind: tracked
+-- @group_key: year, month
 
 SELECT year(event_date) AS year, month(event_date) AS month, event_id
 FROM staging.events`
@@ -284,8 +285,8 @@ FROM staging.events`
 		t.Fatalf("ParseModel failed: %v", err)
 	}
 
-	if model.UniqueKey != "year, month" {
-		t.Errorf("got UniqueKey=%q, want %q", model.UniqueKey, "year, month")
+	if model.GroupKey != "year, month" {
+		t.Errorf("got GroupKey=%q, want %q", model.GroupKey, "year, month")
 	}
 }
 
@@ -333,10 +334,10 @@ SELECT 1 AS id, 'EU' AS region`
 	}
 }
 
-func TestParseModel_PartitionKind_PartitionedByRejected(t *testing.T) {
+func TestParseModel_TrackedKind_PartitionedByAllowed(t *testing.T) {
 	t.Parallel()
-	content := `-- @kind: partition
--- @unique_key: region
+	content := `-- @kind: tracked
+-- @group_key: region
 -- @partitioned_by: region
 
 SELECT 'EU' AS region, 1 AS id`
@@ -347,12 +348,12 @@ SELECT 'EU' AS region, 1 AS id`
 	modelFile := filepath.Join(modelsDir, "test.sql")
 	os.WriteFile(modelFile, []byte(content), 0644)
 
-	_, err := ParseModel(modelFile, tmpDir)
-	if err == nil {
-		t.Error("expected error for partition kind with @partitioned_by")
+	model, err := ParseModel(modelFile, tmpDir)
+	if err != nil {
+		t.Fatalf("ParseModel failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "@partitioned_by is not supported for partition kind") {
-		t.Errorf("unexpected error: %v", err)
+	if len(model.PartitionedBy) == 0 || model.PartitionedBy[0] != "region" {
+		t.Errorf("PartitionedBy = %v, want [region]", model.PartitionedBy)
 	}
 }
 
@@ -396,15 +397,15 @@ SELECT 1 AS id, 'EU' AS region`
 	}
 }
 
-func TestParseModel_UniqueKey_TrailingCommaRejected(t *testing.T) {
+func TestParseModel_GroupKey_TrailingCommaRejected(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		content string
 	}{
-		{"trailing comma", "-- @kind: partition\n-- @unique_key: region,\nSELECT 1 AS id"},
-		{"leading comma", "-- @kind: partition\n-- @unique_key: ,region\nSELECT 1 AS id"},
-		{"double comma", "-- @kind: partition\n-- @unique_key: region,,year\nSELECT 1 AS id"},
+		{"trailing comma", "-- @kind: tracked\n-- @group_key: region,\nSELECT 1 AS id"},
+		{"leading comma", "-- @kind: tracked\n-- @group_key: ,region\nSELECT 1 AS id"},
+		{"double comma", "-- @kind: tracked\n-- @group_key: region,,year\nSELECT 1 AS id"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -417,9 +418,9 @@ func TestParseModel_UniqueKey_TrailingCommaRejected(t *testing.T) {
 
 			_, err := ParseModel(modelFile, tmpDir)
 			if err == nil {
-				t.Error("expected error for invalid unique_key")
+				t.Error("expected error for invalid group_key")
 			}
-			if !strings.Contains(err.Error(), "empty column name") {
+			if !strings.Contains(err.Error(), "empty column name") && !strings.Contains(err.Error(), "invalid group_key") {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
@@ -1043,7 +1044,7 @@ SELECT 'test@test.com' AS email, 'Alice' AS name`
 	}
 }
 
-func TestParseModel_Expose(t *testing.T) {
+func TestParseModel_Expose_RequiresKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	modelDir := filepath.Join(dir, "models", "mart")
@@ -1053,15 +1054,12 @@ func TestParseModel_Expose(t *testing.T) {
 	path := filepath.Join(modelDir, "test.sql")
 	os.WriteFile(path, []byte(content), 0644)
 
-	model, err := ParseModel(path, dir)
-	if err != nil {
-		t.Fatalf("ParseModel: %v", err)
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for @expose without key column")
 	}
-	if !model.Expose {
-		t.Error("expected Expose = true")
-	}
-	if model.ExposeKey != "" {
-		t.Errorf("expected empty ExposeKey, got %q", model.ExposeKey)
+	if !strings.Contains(err.Error(), "requires a key column") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -1445,7 +1443,7 @@ func TestParseModel_TrackedKind(t *testing.T) {
 	modelDir := filepath.Join(dir, "models", "raw")
 	os.MkdirAll(modelDir, 0755)
 
-	content := "-- @kind: tracked\n-- @unique_key: source_file\nSELECT 'a.pdf' AS source_file, 1 AS id"
+	content := "-- @kind: tracked\n-- @group_key: source_file\nSELECT 'a.pdf' AS source_file, 1 AS id"
 	path := filepath.Join(modelDir, "test.sql")
 	os.WriteFile(path, []byte(content), 0644)
 
@@ -1456,12 +1454,12 @@ func TestParseModel_TrackedKind(t *testing.T) {
 	if model.Kind != "tracked" {
 		t.Errorf("kind = %q, want tracked", model.Kind)
 	}
-	if model.UniqueKey != "source_file" {
-		t.Errorf("unique_key = %q, want source_file", model.UniqueKey)
+	if model.GroupKey != "source_file" {
+		t.Errorf("group_key = %q, want source_file", model.GroupKey)
 	}
 }
 
-func TestParseModel_TrackedKind_RequiresUniqueKey(t *testing.T) {
+func TestParseModel_TrackedKind_RequiresGroupKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	modelDir := filepath.Join(dir, "models", "raw")
@@ -1473,23 +1471,39 @@ func TestParseModel_TrackedKind_RequiresUniqueKey(t *testing.T) {
 
 	_, err := ParseModel(path, dir)
 	if err == nil {
-		t.Fatal("expected error for tracked without unique_key")
+		t.Fatal("expected error for tracked without group_key")
 	}
 }
 
-func TestParseModel_TrackedKind_CompositeKeyRejected(t *testing.T) {
+func TestParseModel_TrackedKind_RejectsUniqueKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	modelDir := filepath.Join(dir, "models", "raw")
 	os.MkdirAll(modelDir, 0755)
 
-	content := "-- @kind: tracked\n-- @unique_key: a, b\nSELECT 1 AS a, 2 AS b"
+	content := "-- @kind: tracked\n-- @unique_key: source_file\nSELECT 'a.pdf' AS source_file"
 	path := filepath.Join(modelDir, "test.sql")
 	os.WriteFile(path, []byte(content), 0644)
 
 	_, err := ParseModel(path, dir)
 	if err == nil {
-		t.Fatal("expected error for composite unique_key on tracked")
+		t.Fatal("expected error for tracked with @unique_key (should use @group_key)")
+	}
+}
+
+func TestParseModel_GroupKey_OnlyForTracked(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelDir, 0755)
+
+	content := "-- @kind: merge\n-- @group_key: id\nSELECT 1 AS id"
+	path := filepath.Join(modelDir, "test.sql")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for @group_key on non-tracked kind")
 	}
 }
 

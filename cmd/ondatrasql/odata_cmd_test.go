@@ -52,7 +52,7 @@ func TestRunOData_UnmaterializedTable(t *testing.T) {
 
 	// Add model with @expose but don't run it (table doesn't exist yet)
 	p.AddModel("mart/revenue.sql", `-- @kind: table
--- @expose
+-- @expose id
 SELECT 1 AS id, 100.0 AS amount`)
 
 	cfg, err := config.Load(p.Dir)

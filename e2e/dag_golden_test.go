@@ -145,7 +145,7 @@ SELECT 1 AS id, 'Widget' AS name, 10 AS qty
 UNION ALL SELECT 2, 'Gadget', 20
 `)
 	p.AddModel("mart/inventory.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 SELECT * FROM raw.items
 `)
 
@@ -204,8 +204,8 @@ func addAllKindModels(t *testing.T, p *testutil.Project, rawSQL string) {
 	p.AddModel("mart/orders_append.sql", "-- @kind: append\nSELECT * FROM staging.orders_v\n")
 	p.AddModel("mart/orders_merge.sql", "-- @kind: merge\n-- @unique_key: id\nSELECT * FROM staging.orders_v\n")
 	p.AddModel("mart/orders_scd2.sql", "-- @kind: scd2\n-- @unique_key: id\nSELECT * FROM staging.orders_v\n")
-	p.AddModel("mart/orders_partition.sql", "-- @kind: partition\n-- @unique_key: region\nSELECT * FROM staging.orders_v\n")
-	p.AddModel("mart/orders_tracked.sql", "-- @kind: tracked\n-- @unique_key: id\nSELECT * FROM staging.orders_v\n")
+	p.AddModel("mart/orders_partition.sql", "-- @kind: tracked\n-- @group_key: region\nSELECT * FROM staging.orders_v\n")
+	p.AddModel("mart/orders_tracked.sql", "-- @kind: tracked\n-- @group_key: id\nSELECT * FROM staging.orders_v\n")
 }
 
 func runAllKinds(t *testing.T, p *testutil.Project, snap *goldenSnapshot) {

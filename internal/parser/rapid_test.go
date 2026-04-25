@@ -27,7 +27,7 @@ func genValidTableName() *rapid.Generator[string] {
 }
 
 func genKind() *rapid.Generator[string] {
-	return rapid.SampledFrom([]string{"table", "append", "merge", "scd2", "partition"})
+	return rapid.SampledFrom([]string{"table", "append", "merge", "scd2", "tracked"})
 }
 
 func genColumnName() *rapid.Generator[string] {
@@ -148,10 +148,10 @@ func TestRapid_Directive_KindPreserved(t *testing.T) {
 		dir := t.TempDir()
 		os.MkdirAll(filepath.Join(dir, "models", "staging"), 0o755)
 
-		// Partition kind requires @unique_key
+		// Tracked kind requires @group_key
 		extra := ""
-		if kind == "partition" {
-			extra = "-- @unique_key: id\n"
+		if kind == "tracked" {
+			extra = "-- @group_key: id\n"
 		}
 		content := fmt.Sprintf("-- @kind: %s\n%sSELECT 1 AS id", kind, extra)
 		path := filepath.Join(dir, "models", "staging", "test.sql")
@@ -405,7 +405,7 @@ func TestRapid_Validation_InvalidKind(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		invalid := rapid.StringMatching(`^[a-z]{3,10}$`).Filter(func(s string) bool {
 			switch s {
-			case "table", "append", "merge", "scd2", "partition", "events", "tracked":
+			case "table", "append", "merge", "scd2", "events", "tracked", "partition":
 				return false
 			}
 			return true

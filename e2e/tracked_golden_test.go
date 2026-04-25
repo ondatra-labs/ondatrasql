@@ -16,7 +16,7 @@ func TestE2E_TrackedKind(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("raw/invoices.sql", `-- @kind: tracked
--- @unique_key: source_file
+-- @group_key: source_file
 
 SELECT * FROM (VALUES
     ('inv_001.pdf', 'INV-001', 'Widget A', 10, 50.0),
@@ -42,7 +42,7 @@ func TestE2E_TrackedKind_IncrementalSkip(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("raw/data.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM (VALUES
     (1, 'Alice', 100),
@@ -70,7 +70,7 @@ func TestE2E_TrackedKind_IncrementalChange(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.source AS SELECT * FROM (VALUES (1,'Alice',100),(2,'Bob',200),(3,'Carol',300)) AS t(id,name,amount)")
 
 	p.AddModel("raw/data.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.source
 `)
@@ -100,7 +100,7 @@ func TestE2E_TrackedKind_GroupTracking(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.source_items AS SELECT * FROM (VALUES ('A.pdf','Widget',50),('A.pdf','Service',100),('B.pdf','License',500)) AS t(file,item,price)")
 
 	p.AddModel("raw/items.sql", `-- @kind: tracked
--- @unique_key: file
+-- @group_key: file
 
 SELECT * FROM raw.source_items
 `)
@@ -130,7 +130,7 @@ func TestE2E_TrackedKind_NewGroup(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.source_users AS SELECT * FROM (VALUES (1,'Alice'),(2,'Bob')) AS t(id,name)")
 
 	p.AddModel("raw/users.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.source_users
 `)
@@ -158,7 +158,7 @@ func TestE2E_TrackedKind_DeletedGroup(t *testing.T) {
 	p.Sess.Exec("CREATE TABLE raw.source_del AS SELECT * FROM (VALUES (1,'Alice',100),(2,'Bob',200),(3,'Carol',300)) AS t(id,name,amount)")
 
 	p.AddModel("raw/data.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM raw.source_del
 `)
@@ -184,7 +184,7 @@ func TestE2E_TrackedKind_UniqueKeyOnly(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("raw/keys.sql", `-- @kind: tracked
--- @unique_key: id
+-- @group_key: id
 
 SELECT * FROM (VALUES (1), (2), (3)) AS t(id)
 `)

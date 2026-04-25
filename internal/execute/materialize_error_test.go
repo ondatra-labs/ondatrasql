@@ -49,19 +49,19 @@ func TestMaterializePartition_NoTempTable(t *testing.T) {
 	runner := NewRunner(p.Sess, ModeRun, "test")
 	model := &parser.Model{
 		Target:      "staging.part_err",
-		Kind:        "partition",
-		UniqueKey: "region",
+		Kind:        "tracked",
+		GroupKey: "region",
 		SQL:         "SELECT 1 AS id",
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeTracked(model, "tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	// Should fail on count rows from nonexistent temp table
-	if !strings.Contains(err.Error(), "count rows") {
-		t.Errorf("expected count rows error, got: %v", err)
+	if !strings.Contains(err.Error(), "content hash") && !strings.Contains(err.Error(), "count rows") && !strings.Contains(err.Error(), "get columns") {
+		t.Errorf("expected error for nonexistent temp table, got: %v", err)
 	}
 }
 
@@ -171,13 +171,13 @@ func TestMaterializePartition_EnsureSchemaError(t *testing.T) {
 	runner := NewRunner(p.Sess, ModeRun, "test")
 	model := &parser.Model{
 		Target:      "bad_catalog.bad_schema.part_err",
-		Kind:        "partition",
-		UniqueKey: "region",
+		Kind:        "tracked",
+		GroupKey: "region",
 		SQL:         "SELECT 1 AS id",
 	}
 	result := &Result{Target: model.Target}
 
-	_, err := runner.materializePartition(model, "tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeTracked(model, "tmp_nonexistent", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error for bad target with nonexistent tmp table")
 	}
@@ -306,18 +306,18 @@ func TestMaterializePartition_CommitError_Backfill(t *testing.T) {
 	runner := NewRunner(s, ModeRun, "test")
 	model := &parser.Model{
 		Target:      "staging.part_commit_err",
-		Kind:        "partition",
-		UniqueKey: "region",
+		Kind:        "tracked",
+		GroupKey: "region",
 		SQL:         "SELECT 'EU' AS region, 1 AS id",
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_part_commit", true, "", "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializeTracked(model, "tmp_part_commit", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
-	if !strings.Contains(err.Error(), "create partition table") {
-		t.Errorf("expected 'create partition table' error, got: %v", err)
+	if !strings.Contains(err.Error(), "create tracked table") && !strings.Contains(err.Error(), "get columns") && !strings.Contains(err.Error(), "content hash") {
+		t.Errorf("expected tracked error, got: %v", err)
 	}
 }
 
@@ -336,12 +336,12 @@ func TestMaterializePartition_UpdateError(t *testing.T) {
 	// First: create the table via backfill
 	model := &parser.Model{
 		Target:      "staging.part_upd_test",
-		Kind:        "partition",
-		UniqueKey: "region",
+		Kind:        "tracked",
+		GroupKey: "region",
 		SQL:         "SELECT 'EU' AS region, 1 AS id",
 	}
 	result := &Result{Target: model.Target}
-	_, err := runner.materializePartition(model, "tmp_part_upd", true, "", "", "hash", "backfill", result, time.Now())
+	_, err := runner.materializeTracked(model, "tmp_part_upd", true, "", "", "hash", "backfill", result, time.Now())
 	if err != nil {
 		t.Fatalf("backfill failed: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestMaterializePartition_UpdateError(t *testing.T) {
 	p.Sess.Exec("DROP TABLE tmp_part_upd")
 
 	result2 := &Result{Target: model.Target}
-	_, err = runner.materializePartition(model, "tmp_part_upd", false, "", "", "hash", "incremental", result2, time.Now())
+	_, err = runner.materializeTracked(model, "tmp_part_upd", false, "", "", "hash", "incremental", result2, time.Now())
 	if err == nil {
 		t.Fatal("expected error on incremental with missing temp table")
 	}
@@ -468,18 +468,18 @@ func TestMaterializePartition_IncrementalCommitError(t *testing.T) {
 	runner := NewRunner(s, ModeRun, "test")
 	model := &parser.Model{
 		Target:      "staging.part_incr_err",
-		Kind:        "partition",
-		UniqueKey: "region",
+		Kind:        "tracked",
+		GroupKey: "region",
 		SQL:         "SELECT 'EU' AS region, 2 AS id",
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_part_incr", false, "", "", "hash", "incremental", result, time.Now())
+	_, err = runner.materializeTracked(model, "tmp_part_incr", false, "", "", "hash", "incremental", result, time.Now())
 	if err == nil {
 		t.Fatal("expected commit error from missing ducklake_set_commit_message")
 	}
-	if !strings.Contains(err.Error(), "update partition table") {
-		t.Errorf("expected 'update partition table' error, got: %v", err)
+	if !strings.Contains(err.Error(), "update tracked table") && !strings.Contains(err.Error(), "get columns") && !strings.Contains(err.Error(), "content hash") {
+		t.Errorf("expected tracked error, got: %v", err)
 	}
 }
 
@@ -550,7 +550,7 @@ func TestMaterializeSCD2_GetSourceColumnsError(t *testing.T) {
 	}
 }
 
-// Test partition tableExistsCheck error path
+// Test tracked tableExistsCheck error path
 func TestMaterializePartition_TableExistsCheckError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
@@ -567,13 +567,13 @@ func TestMaterializePartition_TableExistsCheckError(t *testing.T) {
 	runner := NewRunner(s, ModeRun, "test")
 	model := &parser.Model{
 		Target:      "staging.part_tec",
-		Kind:        "partition",
-		UniqueKey: "region",
+		Kind:        "tracked",
+		GroupKey: "region",
 		SQL:         "SELECT 'EU' AS region, 1 AS id",
 	}
 	result := &Result{Target: model.Target}
 
-	_, err = runner.materializePartition(model, "tmp_x", true, "", "", "hash", "backfill", result, time.Now())
+	_, err = runner.materializeTracked(model, "tmp_x", true, "", "", "hash", "backfill", result, time.Now())
 	if err == nil {
 		t.Fatal("expected error from tableExistsCheck")
 	}

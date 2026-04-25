@@ -31,7 +31,7 @@ func TestRunSink_SyncReturnDict(t *testing.T) {
 	writeSinkStar(t, dir, "test_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {str(r["__ondatra_rowid"]) + ":" + r["__ondatra_change_type"]: "ok" for r in rows}
 `)
 	rt := NewRuntime(nil, nil, dir)
@@ -39,7 +39,7 @@ def push(rows):
 		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "name": "alice"},
 		{"__ondatra_rowid": 2.0, "__ondatra_change_type": "insert", "name": "bob"},
 	}
-	result, err := rt.RunSink(context.Background(), "test_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "test_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -60,12 +60,12 @@ func TestRunSink_SyncReturnNone(t *testing.T) {
 	writeSinkStar(t, dir, "none_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     pass  # returns None
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "none_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "none_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -84,12 +84,12 @@ func TestRunSink_SyncReturnNonDict(t *testing.T) {
 	writeSinkStar(t, dir, "list_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return [1, 2, 3]  # wrong type
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "list_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "list_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestRunSink_AsyncReturnJobRef(t *testing.T) {
 	writeSinkStar(t, dir, "async_push", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "abc123", "status": "pending"}
 
 def poll(job_ref):
@@ -113,7 +113,7 @@ def poll(job_ref):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "async_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "async_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -131,12 +131,12 @@ func TestRunSink_AtomicReturnNone(t *testing.T) {
 	writeSinkStar(t, dir, "atomic_push", `
 SINK = {"batch_size": 100, "batch_mode": "atomic"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     pass  # atomic returns None on success
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "atomic_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "atomic_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -151,12 +151,12 @@ func TestRunSink_PushError(t *testing.T) {
 	writeSinkStar(t, dir, "error_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     fail("destination unavailable")
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	_, err := rt.RunSink(context.Background(), "error_push", rows, 1)
+	_, err := rt.RunSink(context.Background(), "error_push", rows, 1, "table", "", nil)
 	if err == nil {
 		t.Fatal("expected error from failing push")
 	}
@@ -171,7 +171,7 @@ SINK = {"batch_size": 100}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	_, err := rt.RunSink(context.Background(), "no_push", rows, 1)
+	_, err := rt.RunSink(context.Background(), "no_push", rows, 1, "table", "", nil)
 	if err == nil {
 		t.Fatal("expected error for missing push()")
 	}
@@ -183,11 +183,11 @@ func TestRunSink_EmptyRows(t *testing.T) {
 	writeSinkStar(t, dir, "empty_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	result, err := rt.RunSink(context.Background(), "empty_push", []map[string]any{}, 1)
+	result, err := rt.RunSink(context.Background(), "empty_push", []map[string]any{}, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -206,13 +206,13 @@ func TestRunSink_PerRowNonStringValue(t *testing.T) {
 	writeSinkStar(t, dir, "nonstr_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     # Return True instead of "ok" -- wrong type
     return {"1.0": True}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "nonstr_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "nonstr_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -231,13 +231,13 @@ func TestRunSink_BatchNumber(t *testing.T) {
 	writeSinkStar(t, dir, "batch_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     # Return batch_number as string value to verify it's accessible
-    return {"1.0": "ok:" + str(sink.batch_number)}
+    return {"1.0": "ok:" + str(batch_number)}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "batch_push", rows, 7)
+	result, err := rt.RunSink(context.Background(), "batch_push", rows, 7, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestRunSinkFinalize_Optional(t *testing.T) {
 	writeSinkStar(t, dir, "nofin_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {str(r["__ondatra_rowid"]) + ":" + r["__ondatra_change_type"]: "ok" for r in rows}
 # no finalize() -- should be no-op
 `)
@@ -271,7 +271,7 @@ func TestRunSinkFinalize_Called(t *testing.T) {
 	writeSinkStar(t, dir, "fin_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {}
 
 def finalize(succeeded, failed):
@@ -294,7 +294,7 @@ func TestRunSinkPoll_NotDone(t *testing.T) {
 	writeSinkStar(t, dir, "poll_push", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):
@@ -319,7 +319,7 @@ func TestRunSinkPoll_DoneWithPerRow(t *testing.T) {
 	writeSinkStar(t, dir, "poll_done", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):
@@ -347,7 +347,7 @@ func TestRunSinkPoll_DoneStringInsteadOfBool(t *testing.T) {
 	writeSinkStar(t, dir, "poll_str", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):
@@ -366,7 +366,7 @@ func TestRunSinkPoll_NoPollFunction(t *testing.T) {
 	writeSinkStar(t, dir, "no_poll", `
 SINK = {"batch_size": 100, "batch_mode": "async"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 # no poll() defined
 `)
@@ -383,7 +383,7 @@ func TestRunSinkPoll_NonDictReturn(t *testing.T) {
 	writeSinkStar(t, dir, "poll_list", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):
@@ -402,7 +402,7 @@ func TestRunSinkPoll_MissingDoneKey(t *testing.T) {
 	writeSinkStar(t, dir, "poll_nodone", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):
@@ -425,12 +425,12 @@ func TestRunSink_SyncNoneReturn_MustBeDetectable(t *testing.T) {
 	writeSinkStar(t, dir, "sync_none", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     pass  # returns None -- wrong for sync mode
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "sync_none", rows, 1)
+	result, err := rt.RunSink(context.Background(), "sync_none", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink should not error (Starlark ran fine): %v", err)
 	}
@@ -449,12 +449,12 @@ func TestRunSink_ConversionErrorPropagates(t *testing.T) {
 	writeSinkStar(t, dir, "conv_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "abc", "count": 42}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "conv_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "conv_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestRunSinkPoll_DoneIntInsteadOfBool(t *testing.T) {
 	writeSinkStar(t, dir, "poll_int", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):
@@ -495,7 +495,7 @@ func TestRunSink_RowsConvertedCorrectly(t *testing.T) {
 	writeSinkStar(t, dir, "rows_push", `
 SINK = {"batch_size": 100}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     # Verify rows are actual dicts, not stringified
     results = {}
     for r in rows:
@@ -510,7 +510,7 @@ def push(rows):
 		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "name": "alice"},
 		{"__ondatra_rowid": 2.0, "__ondatra_change_type": "insert", "name": "bob"},
 	}
-	result, err := rt.RunSink(context.Background(), "rows_push", rows, 1)
+	result, err := rt.RunSink(context.Background(), "rows_push", rows, 1, "table", "", nil)
 	if err != nil {
 		t.Fatalf("RunSink: %v (rows may not have been converted correctly)", err)
 	}
@@ -525,7 +525,7 @@ func TestRunSinkPoll_JobRefPassedCorrectly(t *testing.T) {
 	writeSinkStar(t, dir, "poll_ref", `
 SINK = {"batch_size": 100, "batch_mode": "async", "poll_interval": "1s", "poll_timeout": "10s"}
 
-def push(rows):
+def push(rows=[], batch_number=1):
     return {"job_id": "x"}
 
 def poll(job_ref):

@@ -198,6 +198,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	sqlHash := backfill.ModelHash(model.SQL, backfill.ModelDirectives{
 		Kind:               model.Kind,
 		UniqueKey:          model.UniqueKey,
+		GroupKey:           model.GroupKey,
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
@@ -329,6 +330,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			}
 		}
 		if len(libCalls) > 0 {
+				// Validate supported_kinds for fetch
+				for _, c := range libCalls {
+					if len(c.Lib.SupportedKinds) > 0 {
+						allowed := false
+						for _, k := range c.Lib.SupportedKinds {
+							if k == model.Kind {
+								allowed = true
+								break
+							}
+						}
+						if !allowed {
+							return nil, fmt.Errorf("lib %s does not support @kind: %s (supported: %v)", c.FuncName, model.Kind, c.Lib.SupportedKinds)
+						}
+					}
+				}
+
 				// Mark model as having lib calls so materialize knows
 				// tmpTable contains all rows (not CDC-filtered)
 				model.Source = libCalls[0].FuncName
@@ -345,7 +362,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						if evalErr != nil {
 							return nil, fmt.Errorf("lib %s args: %w", call.FuncName, evalErr)
 						}
-						dims, mets, cols, matchErr := matchColumns(parsedAST, call.Lib)
+						cols, matchErr := matchColumns(parsedAST, call.Lib)
 						if matchErr != nil {
 							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, matchErr)
 						}
@@ -353,7 +370,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						if call.Lib.DynamicColumns {
 							typedCols = extractTypedSelectColumns(parsedAST)
 						}
-						kwargs = buildLibCallKwargs(call.Lib, args, dims, mets, cols, typedCols)
+						kwargs = buildLibCallKwargs(call.Lib, args, cols, typedCols)
 					} else {
 						// SQL-based detection (macro expansion hid the TABLE_FUNCTION node).
 						// Extract args from raw SQL: parse "func_name('arg1', 'arg2')" manually.
@@ -374,7 +391,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						}
 					}
 
-					// Create Starlark runtime with incremental state
+					// Inject incremental state as kwargs
 					incrState, incrErr := backfill.GetIncrementalState(
 						r.sess, model.Target, model.Incremental, model.IncrementalInitial)
 					if incrErr != nil {
@@ -384,8 +401,21 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						incrState.IsBackfill = true
 						incrState.LastValue = incrState.InitialValue
 					}
+					if incrState != nil {
+						kwargs["is_backfill"] = incrState.IsBackfill
+						kwargs["last_value"] = incrState.LastValue
+						kwargs["last_run"] = incrState.LastRun
+						kwargs["cursor"] = incrState.Cursor
+						kwargs["initial_value"] = incrState.InitialValue
+					} else {
+						kwargs["is_backfill"] = true
+						kwargs["last_value"] = ""
+						kwargs["last_run"] = ""
+						kwargs["cursor"] = ""
+						kwargs["initial_value"] = ""
+					}
 
-					rt := script.NewRuntime(r.sess, incrState, r.projectDir)
+					rt := script.NewRuntime(r.sess, nil, r.projectDir)
 					if r.projectDir != "" && model.Kind != "table" {
 						rt.SetIngestDir(filepath.Join(r.projectDir, ".ondatra", "ingest"))
 					}
@@ -395,9 +425,30 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					var scriptResult *script.Result
 					var runErr error
 					if call.Lib.APIConfig != nil {
-						// API dict: always use paginated path (page_size=0 means single call)
 						httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.projectDir)
-						scriptResult, runErr = rt.RunSourcePaginated(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
+						if call.Lib.FetchMode == "async" {
+							// Async fetch: submit() → check() → fetch_result()
+							pollInterval := 5 * time.Second
+							pollTimeout := 5 * time.Minute
+							pollBackoff := 1
+							if call.Lib.APIConfig.FetchPollInterval != "" {
+								if d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollInterval); err == nil {
+									pollInterval = d
+								}
+							}
+							if call.Lib.APIConfig.FetchPollTimeout != "" {
+								if d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollTimeout); err == nil {
+									pollTimeout = d
+								}
+							}
+							if call.Lib.APIConfig.FetchPollBackoff > 0 {
+								pollBackoff = call.Lib.APIConfig.FetchPollBackoff
+							}
+							scriptResult, runErr = rt.RunSourceAsync(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, pollInterval, pollTimeout, pollBackoff, httpCfg)
+						} else {
+							// Sync fetch: paginated path (page_size=0 means single call)
+							scriptResult, runErr = rt.RunSourcePaginated(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
+						}
 					} else {
 						// Legacy TABLE dict: use save.row() contract
 						scriptResult, runErr = rt.RunSource(ctx, libTarget, call.FuncName, kwargs)
@@ -499,7 +550,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Smart CDC: auto-detect tables, apply CDC to fact tables and aggregated joins
 	// Note: SCD2 is excluded because it needs full source data for proper change detection
 	// tracked excluded: it does its own hash-based change detection and needs full source data
-	isIncremental := model.Kind == "append" || model.Kind == "merge" || model.Kind == "partition"
+	isIncremental := model.Kind == "append" || model.Kind == "merge"
 	if !needsBackfill && isIncremental && len(cdcTables) > 0 {
 		// NOTE: Smart rebuild detection (skipping when source hasn't changed) is disabled
 		// because DuckLake's tables_inserted_into contains table IDs that can't be reliably
@@ -1312,9 +1363,13 @@ func (r *Runner) detectSchemaEvolution(
 	// (e.g. SCD2 JOIN on id compares '1' = NULL → no match → silent data loss).
 	// The schema evolution is returned so it runs inside the materialize
 	// transaction (atomic with audit + data write).
-	if model.UniqueKey != "" && len(change.TypeChanged) > 0 {
+	keyCol := model.UniqueKey
+	if model.Kind == "tracked" {
+		keyCol = model.GroupKey
+	}
+	if keyCol != "" && len(change.TypeChanged) > 0 {
 		ukCols := make(map[string]bool)
-		for _, part := range strings.Split(model.UniqueKey, ",") {
+		for _, part := range strings.Split(keyCol, ",") {
 			ukCols[strings.TrimSpace(part)] = true
 		}
 		for _, tc := range change.TypeChanged {

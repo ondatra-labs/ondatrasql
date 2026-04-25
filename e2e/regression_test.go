@@ -39,7 +39,6 @@ API = {
     "auth": {"env": "TEST_REGRESSION_KEY"},
     "fetch": {
         "args": [],
-        "dynamic_columns": True,
     },
 }
 
@@ -168,10 +167,6 @@ API = {
     "base_url": "https://example.com",
     "fetch": {
         "args": [],
-        "columns": {
-            "id": {"type": "BIGINT"},
-            "value": {"type": "BIGINT"},
-        },
     },
 }
 
@@ -365,10 +360,6 @@ API = {
     "base_url": "https://example.com",
     "fetch": {
         "args": [],
-        "columns": {
-            "id": {"type": "BIGINT"},
-            "name": {"type": "VARCHAR"},
-        },
     },
 }
 
@@ -426,7 +417,6 @@ API = {
     "base_url": "https://example.com",
     "fetch": {
         "args": [],
-        "dynamic_columns": True,
     },
 }
 
@@ -463,7 +453,6 @@ API = {
     "base_url": "https://example.com",
     "fetch": {
         "args": [],
-        "dynamic_columns": True,
     },
 }
 

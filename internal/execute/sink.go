@@ -586,7 +586,21 @@ func (se *sinkExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 	}
 
 	rt := script.NewRuntime(se.runner.sess, nil, se.runner.projectDir)
-	sinkResult, err := rt.RunSink(ctx, se.model.Sink, rows, batchNum, httpConfigFromLib(se.sinkLib.APIConfig, ctx, se.runner.projectDir))
+	// Determine key column: unique_key for merge/scd2, group_key for tracked
+	sinkKey := se.model.UniqueKey
+	if se.model.Kind == "tracked" {
+		sinkKey = se.model.GroupKey
+	}
+	// Map sink args from @sink: name('arg1', 'arg2') to push.args names
+	sinkArgMap := make(map[string]string)
+	if se.sinkLib.SinkConfig != nil {
+		for i, argName := range se.sinkLib.SinkConfig.Args {
+			if i < len(se.model.SinkArgs) {
+				sinkArgMap[argName] = se.model.SinkArgs[i]
+			}
+		}
+	}
+	sinkResult, err := rt.RunSink(ctx, se.model.Sink, rows, batchNum, se.model.Kind, sinkKey, sinkArgMap, httpConfigFromLib(se.sinkLib.APIConfig, ctx, se.runner.projectDir))
 
 	switch cfg.BatchMode {
 	case "sync":

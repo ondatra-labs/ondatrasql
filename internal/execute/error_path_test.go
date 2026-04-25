@@ -29,7 +29,7 @@ func mustClosedSession() *duckdb.Session {
 // --- Rapid generators for error path testing ---
 
 func genErrModelKind() *rapid.Generator[string] {
-	return rapid.SampledFrom([]string{"table", "append", "merge", "scd2", "partition"})
+	return rapid.SampledFrom([]string{"table", "append", "merge", "scd2", "tracked"})
 }
 
 func genErrTarget() *rapid.Generator[string] {
@@ -67,8 +67,8 @@ func genErrModel() *rapid.Generator[*parser.Model] {
 		if kind == "merge" || kind == "scd2" {
 			m.UniqueKey = rapid.SampledFrom([]string{"id", "key", "uid"}).Draw(t, "uk")
 		}
-		if kind == "partition" {
-			m.UniqueKey = rapid.SampledFrom([]string{"region", "date", "category"}).Draw(t, "partition")
+		if kind == "tracked" {
+			m.GroupKey = rapid.SampledFrom([]string{"region", "date", "category"}).Draw(t, "group_key")
 		}
 
 		// Optionally add extensions
@@ -176,7 +176,7 @@ func TestRapid_MaterializeSCD2_ClosedSession(t *testing.T) {
 	})
 }
 
-// --- Property: materializePartition never panics on closed session ---
+// --- Property: materializeTracked never panics on closed session ---
 
 func TestRapid_MaterializePartition_ClosedSession(t *testing.T) {
 	if testing.Short() {
@@ -187,10 +187,10 @@ func TestRapid_MaterializePartition_ClosedSession(t *testing.T) {
 		runner := NewRunner(sess, ModeRun, "test-rapid")
 		target := genErrTarget().Draw(rt, "target")
 		partCol := rapid.SampledFrom([]string{"region", "date", "category"}).Draw(rt, "part")
-		model := &parser.Model{Target: target, Kind: "partition", UniqueKey: partCol, SQL: "SELECT 1 AS id"}
+		model := &parser.Model{Target: target, Kind: "tracked", GroupKey: partCol, SQL: "SELECT 1 AS id"}
 		result := &Result{Target: target}
 
-		_, err := runner.materializePartition(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "", "hash", "backfill", result, time.Now())
+		_, err := runner.materializeTracked(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "", "hash", "backfill", result, time.Now())
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}

@@ -19,6 +19,7 @@ var testEntity = EntitySchema{
 	ODataName: "mart_daily_revenue",
 	Schema:    "mart",
 	Table:     "daily_revenue",
+	KeyColumn: "order_date",
 	Columns: []ColumnSchema{
 		{Name: "order_date", Type: "DATE", EdmType: "Edm.Date"},
 		{Name: "orders", Type: "BIGINT", EdmType: "Edm.Int64"},
@@ -334,12 +335,12 @@ func TestGenerateMetadata(t *testing.T) {
 	if !strings.Contains(xml, "Edm.Double") {
 		t.Error("missing Edm.Double type")
 	}
-	// Should have Key with all columns (no explicit key set)
+	// Should have Key with explicit key column
 	if !strings.Contains(xml, "<Key>") {
 		t.Error("missing Key element")
 	}
 	if !strings.Contains(xml, `<PropertyRef Name="order_date"`) {
-		t.Error("missing PropertyRef for composite key")
+		t.Error("missing PropertyRef for key column")
 	}
 }
 
@@ -594,6 +595,7 @@ func TestGenerateMetadata_MultipleEntities(t *testing.T) {
 		},
 		{
 			Target: "staging.orders", ODataName: "staging_orders",
+			KeyColumn: "order_id",
 			Columns: []ColumnSchema{
 				{Name: "order_id", Type: "BIGINT", EdmType: "Edm.Int64"},
 				{Name: "customer", Type: "VARCHAR", EdmType: "Edm.String"},
@@ -615,9 +617,9 @@ func TestGenerateMetadata_MultipleEntities(t *testing.T) {
 	if !strings.Contains(xml, `<PropertyRef Name="id"`) {
 		t.Error("missing explicit key for mart_revenue")
 	}
-	// staging_orders has composite key (all columns)
+	// staging_orders has explicit key
 	if !strings.Contains(xml, `<PropertyRef Name="order_id"`) {
-		t.Error("missing composite key for staging_orders")
+		t.Error("missing key for staging_orders")
 	}
 }
 

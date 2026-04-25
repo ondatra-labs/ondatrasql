@@ -1,5 +1,5 @@
 target: staging.partitioned
-kind: partition
+kind: tracked
 run_type: incremental
 rows_affected: 0
 run_reason: incremental run
