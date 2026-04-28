@@ -303,11 +303,9 @@ func GetPreviousSnapshot(sess *duckdb.Session, target string) (int64, error) {
 	}
 
 	var id int64
-	_, err = fmt.Sscanf(result, "%d", &id)
-	if err != nil {
-		return 0, nil
+	if _, err := fmt.Sscanf(result, "%d", &id); err != nil {
+		return 0, fmt.Errorf("parse previous snapshot id %q for %s: %w", result, target, err)
 	}
-
 	return id, nil
 }
 

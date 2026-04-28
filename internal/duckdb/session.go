@@ -1490,7 +1490,9 @@ func (s *Session) TableHasChanges(table string, startSnapshot, endSnapshot int64
 		return 0, err
 	}
 	var cnt int64
-	fmt.Sscanf(result, "%d", &cnt)
+	if _, err := fmt.Sscanf(result, "%d", &cnt); err != nil {
+		return 0, fmt.Errorf("parse table_changes count %q for %s: %w", result, table, err)
+	}
 	return cnt, nil
 }
 

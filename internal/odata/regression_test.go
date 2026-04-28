@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/CiscoM31/godata"
 )
 
 // --- $search: ILIKE wildcard escaping ---
@@ -248,6 +250,53 @@ func TestBuildQuery_Filter_ContainsEscapesWildcards(t *testing.T) {
 			}
 			if tt.mustNot != "" && strings.Contains(sql, tt.mustNot) {
 				t.Errorf("filter %q: SQL %q should NOT contain %q", tt.filter, sql, tt.mustNot)
+			}
+		})
+	}
+}
+
+// --- Cat 1: date/time/duration literal quote escaping ---
+//
+// godata tokenises date/time/duration literals from $filter values. Real
+// inputs cannot contain quotes (the tokenizer wouldn't match them), but the
+// formatter still escapes defensively. If a future change introduces a path
+// where a quoted variant reaches the formatter and we forget to escape, the
+// literal would close the surrounding SQL string and inject. These tests pin
+// the escape by driving filterNodeToSQL with synthetic tokens.
+
+func TestFilterNodeToSQL_LiteralQuoteEscape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		tokenType godata.TokenType
+		value     string
+		want      string
+	}{
+		{"date with quote", godata.ExpressionTokenDate,
+			"2024-01-15'; DROP TABLE users; --",
+			"DATE '2024-01-15''; DROP TABLE users; --'"},
+		{"time with quote", godata.ExpressionTokenTime,
+			"12:00:00'; --",
+			"TIME '12:00:00''; --'"},
+		{"datetime with quote", godata.ExpressionTokenDateTime,
+			"2024-01-15T12:00:00'; --",
+			"TIMESTAMP '2024-01-15T12:00:00''; --'"},
+		{"duration with quote", godata.ExpressionTokenDuration,
+			"P1D'; --",
+			"INTERVAL 'P1D''; --'"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &godata.ParseNode{
+				Token: &godata.Token{Value: tt.value, Type: tt.tokenType},
+			}
+			got, err := filterNodeToSQL(node, map[string]bool{})
+			if err != nil {
+				t.Fatalf("filterNodeToSQL: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -1583,3 +1583,162 @@ SELECT series, date, value FROM src('items')
 		t.Fatalf("expected 2 rows after 5 runs, got %s", count)
 	}
 }
+
+// TestSinkUpdatePreimage_FromPreChangeSnapshot pins that update_preimage
+// rows are read from the snapshot BEFORE the change (e.Snapshot - 1), not
+// from current state. The bug class: someone changes the snapshot offset
+// in readRowsByEvents and the preimage starts containing the post-change
+// values, silently breaking change-aware push() semantics. The push()
+// function fails the run if the preimage doesn't have the OLD value, so
+// any drift in the snapshot calculation will surface as SyncFailed > 0.
+func TestSinkUpdatePreimage_FromPreChangeSnapshot(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Source lib: row id=1 with score=100 (run 1), then score=200 (run 2)
+	writeLib(t, p, "updsrc", `
+RUN_FILE = "_run_counter.txt"
+
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["merge"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if is_backfill:
+        return {"rows": [{"id": 1, "score": 100}], "next": None}
+    return {"rows": [{"id": 1, "score": 200}], "next": None}
+`)
+
+	// Sink: asserts that preimage has the OLD value (100), postimage the NEW (200).
+	// If readRowsByEvents reads from the wrong snapshot, the preimage row will
+	// carry score=200 (current state) and fail() will trip the test.
+	writeLib(t, p, "checker", `
+API = {
+    "push": {
+        "batch_size": 100,
+        "batch_mode": "atomic",
+    },
+}
+
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    for row in rows:
+        ct = row.get("__ondatra_change_type", "")
+        if ct == "update_preimage":
+            if row.get("score") != 100:
+                fail("preimage score should be 100 (pre-change), got " + str(row.get("score")))
+        elif ct == "update_postimage":
+            if row.get("score") != 200:
+                fail("postimage score should be 200 (post-change), got " + str(row.get("score")))
+`)
+
+	p.AddModel("raw/items.sql", `-- @kind: merge
+-- @unique_key: id
+-- @sink: checker
+SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
+`)
+
+	// Run 1: backfill — single row insert, sink sees insert event
+	r1 := runModelWithLib(t, p, "raw/items.sql")
+	if r1.RowsAffected != 1 {
+		t.Fatalf("run 1: expected 1 row, got %d", r1.RowsAffected)
+	}
+	if r1.SyncFailed != 0 {
+		t.Fatalf("run 1: SyncFailed=%d, expected 0 (warnings: %v)", r1.SyncFailed, r1.Warnings)
+	}
+
+	// Run 2: same id, new score → merge produces update_preimage + update_postimage.
+	// The push() function asserts both have correct values for their slot.
+	r2 := runModelWithLib(t, p, "raw/items.sql")
+	if r2.SyncFailed != 0 {
+		t.Fatalf("run 2: SyncFailed=%d — preimage/postimage rows had wrong values, indicating readRowsByEvents read from wrong snapshot. Warnings: %v", r2.SyncFailed, r2.Warnings)
+	}
+	if r2.SyncSucceeded == 0 {
+		t.Fatalf("run 2: SyncSucceeded=0, expected sink to fire on update (warnings: %v)", r2.Warnings)
+	}
+}
+
+// TestPreCommitSnapshot_AppendWithSink pins that the preCommitSnapshot
+// capture is gated by `model.Sink != ""` only — not narrowed to specific
+// kinds (merge/tracked). The bug class: someone changes the gate to
+// `if model.Kind == "merge" || ...`, breaking append + @sink. Without
+// the pre-commit snapshot, createSinkDelta would query table_changes
+// from snapshot 1 instead of the right range, replaying every row of
+// every previous run into the sink on every incremental run.
+//
+// This test runs an append + @sink model twice with a NEW row on the
+// second run, and asserts the sink saw only the new row — not all rows.
+func TestPreCommitSnapshot_AppendWithSink(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Source lib: returns 2 rows on backfill, 1 NEW row on incremental.
+	writeLib(t, p, "appendsrc", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["append"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if is_backfill:
+        return {"rows": [
+            {"id": 1, "score": 100},
+            {"id": 2, "score": 200},
+        ], "next": None}
+    # incremental: one new row beyond last_value
+    return {"rows": [{"id": 3, "score": 300}], "next": None}
+`)
+
+	// Sink lib: just succeeds. We verify via SyncSucceeded.
+	writeLib(t, p, "sinkrec", `
+API = {
+    "push": {
+        "batch_size": 100,
+        "batch_mode": "atomic",
+    },
+}
+
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	p.AddModel("raw/scores.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @sink: sinkrec
+SELECT id::BIGINT AS id, score::BIGINT AS score FROM appendsrc('items')
+`)
+
+	// Run 1: backfill — 2 rows in, 2 in sink
+	r1 := runModelWithLib(t, p, "raw/scores.sql")
+	if r1.RowsAffected != 2 {
+		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
+	}
+	if r1.SyncSucceeded != 2 {
+		t.Fatalf("run 1: expected SyncSucceeded=2, got %d (warnings: %v)", r1.SyncSucceeded, r1.Warnings)
+	}
+
+	// Run 2: incremental — 1 NEW row. Sink delta should only include the
+	// new row. If preCommitSnapshot was not captured, the delta would
+	// also include run 1's rows → SyncSucceeded would be 3, not 1.
+	r2 := runModelWithLib(t, p, "raw/scores.sql")
+	if r2.RowsAffected != 1 {
+		t.Fatalf("run 2: expected 1 new row, got %d", r2.RowsAffected)
+	}
+	if r2.SyncSucceeded != 1 {
+		t.Fatalf("run 2: expected SyncSucceeded=1 (only the new row), got %d — preCommitSnapshot may be missing for append kind, causing run 1's rows to be replayed (warnings: %v)", r2.SyncSucceeded, r2.Warnings)
+	}
+
+	// Verify total rows in target — exactly 3, no duplication
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.scores")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != "3" {
+		t.Fatalf("expected 3 total rows after 2 runs, got %s", count)
+	}
+}

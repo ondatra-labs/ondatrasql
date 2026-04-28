@@ -9,7 +9,7 @@ RAPID_PKGS = ./internal/backfill ./internal/dag ./internal/duckdb \
 OTHER_PKGS = ./cmd/... ./internal/config ./internal/git \
              ./internal/sql ./internal/testutil
 
-.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover lint build
+.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover lint bugcheck-static build
 
 # Unit tests only (no integration build tag)
 test:
@@ -43,6 +43,29 @@ test-cover:
 lint:
 	go vet ./...
 	staticcheck ./...
+
+# Mechanical bug-pattern greps. Mirrors the static layer of /bugcheck.
+# Only BLOCKER-class patterns belong here (false positives expensive,
+# false negatives critical). Soft / INFO patterns belong in the skill.
+# Each pattern returns 0 matches when clean. Any match exits 1.
+bugcheck-static:
+	@fail=0; \
+	check() { \
+	  name="$$1"; shift; \
+	  out=$$(grep -rn "$$@" 2>/dev/null); \
+	  if [ -n "$$out" ]; then \
+	    echo "[$$name] FAIL"; echo "$$out"; echo; fail=1; \
+	  fi; \
+	}; \
+	check "fmt-pct-v-in-sql"       --include='*.go' -E 'fmt\.Sprintf.*%v.*(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|SET )' internal/ cmd/; \
+	check "removed-lib-dicts"      --include='*.go' -E '^\s*(TABLE|SINK)\s*=' internal/parser/ internal/libregistry/; \
+	check "search-path-no-escape"  --include='*.go' -E 'SET search_path.*Sprintf.*[^e]Sprintf' internal/; \
+	out=$$(grep -nE 'RunSink[A-Za-z]*\(' internal/execute/sink.go | grep -v httpConfigFromLib 2>/dev/null); \
+	if [ -n "$$out" ]; then echo "[sink-call-missing-auth] FAIL"; echo "$$out"; echo; fail=1; fi; \
+	out=$$(grep -nE '\bmodel\.Kind\b|\.Kind\b' internal/execute/sink_delta.go 2>/dev/null); \
+	if [ -n "$$out" ]; then echo "[sink-delta-kind-specific] FAIL"; echo "$$out"; echo "    createSinkDelta must be kind-agnostic — all kinds use the same table_changes() query."; echo; fail=1; fi; \
+	if [ $$fail -eq 1 ]; then echo "bugcheck-static: failures above"; exit 1; fi; \
+	echo "bugcheck-static: clean"
 
 build:
 	go build ./cmd/ondatrasql/

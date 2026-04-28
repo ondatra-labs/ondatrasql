@@ -6,10 +6,12 @@ package execute
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ondatra-labs/ondatrasql/internal/collect"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -873,5 +875,385 @@ func TestLoadExtension_NewlineInRepo(t *testing.T) {
 				t.Errorf("loadExtension(%q): expected validation error for newline, got nil", ext)
 			}
 		}()
+	}
+}
+
+// --- Cat 10 BLOCKER: sink delta early returns ---
+
+// TestCreateSinkDelta_NewSnapshotZero verifies that createSinkDelta returns
+// nil events (and no error) when newSnapshot == 0 — i.e. the post-commit
+// snapshot capture failed or no commit happened. Without this guard, the
+// table_changes() query would treat 0 as a real range start and replay
+// the entire table on every skip run.
+func TestCreateSinkDelta_NewSnapshotZero(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{} // no session needed; early return must fire first
+	model := &parser.Model{
+		Target: "mart.orders",
+		Sink:   "lib/orders_push.star",
+	}
+
+	events, err := r.createSinkDelta(model, "tmp_orders", 5, 0)
+	if err != nil {
+		t.Fatalf("expected no error on newSnapshot=0, got: %v", err)
+	}
+	if events != nil {
+		t.Errorf("expected nil events on newSnapshot=0, got: %v", events)
+	}
+}
+
+// TestCreateSinkDelta_EmptySink verifies the early return when the model
+// has no @sink directive. Without this, every model would issue a
+// table_changes() query whether it had a sink or not.
+func TestCreateSinkDelta_EmptySink(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{} // no session needed; early return must fire first
+	model := &parser.Model{
+		Target: "mart.orders",
+		Sink:   "",
+	}
+
+	events, err := r.createSinkDelta(model, "tmp_orders", 5, 10)
+	if err != nil {
+		t.Fatalf("expected no error on empty sink, got: %v", err)
+	}
+	if events != nil {
+		t.Errorf("expected nil events on empty sink, got: %v", events)
+	}
+}
+
+// TestMergeBacklogWithDelta_DedupOnCompositeKey verifies that
+// mergeBacklogWithDelta dedups on (RowID, ChangeType) — not just RowID.
+//
+// The bug class: a row with both update_preimage and update_postimage in the
+// backlog must keep both unless the delta explicitly supersedes one of them.
+// Deduping on RowID alone would silently drop the postimage when the delta
+// only contains the preimage (or vice versa), breaking the at-least-once
+// delivery contract that the push() function depends on.
+func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
+	t.Parallel()
+
+	store, err := collect.OpenSyncStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSyncStore: %v", err)
+	}
+	defer store.Close()
+
+	target := "mart.orders"
+
+	// Backlog: rowid=2 has BOTH preimage and postimage
+	backlog := []collect.SyncEvent{
+		{ChangeType: "insert", RowID: 1, Snapshot: 100},
+		{ChangeType: "update_preimage", RowID: 2, Snapshot: 100},
+		{ChangeType: "update_postimage", RowID: 2, Snapshot: 100},
+		{ChangeType: "delete", RowID: 3, Snapshot: 100},
+	}
+	if err := store.WriteBatch(target, backlog); err != nil {
+		t.Fatalf("WriteBatch backlog: %v", err)
+	}
+
+	// Delta: replaces (rowid=2, update_preimage) only — rowid=2's postimage
+	// must remain. Also adds a new (rowid=4, insert).
+	delta := []collect.SyncEvent{
+		{ChangeType: "update_preimage", RowID: 2, Snapshot: 200},
+		{ChangeType: "insert", RowID: 4, Snapshot: 200},
+	}
+
+	se := &sinkExecutor{}
+	merged, err := se.mergeBacklogWithDelta(store, target, delta)
+	if err != nil {
+		t.Fatalf("mergeBacklogWithDelta: %v", err)
+	}
+
+	// Build (rowid, change_type) → snapshot map for assertions
+	got := map[string]int64{}
+	for _, e := range merged {
+		key := fmt.Sprintf("%d:%s", e.RowID, e.ChangeType)
+		got[key] = e.Snapshot
+	}
+
+	// Expected: 5 distinct (rowid, change_type) pairs
+	want := map[string]int64{
+		"1:insert":           100, // backlog kept (no delta match)
+		"2:update_preimage":  200, // delta replaced backlog (snapshot 200 > 100)
+		"2:update_postimage": 100, // BACKLOG KEPT — only preimage was in delta
+		"3:delete":           100, // backlog kept
+		"4:insert":           200, // delta added
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("merged size = %d, want %d. got=%v want=%v", len(got), len(want), got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("key %q: got snapshot=%d, want %d (full result: %v)", k, got[k], v, got)
+		}
+	}
+
+	// Critical assertion: rowid=2's postimage is preserved.
+	// If dedup were on RowID alone, it would be removed because (rowid=2,
+	// update_preimage) appears in delta.
+	if _, ok := got["2:update_postimage"]; !ok {
+		t.Errorf("rowid=2 update_postimage was dropped — dedup is on RowID alone, not (RowID, ChangeType) composite")
+	}
+}
+
+// TestClassifyPerRowStatus_RequiresCompositeKey pins the per-row push contract:
+// push() must return status keys in "rowid:change_type" format. The same RowID
+// may appear with multiple change_types (update_preimage + update_postimage)
+// and each needs its own status. If push() returns RowID-only keys, the
+// classifier must reject the response — silently keying on RowID would
+// collapse the two statuses and break at-least-once delivery.
+func TestClassifyPerRowStatus_RequiresCompositeKey(t *testing.T) {
+	t.Parallel()
+
+	se := &sinkExecutor{}
+	rows := []map[string]any{
+		{"__ondatra_rowid": int64(1), "__ondatra_change_type": "insert"},
+		{"__ondatra_rowid": int64(2), "__ondatra_change_type": "update_preimage"},
+		{"__ondatra_rowid": int64(2), "__ondatra_change_type": "update_postimage"},
+	}
+	events := []collect.SyncEvent{
+		{RowID: 1, ChangeType: "insert"},
+		{RowID: 2, ChangeType: "update_preimage"},
+		{RowID: 2, ChangeType: "update_postimage"},
+	}
+
+	t.Run("rowid-only keys are rejected", func(t *testing.T) {
+		// Bug shape: push() returned status keyed only by rowid.
+		// rowid=2 has BOTH preimage and postimage but only one entry.
+		bad := map[string]string{
+			"1": "ok",
+			"2": "ok",
+		}
+		_, err := se.classifyPerRowStatus(bad, rows, events)
+		if err == nil {
+			t.Fatal("expected error for rowid-only status keys")
+		}
+		if !strings.Contains(err.Error(), "missing keys") {
+			t.Errorf("expected 'missing keys' error, got: %v", err)
+		}
+	})
+
+	t.Run("composite keys classify both preimage and postimage", func(t *testing.T) {
+		good := map[string]string{
+			"1:insert":           "ok",
+			"2:update_preimage":  "ok",
+			"2:update_postimage": "reject:business rule violation",
+		}
+		res, err := se.classifyPerRowStatus(good, rows, events)
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		// rowid=1 + rowid=2 preimage → OK; rowid=2 postimage → Rejected
+		if len(res.OK) != 2 {
+			t.Errorf("OK = %d events, want 2", len(res.OK))
+		}
+		if len(res.Rejected) != 1 {
+			t.Errorf("Rejected = %d events, want 1", len(res.Rejected))
+		}
+		if len(res.Rejected) == 1 && res.Rejected[0].ChangeType != "update_postimage" {
+			t.Errorf("rejected event = %s, want update_postimage", res.Rejected[0].ChangeType)
+		}
+	})
+
+	t.Run("missing one of two same-rowid keys is rejected", func(t *testing.T) {
+		// Bug shape: push() returned only the postimage status, missing preimage
+		partial := map[string]string{
+			"1:insert":           "ok",
+			"2:update_postimage": "ok",
+			// "2:update_preimage" missing
+		}
+		_, err := se.classifyPerRowStatus(partial, rows, events)
+		if err == nil {
+			t.Fatal("expected error for missing preimage key")
+		}
+		if !strings.Contains(err.Error(), "2:update_preimage") {
+			t.Errorf("expected error to name the missing key, got: %v", err)
+		}
+	})
+}
+
+// TestQueueDelta_PathSelection pins the four-way branch in queueDelta. The
+// bug class: using ClearAllAndWrite where WriteBatch is required (destroys
+// an active worker's claims) or using WriteBatch where ClearAllAndWrite is
+// required (leaves stale backlog after a backfill). Each path is tested by
+// pre-populating the store with non-overlapping events and verifying which
+// of those survive the call.
+func TestQueueDelta_PathSelection(t *testing.T) {
+	t.Parallel()
+
+	// Helper: open a fresh store, populate with two existing events, and
+	// return the store. Caller closes.
+	openWithBacklog := func(t *testing.T) (*collect.SyncStore, string) {
+		t.Helper()
+		store, err := collect.OpenSyncStore(t.TempDir())
+		if err != nil {
+			t.Fatalf("OpenSyncStore: %v", err)
+		}
+		target := "mart.orders"
+		// Existing backlog: non-overlapping with the delta below
+		err = store.WriteBatch(target, []collect.SyncEvent{
+			{ChangeType: "insert", RowID: 10, Snapshot: 100},
+			{ChangeType: "insert", RowID: 11, Snapshot: 100},
+		})
+		if err != nil {
+			t.Fatalf("seed WriteBatch: %v", err)
+		}
+		return store, target
+	}
+
+	// Helper: collect (RowID, ChangeType) → bool for a target.
+	keysOf := func(t *testing.T, store *collect.SyncStore, target string) map[string]bool {
+		t.Helper()
+		all, err := store.ReadAllEvents(target)
+		if err != nil {
+			t.Fatalf("ReadAllEvents: %v", err)
+		}
+		out := map[string]bool{}
+		for _, e := range all {
+			out[fmt.Sprintf("%d:%s", e.RowID, e.ChangeType)] = true
+		}
+		return out
+	}
+
+	delta := []collect.SyncEvent{
+		{ChangeType: "insert", RowID: 20, Snapshot: 200},
+		{ChangeType: "insert", RowID: 21, Snapshot: 200},
+	}
+
+	t.Run("async path uses WriteBatch (preserves backlog + job_ref)", func(t *testing.T) {
+		store, target := openWithBacklog(t)
+		defer store.Close()
+
+		se := &sinkExecutor{
+			sinkEvents: delta,
+			result:     &Result{RunType: "incremental"},
+		}
+		if err := se.queueDelta(store, target, "async", false); err != nil {
+			t.Fatalf("queueDelta: %v", err)
+		}
+		got := keysOf(t, store, target)
+		// Async = WriteBatch — backlog preserved, delta added → 4 keys
+		want := []string{"10:insert", "11:insert", "20:insert", "21:insert"}
+		for _, k := range want {
+			if !got[k] {
+				t.Errorf("async path lost key %q (got %v) — async must preserve backlog via WriteBatch", k, got)
+			}
+		}
+	})
+
+	t.Run("backfill path uses ClearAllAndWrite (replaces backlog)", func(t *testing.T) {
+		store, target := openWithBacklog(t)
+		defer store.Close()
+
+		se := &sinkExecutor{
+			sinkEvents: delta,
+			result:     &Result{RunType: "backfill"},
+		}
+		if err := se.queueDelta(store, target, "per_row", false); err != nil {
+			t.Fatalf("queueDelta: %v", err)
+		}
+		got := keysOf(t, store, target)
+		// Backfill = ClearAllAndWrite — backlog gone, only delta
+		if got["10:insert"] || got["11:insert"] {
+			t.Errorf("backfill path kept stale backlog (got %v) — backfill must use ClearAllAndWrite", got)
+		}
+		if !got["20:insert"] || !got["21:insert"] {
+			t.Errorf("backfill path missing delta events (got %v)", got)
+		}
+	})
+
+	t.Run("incremental + inflight uses WriteBatch (preserves active claims)", func(t *testing.T) {
+		store, target := openWithBacklog(t)
+		defer store.Close()
+
+		se := &sinkExecutor{
+			sinkEvents: delta,
+			result:     &Result{RunType: "incremental"},
+		}
+		// hasInflight=true means a worker owns the existing claims.
+		// Using ClearAllAndWrite here would destroy them mid-push.
+		if err := se.queueDelta(store, target, "per_row", true); err != nil {
+			t.Fatalf("queueDelta: %v", err)
+		}
+		got := keysOf(t, store, target)
+		want := []string{"10:insert", "11:insert", "20:insert", "21:insert"}
+		for _, k := range want {
+			if !got[k] {
+				t.Errorf("incremental+inflight lost key %q (got %v) — must preserve via WriteBatch", k, got)
+			}
+		}
+	})
+
+	t.Run("incremental + no inflight merges backlog and replaces", func(t *testing.T) {
+		store, target := openWithBacklog(t)
+		defer store.Close()
+
+		se := &sinkExecutor{
+			sinkEvents: delta,
+			result:     &Result{RunType: "incremental"},
+		}
+		if err := se.queueDelta(store, target, "per_row", false); err != nil {
+			t.Fatalf("queueDelta: %v", err)
+		}
+		got := keysOf(t, store, target)
+		// Merge: backlog (10, 11) + delta (20, 21), no overlap → 4 keys
+		want := []string{"10:insert", "11:insert", "20:insert", "21:insert"}
+		for _, k := range want {
+			if !got[k] {
+				t.Errorf("incremental no-inflight lost key %q (got %v) — merge must keep non-overlapping backlog", k, got)
+			}
+		}
+	})
+}
+
+// TestClassifyPerRowStatus_ExpiredSnapshotDeleteIsRejected pins the contract
+// that a delete-event whose row cannot be read from DuckLake (because the
+// snapshot expired) is classified as **Rejected** (dead-letter), not Failed.
+// Putting it in Failed would cause infinite retries on something that can
+// never succeed, so this distinction is load-bearing for the at-least-once
+// semantics of the sink pipeline.
+func TestClassifyPerRowStatus_ExpiredSnapshotDeleteIsRejected(t *testing.T) {
+	t.Parallel()
+
+	se := &sinkExecutor{}
+
+	// Events include a delete that has no corresponding row read from the lake.
+	events := []collect.SyncEvent{
+		{RowID: 1, ChangeType: "insert"},
+		{RowID: 99, ChangeType: "delete"}, // row data unavailable (expired snapshot)
+	}
+	// rows only contains the insert — the delete row was not read.
+	rows := []map[string]any{
+		{"__ondatra_rowid": int64(1), "__ondatra_change_type": "insert"},
+	}
+	perRow := map[string]string{
+		"1:insert": "ok",
+		// no entry for rowid=99 — the row wasn't in `rows` so push() never saw it
+	}
+
+	res, err := se.classifyPerRowStatus(perRow, rows, events)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if len(res.OK) != 1 {
+		t.Errorf("OK = %d events, want 1 (the insert)", len(res.OK))
+	}
+	if len(res.Rejected) != 1 {
+		t.Fatalf("Rejected = %d events, want 1 (the delete)", len(res.Rejected))
+	}
+	if res.Rejected[0].RowID != 99 {
+		t.Errorf("rejected RowID = %d, want 99", res.Rejected[0].RowID)
+	}
+	if len(res.Failed) != 0 {
+		t.Errorf("Failed should be empty (would cause infinite retry), got %d events: %v", len(res.Failed), res.Failed)
+	}
+	// Reject message should hint at expiry so operators can investigate.
+	if len(res.RejectMsgs) != 1 || !strings.Contains(res.RejectMsgs[0], "snapshot may have expired") {
+		t.Errorf("expected reject message about expired snapshot, got: %v", res.RejectMsgs)
 	}
 }
