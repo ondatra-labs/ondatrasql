@@ -9,6 +9,7 @@ package execute_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -5256,6 +5257,124 @@ func TestRun_CDCGate_RunsWhenSourceChanged(t *testing.T) {
 	r := runModel(t, p, "staging/dst.sql")
 	if r.RowsAffected == 0 {
 		t.Error("expected rows > 0 after source change")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tracked content hash behavior (docs/reference/known-limitations.md)
+// ---------------------------------------------------------------------------
+
+// TestTracked_ContentHash_ColumnOrderMatters verifies that reordering columns
+// in a tracked model's SELECT changes the content hash and triggers a group
+// replace, even though the data values are identical.
+func TestTracked_ContentHash_ColumnOrderMatters(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	p.AddModel("raw/data.sql", `-- @kind: tracked
+-- @group_key: grp
+SELECT 'A' AS grp, 'x' AS col1, 'y' AS col2
+`)
+
+	// Run 1 — backfill
+	r1 := runModel(t, p, "raw/data.sql")
+	if r1.RowsAffected != 1 {
+		t.Fatalf("run 1: expected 1 row, got %d", r1.RowsAffected)
+	}
+
+	// Get content hash from first run
+	hash1, err := p.Sess.QueryValue("SELECT _content_hash FROM raw.data WHERE grp='A'")
+	if err != nil {
+		t.Fatalf("hash1: %v", err)
+	}
+
+	// Reorder columns (col2 before col1) — same data, different order
+	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
+	os.WriteFile(modelPath, []byte(`-- @kind: tracked
+-- @group_key: grp
+SELECT 'A' AS grp, 'y' AS col2, 'x' AS col1
+`), 0644)
+
+	// Run 2 — SQL changed → backfill. Hash should differ.
+	r2 := runModel(t, p, "raw/data.sql")
+	t.Logf("run 2: rows=%d type=%s", r2.RowsAffected, r2.RunType)
+
+	hash2, err := p.Sess.QueryValue("SELECT _content_hash FROM raw.data WHERE grp='A'")
+	if err != nil {
+		t.Fatalf("hash2: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Fatalf("content hash should differ after column reorder: both %s", hash1)
+	}
+}
+
+// TestTracked_ContentHash_NullCoercedToEmpty verifies that a column changing
+// from NULL to empty string does NOT trigger a group replace (both coerce
+// to '' in the hash).
+func TestTracked_ContentHash_NullCoercedToEmpty(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// First: create with NULL
+	p.AddModel("raw/data.sql", `-- @kind: tracked
+-- @group_key: grp
+SELECT 'A' AS grp, NULL AS val
+`)
+
+	r1 := runModel(t, p, "raw/data.sql")
+	if r1.RowsAffected != 1 {
+		t.Fatalf("run 1: expected 1 row, got %d", r1.RowsAffected)
+	}
+
+	hash1, err := p.Sess.QueryValue("SELECT _content_hash FROM raw.data WHERE grp='A'")
+	if err != nil {
+		t.Fatalf("hash1: %v", err)
+	}
+
+	// Change to empty string — hash should be identical (COALESCE(NULL,'') == '')
+	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
+	os.WriteFile(modelPath, []byte(`-- @kind: tracked
+-- @group_key: grp
+SELECT 'A' AS grp, '' AS val
+`), 0644)
+
+	r2 := runModel(t, p, "raw/data.sql")
+	t.Logf("run 2: rows=%d type=%s", r2.RowsAffected, r2.RunType)
+
+	hash2, err := p.Sess.QueryValue("SELECT _content_hash FROM raw.data WHERE grp='A'")
+	if err != nil {
+		t.Fatalf("hash2: %v", err)
+	}
+
+	if hash1 != hash2 {
+		t.Fatalf("content hash should match (NULL coerced to empty): got %s vs %s", hash1, hash2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Flush run type for events (docs/reference/pipeline/run-types.md)
+// ---------------------------------------------------------------------------
+
+// TestRun_EventsFlushRunType verifies that events models are dispatched
+// to the flush path. Without a running daemon the runner errors, but the
+// run_type is assigned before the health check. We verify by checking
+// that the error mentions the daemon and the model kind is events.
+func TestRun_EventsFlushRunType(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	p.AddModel("raw/clicks.sql", `-- @kind: events
+
+event_name VARCHAR NOT NULL,
+user_id VARCHAR
+`)
+
+	// Without a daemon, runEvents errors on health check.
+	// This verifies the events path is dispatched (not the SQL path).
+	_, err := runModelErr(t, p, "raw/clicks.sql")
+	if err == nil {
+		t.Fatal("expected error without daemon running")
+	}
+	if !strings.Contains(err.Error(), "daemon") && !strings.Contains(err.Error(), "events") {
+		t.Fatalf("expected daemon/events error, got: %v", err)
 	}
 }
 

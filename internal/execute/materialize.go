@@ -220,7 +220,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// SCD2 handles its own transaction - return early
-		return r.materializeSCD2(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
+		return r.materializeSCD2(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime, extraPreSQL...)
 
 	case "tracked":
 		if model.GroupKey == "" {
@@ -234,7 +234,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// Tracked handles its own transaction - return early
-		return r.materializeTracked(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime)
+		return r.materializeTracked(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime, extraPreSQL...)
 
 	default:
 		return 0, fmt.Errorf("unknown kind: %s", model.Kind)
@@ -496,7 +496,7 @@ func (r *Runner) buildSchemaEvolutionSQL(target string, change backfill.SchemaCh
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
 // On subsequent runs, closes old versions and inserts new versions for changed/new rows.
-func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
 	uk := duckdb.QuoteIdentifier(model.UniqueKey)
 	ukRaw := model.UniqueKey
 
@@ -704,6 +704,13 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		}
 	}
 
+	// Execute extraPreSQL (e.g. Badger ack records) inside the transaction
+	for _, extra := range extraPreSQL {
+		if err := r.sess.Exec(extra); err != nil {
+			return rollbackOnErr(err, "extra pre-sql")
+		}
+	}
+
 	if err := r.sess.Exec(detectSQL); err != nil {
 		return rollbackOnErr(err, "detect scd2 changes")
 	}
@@ -809,7 +816,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 // Groups rows by group_key and computes an md5 hash of all non-key columns per group.
 // On incremental runs, only groups with changed or new hashes are replaced (DELETE + INSERT).
 // The _content_hash column is added automatically, like SCD2's valid_from_snapshot.
-func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time) (int64, error) {
+func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
 	// Parse composite group_key: "region, year" → ["region", "year"]
 	var keyParts []string
 	for _, part := range strings.Split(model.GroupKey, ",") {
@@ -979,6 +986,9 @@ FROM %s s JOIN group_hash g ON %s`,
 		if schemaEvolutionSQL != "" {
 			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
 		}
+		for _, extra := range extraPreSQL {
+			mainSQL = extra + ";\n" + mainSQL
+		}
 		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 
 		stepStart = time.Now()
@@ -1054,6 +1064,9 @@ WHERE h.%[8]s IS NULL`,
 		if schemaEvolutionSQL != "" {
 			noChangeSQL = schemaEvolutionSQL + ";\n" + noChangeSQL
 		}
+		for _, extra := range extraPreSQL {
+			noChangeSQL = extra + ";\n" + noChangeSQL
+		}
 		txnSQL := sql.MustFormat("execute/commit.sql", noChangeSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -1093,6 +1106,9 @@ INSERT INTO %[1]s BY NAME SELECT h.* FROM tracked_hashed h JOIN tracked_changes 
 		strings.Join(insJoin, " AND "))
 	if schemaEvolutionSQL != "" {
 		mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
+	}
+	for _, extra := range extraPreSQL {
+		mainSQL = extra + ";\n" + mainSQL
 	}
 
 	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))

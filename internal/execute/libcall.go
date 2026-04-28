@@ -12,16 +12,18 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
+	"github.com/ondatra-labs/ondatrasql/internal/script"
 )
 
 // LibCall represents a detected lib function call in a SQL model's FROM clause.
 type LibCall struct {
-	FuncName  string           // lib function name (e.g. "gam_fetch")
-	CallIndex int              // unique index per call (0, 1, 2...) for dedup
-	Lib       *libregistry.LibFunc // registry entry
-	ArgNodes  []*duckast.Node  // raw AST arg expressions
-	ASTNode   *duckast.Node    // the TABLE_FUNCTION AST node (for identity matching in rewrite)
-	TempTable string           // set after execution, used for AST rewrite
+	FuncName     string               // lib function name (e.g. "gam_fetch")
+	CallIndex    int                  // unique index per call (0, 1, 2...) for dedup
+	Lib          *libregistry.LibFunc // registry entry
+	ArgNodes     []*duckast.Node      // raw AST arg expressions
+	ASTNode      *duckast.Node        // the TABLE_FUNCTION AST node (for identity matching in rewrite)
+	TempTable    string               // set after execution, used for AST rewrite
+	ScriptResult *script.Result       // set after execution, for Badger claim lifecycle
 }
 
 // detectLibCalls walks the AST and finds TABLE_FUNCTION nodes that match
@@ -132,6 +134,40 @@ func stripStringsAndComments(sql string) string {
 			}
 			continue
 		}
+		// Dollar-quoted string ($tag$...$tag$ or $$...$$)
+		if out[i] == '$' {
+			// Extract the tag: everything from $ to next $ (inclusive)
+			tagEnd := i + 1
+			for tagEnd < len(out) && out[tagEnd] != '$' {
+				c := out[tagEnd]
+				// Tags are alphanumeric + underscore only
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+					break
+				}
+				tagEnd++
+			}
+			if tagEnd < len(out) && out[tagEnd] == '$' {
+				tag := string(out[i : tagEnd+1]) // e.g. "$$" or "$foo$"
+				// Blank the opening tag
+				for j := i; j <= tagEnd; j++ {
+					out[j] = ' '
+				}
+				i = tagEnd + 1
+				// Scan for closing tag
+				for i < len(out) {
+					if i+len(tag)-1 < len(out) && string(out[i:i+len(tag)]) == tag {
+						for j := 0; j < len(tag); j++ {
+							out[i+j] = ' '
+						}
+						i += len(tag)
+						break
+					}
+					out[i] = ' '
+					i++
+				}
+				continue
+			}
+		}
 		// String literal
 		if out[i] == '\'' || out[i] == '"' {
 			quote := out[i]
@@ -240,40 +276,39 @@ func buildSelectExprAST(exprNode *duckast.Node) map[string]any {
 	}
 }
 
-// matchColumns extracts all column references from the query and validates
-// against supported_columns if declared. API dict blueprints are always dynamic.
-func matchColumns(ast *duckast.AST, lib *libregistry.LibFunc) ([]string, error) {
+// matchColumns extracts column references for a specific lib call and
+// validates against supported_columns if declared. For dynamic-column
+// libs, it returns only columns referenced against this lib's table
+// alias (input-shape), not the full output projection.
+func matchColumns(ast *duckast.AST, lib *libregistry.LibFunc, alias string, singleSource bool) ([]string, error) {
 	if ast == nil {
 		return nil, nil
 	}
 
-	selectCols := extractAllColumnNames(ast)
-	if len(selectCols) == 0 {
-		return nil, nil
-	}
-
 	if lib.DynamicColumns {
-		// Validate SELECT-list columns against supported_columns whitelist if declared.
-		// Only check SELECT columns, not JOIN/WHERE references from other tables.
+		// Extract columns referenced against this specific lib call
+		cols := extractColumnsForLib(ast, alias, singleSource)
+		if len(cols) == 0 {
+			// Fallback: use all column names from AST
+			cols = extractAllColumnNames(ast)
+		}
+
+		// Validate against supported_columns whitelist if declared.
 		if len(lib.SupportedColumns) > 0 {
 			allowed := make(map[string]bool, len(lib.SupportedColumns))
 			for _, c := range lib.SupportedColumns {
 				allowed[strings.ToUpper(c)] = true
 			}
-			typedCols := extractTypedSelectColumns(ast)
-			for _, col := range typedCols {
-				colMap, ok := col.(map[string]any)
-				if !ok {
-					continue
-				}
-				name, _ := colMap["name"].(string)
+			for _, name := range cols {
 				if name != "" && !allowed[strings.ToUpper(name)] {
 					return nil, fmt.Errorf("column %q is not in supported_columns for %s()", name, lib.Name)
 				}
 			}
 		}
-		return selectCols, nil
+		return cols, nil
 	}
+
+	selectCols := extractAllColumnNames(ast)
 
 	// Match against declared columns
 	colMap := make(map[string]*libregistry.Column, len(lib.Columns))
@@ -602,6 +637,52 @@ func extractAllColumnNames(ast *duckast.AST) []string {
 	return names
 }
 
+// extractColumnsForLib walks the entire AST and collects column names
+// referenced against a specific lib call's table alias. This includes
+// SELECT, WHERE, JOIN ON, GROUP BY, ORDER BY, HAVING — the full set
+// of input columns the query expects from the lib, not just the output
+// projection.
+//
+// For qualified refs like u.user_id, the first part is matched against
+// the alias. For unqualified refs (e.g. user_id), they are included
+// only if singleSource is true (the query has exactly one lib source,
+// so all unqualified refs belong to it).
+func extractColumnsForLib(ast *duckast.AST, alias string, singleSource bool) []string {
+	if ast == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var names []string
+
+	ast.Walk(func(n *duckast.Node) bool {
+		if n.Class() != "COLUMN_REF" {
+			return true
+		}
+		parts := n.ColumnNames()
+		if len(parts) == 0 {
+			return true
+		}
+
+		var colName string
+		if len(parts) >= 2 {
+			// Qualified: alias.column — match on alias
+			if alias != "" && strings.EqualFold(parts[0], alias) {
+				colName = parts[1]
+			}
+		} else if singleSource {
+			// Unqualified column, single lib source — belongs to this lib
+			colName = parts[0]
+		}
+
+		if colName != "" && !seen[colName] {
+			seen[colName] = true
+			names = append(names, colName)
+		}
+		return true
+	})
+
+	return names
+}
 
 
 // buildLibCallKwargs builds the kwargs map for calling a Starlark lib function.
@@ -615,10 +696,30 @@ func buildLibCallKwargs(lib *libregistry.LibFunc, args []any, cols []string, typ
 		}
 	}
 
-	// Column selections
+	// Column selections — filtered to only columns belonging to this lib
 	if len(cols) > 0 {
 		if lib.DynamicColumns && typedCols != nil {
-			kwargs["columns"] = typedCols
+			// Filter typedCols to only include columns in cols
+			colSet := make(map[string]bool, len(cols))
+			for _, c := range cols {
+				colSet[strings.ToUpper(c)] = true
+			}
+			var filtered []any
+			for _, tc := range typedCols {
+				m, ok := tc.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := m["name"].(string)
+				if colSet[strings.ToUpper(name)] {
+					filtered = append(filtered, tc)
+				}
+			}
+			if len(filtered) > 0 {
+				kwargs["columns"] = filtered
+			} else {
+				kwargs["columns"] = toInterfaceSlice(cols)
+			}
 		} else {
 			kwargs["columns"] = toInterfaceSlice(cols)
 		}
@@ -703,6 +804,27 @@ func findMatchingParen(sql string, pos int) int {
 				}
 				i++
 			}
+		case ch == '$':
+			// Skip dollar-quoted string ($tag$...$tag$ or $$...$$)
+			tagEnd := i + 1
+			for tagEnd < len(sql) && sql[tagEnd] != '$' {
+				c := sql[tagEnd]
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+					break
+				}
+				tagEnd++
+			}
+			if tagEnd < len(sql) && sql[tagEnd] == '$' {
+				tag := sql[i : tagEnd+1]
+				i = tagEnd + 1
+				for i+len(tag)-1 < len(sql) {
+					if sql[i:i+len(tag)] == tag {
+						i += len(tag) - 1
+						break
+					}
+					i++
+				}
+			}
 		case ch == '-' && i+1 < len(sql) && sql[i+1] == '-':
 			// Skip line comment
 			i += 2
@@ -747,12 +869,14 @@ func rewriteLibCallsByString(execSQL string, calls []LibCall) string {
 
 	funcOccurrence := make(map[string]int)
 	for _, c := range calls {
+		// Always increment occurrence counter even for empty TempTable,
+		// so subsequent calls with data target the correct SQL occurrence.
+		targetOccurrence := funcOccurrence[c.FuncName]
+		funcOccurrence[c.FuncName]++
 		if c.TempTable == "" {
 			continue
 		}
 		pattern := strings.ToLower(c.FuncName) + "("
-		targetOccurrence := funcOccurrence[c.FuncName]
-		funcOccurrence[c.FuncName]++
 
 		searchFrom := 0
 		occurrence := 0

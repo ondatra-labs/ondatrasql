@@ -307,9 +307,52 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	astJSON, _ := r.getAST(model.SQL)
 
 	// Detect and execute lib function calls in FROM clause (e.g. FROM gam_fetch(...))
+	var libCalls []LibCall
+	var hasInferredStubs bool // true when 0-row lib stubs were created from AST/column inference
+	// Ensure all lib-call Badger stores are cleaned up on any exit path.
+	// Claims that were not explicitly acked are nacked (returned to queue).
+	// The acked flag is set in the success path after materialize.
+	var libClaimsAcked bool
+	// ackLibClaims acks all lib-call Badger claims and deletes ack records.
+	// Sets libClaimsAcked only if ALL acks succeed. If any ack fails,
+	// libClaimsAcked stays false and defer will nack all claims.
+	ackLibClaims := func() {
+		if libClaimsAcked {
+			return
+		}
+		allOK := true
+		for i := range libCalls {
+			sr := libCalls[i].ScriptResult
+			if sr == nil || len(sr.ClaimIDs) == 0 {
+				continue
+			}
+			if ackErr := sr.AckClaims(); ackErr != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("ack claims %s: %v", libCalls[i].FuncName, ackErr))
+				allOK = false
+				break
+			}
+			for _, claimID := range sr.ClaimIDs {
+				script.DeleteAck(r.sess, claimID)
+			}
+		}
+		if allOK {
+			libClaimsAcked = true
+		}
+	}
+	defer func() {
+		for i := range libCalls {
+			sr := libCalls[i].ScriptResult
+			if sr == nil {
+				continue
+			}
+			if !libClaimsAcked && len(sr.ClaimIDs) > 0 {
+				sr.NackClaims()
+			}
+			sr.Close()
+		}
+	}()
 	if r.libRegistry != nil && !r.libRegistry.Empty() {
 		parsedAST, parseErr := duckast.Parse(astJSON)
-		var libCalls []LibCall
 		if parseErr == nil {
 			libCalls = detectLibCalls(parsedAST, r.libRegistry)
 		}
@@ -350,6 +393,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				// tmpTable contains all rows (not CDC-filtered)
 				model.Source = libCalls[0].FuncName
 
+				singleLibSource := len(libCalls) == 1
 				argOccurrence := make(map[string]int) // track per-function occurrence for arg extraction
 				for i := range libCalls {
 					call := &libCalls[i]
@@ -362,7 +406,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						if evalErr != nil {
 							return nil, fmt.Errorf("lib %s args: %w", call.FuncName, evalErr)
 						}
-						cols, matchErr := matchColumns(parsedAST, call.Lib)
+						callAlias := ""
+						if call.ASTNode != nil {
+							callAlias = call.ASTNode.Alias()
+						}
+						cols, matchErr := matchColumns(parsedAST, call.Lib, callAlias, singleLibSource)
 						if matchErr != nil {
 							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, matchErr)
 						}
@@ -469,8 +517,79 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						return nil, fmt.Errorf("lib %s temp table: %w", call.FuncName, err)
 					}
 					call.TempTable = scriptResult.TempTable
+					call.ScriptResult = scriptResult
 					r.trace(result, "lib."+call.FuncName, stepStart, "ok")
 					stepStart = time.Now()
+				}
+
+				// For lib calls that returned 0 rows, create empty stub
+				// temp tables using the input-shape columns the query
+				// references for each specific lib call — not the output
+				// projection from SELECT. This ensures columns used in
+				// JOIN ON, WHERE, LATERAL, etc. are present in the stub.
+				for i := range libCalls {
+					call := &libCalls[i]
+					if call.TempTable != "" {
+						continue // already has data
+					}
+					stubName := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
+
+					// 1. Static-column libs: use declared columns
+					if len(call.Lib.Columns) > 0 {
+						var colDefs []string
+						for _, c := range call.Lib.Columns {
+							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.Name), c.Type))
+						}
+						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
+							return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
+						}
+						call.TempTable = stubName
+						hasInferredStubs = true
+						continue
+					}
+
+					// 2. Dynamic-column libs: if target exists, clone from
+					//    it (real types, no false schema evolution). Otherwise
+					//    extract referenced columns from the query and use
+					//    VARCHAR (the lib's raw output type).
+					if targetExists, _ := r.tableExistsCheck(model.Target); targetExists {
+						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", stubName, model.Target)); err != nil {
+							return nil, fmt.Errorf("create empty lib stub from target %s: %w", model.Target, err)
+						}
+						call.TempTable = stubName
+						hasInferredStubs = true
+						continue
+					}
+
+					alias := ""
+					if call.ASTNode != nil {
+						alias = call.ASTNode.Alias()
+					}
+					refCols := extractColumnsForLib(parsedAST, alias, singleLibSource)
+
+					if len(refCols) > 0 {
+						var colDefs []string
+						for _, name := range refCols {
+							colDefs = append(colDefs, fmt.Sprintf("%s VARCHAR", duckdb.QuoteIdentifier(name)))
+						}
+						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
+							return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
+						}
+						call.TempTable = stubName
+						hasInferredStubs = true
+						continue
+					}
+
+					// 3. No columns, no target — first run, skip.
+					ackLibClaims()
+					result.RowsAffected = 0
+					result.RunType = "skip"
+					result.Warnings = append(result.Warnings, "lib returned 0 rows on first run — target table not created (will be created when data arrives)")
+					result.Duration = time.Since(start)
+					return result, nil
 				}
 
 				// Rewrite SQL: replace lib function calls with temp table references
@@ -534,8 +653,23 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	var allTableNames []string
 	aggregationTables := lineage.GetCDCTables(colLineage)
 
+	// Collect lib-call temp table names so CDC can skip them.
+	libTempTables := make(map[string]bool)
+	for _, c := range libCalls {
+		if c.TempTable != "" {
+			libTempTables[c.TempTable] = true
+		}
+	}
+
 	for _, t := range tables {
 		allTableNames = append(allTableNames, t.Table)
+		// Skip lib-call rewrite temp tables — they are internal temp tables,
+		// not DuckLake tables, and cannot be used with table_changes().
+		// Uses the exact set of rewritten table names, not a prefix match,
+		// so legitimate tables like raw.tmp_orders are not affected.
+		if libTempTables[t.Table] {
+			continue
+		}
 		if t.IsFirstFrom {
 			// Primary table always gets CDC
 			cdcTables = append(cdcTables, t.Table)
@@ -611,13 +745,13 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				// Set search_path to include the source schema for table_changes()
 				// (which takes bare table name). Restore default search_path after.
 				r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
-					r.sess.CatalogAlias(), schema, r.sess.DefaultSearchPath()))
+					escapeSQL(r.sess.CatalogAlias()), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath())))
 				cnt, err := r.sess.TableHasChanges(table, snapshotID+1, currSnap)
 				if err != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("table_changes gate failed for %s: %v", t, err))
 					hasChanges = true
 					insertOnly = false
-					r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+					r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
 					break
 				}
 				if cnt > 0 {
@@ -627,7 +761,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						insertOnly = false
 					}
 				}
-				r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+				r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
 			}
 		}
 		r.trace(result, "cdc.table_changes_gate", stepStart, "ok")
@@ -750,6 +884,32 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				r.trace(result, "create_temp", stepStart, "error")
 				return nil, fmt.Errorf("create temp table: %w", retryErr)
 			}
+		} else if hasInferredStubs {
+			// Inferred VARCHAR stubs let the SQL rewrite work, but the
+			// full SQL may fail on LATERAL unnest, alias-colliding casts,
+			// etc. Use DESCRIBE to get the correct output schema from the
+			// rewritten SQL, then create an empty temp table with that
+			// schema. DESCRIBE plans but does not execute the query.
+			r.trace(result, "create_temp", stepStart, "retry_describe")
+			descRows, descErr := r.sess.QueryRows(fmt.Sprintf("SELECT column_name || ' ' || column_type FROM (DESCRIBE %s)", execSQL))
+			if descErr == nil && len(descRows) > 0 {
+				r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+				descCreateSQL := fmt.Sprintf("CREATE TEMP TABLE %s (%s)", tmpTable, strings.Join(descRows, ", "))
+				if createErr := r.sess.Exec(descCreateSQL); createErr != nil {
+					return nil, fmt.Errorf("create temp table from DESCRIBE: %w", createErr)
+				}
+			} else {
+				// DESCRIBE also failed — fall back to target clone
+				targetExists, _ := r.tableExistsCheck(model.Target)
+				if !targetExists {
+					return nil, fmt.Errorf("create temp table: %w", err)
+				}
+				r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+				cloneSQL := fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", tmpTable, model.Target)
+				if cloneErr := r.sess.Exec(cloneSQL); cloneErr != nil {
+					return nil, fmt.Errorf("create temp table (fallback clone): %w", cloneErr)
+				}
+			}
 		} else {
 			r.trace(result, "create_temp", stepStart, "error")
 			return nil, fmt.Errorf("create temp table: %w", err)
@@ -795,7 +955,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		r.trace(result, "constraints", stepStart, "ok")
 	}
 
-	// If constraints failed, abort
+	// If constraints failed, abort (defer nacks claims + closes stores)
 	if len(result.Errors) > 0 {
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
@@ -816,9 +976,27 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		for _, e := range auditParseErrors {
 			result.Errors = append(result.Errors, e.Error())
 		}
+		// defer nacks claims + closes stores
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
 		return result, fmt.Errorf("audit parse errors")
+	}
+
+	// Build ack SQL for lib-call Badger claims — included in the materialize
+	// transaction so the ack record is atomic with the data commit (same as script.go).
+	var libExtraPreSQL []string
+	for i := range libCalls {
+		sr := libCalls[i].ScriptResult
+		if sr == nil || len(sr.ClaimIDs) == 0 {
+			continue
+		}
+		if ackErr := script.EnsureAckTable(r.sess); ackErr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("ack table: %v", ackErr))
+		} else {
+			for _, claimID := range sr.ClaimIDs {
+				libExtraPreSQL = append(libExtraPreSQL, script.AckSQL(claimID, model.Target, sr.RowCount))
+			}
+		}
 	}
 
 	// Capture pre-commit snapshot for sink delta (table_changes needs the range).
@@ -835,7 +1013,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Execute based on kind (includes audits + commit metadata in same transaction)
 	stepStart = time.Now()
-	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, sqlHash, result.RunType, result, start)
+	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, sqlHash, result.RunType, result, start, libExtraPreSQL...)
 	if err != nil {
 		r.trace(result, "materialize", stepStart, "error")
 		// A failed audit raises error() inside the BEGIN/COMMIT, which
@@ -846,6 +1024,29 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// error from the ROLLBACK itself (the session might already be
 		// clean if the error came from a non-transactional path).
 		r.sess.Exec("ROLLBACK")
+
+		// Lib-call Badger claim handling on materialize failure
+		// (same logic as script.go: audit fail → ack, other fail → nack)
+		if strings.Contains(err.Error(), "audit failed") {
+			// Audit failure: ack claims (data was valid, just reverted).
+			// Only set flag if all acks succeed — otherwise defer nacks.
+			allAcked := true
+			for i := range libCalls {
+				sr := libCalls[i].ScriptResult
+				if sr != nil && len(sr.ClaimIDs) > 0 {
+					if ackErr := sr.AckClaims(); ackErr != nil {
+						result.Warnings = append(result.Warnings, fmt.Sprintf("ack after audit failure: %v", ackErr))
+						allAcked = false
+						break
+					}
+				}
+			}
+			if allAcked {
+				libClaimsAcked = true
+			}
+		}
+		// Other failures: defer will nack (libClaimsAcked stays false)
+
 		result.Errors = append(result.Errors, err.Error())
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
@@ -853,6 +1054,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	}
 	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
+
+	// Success — ack lib-call Badger claims and delete ack records.
+	// Same lifecycle as script.go. Stores are closed by defer.
+	ackLibClaims()
 
 	// Run warnings (soft validations, log only)
 	stepStart = time.Now()
@@ -876,14 +1081,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		schema, _ := splitSchemaTable(model.Target)
 		if schema != "" {
 			r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
-				r.sess.CatalogAlias(), schema, r.sess.DefaultSearchPath()))
+				escapeSQL(r.sess.CatalogAlias()), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath())))
 		}
 
 		stepStart = time.Now()
 		sinkEvents, deltaErr := r.createSinkDelta(model, tmpTable, preCommitSnapshot, postCommitSnapshot)
 
 		if schema != "" {
-			r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+			r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
 		}
 
 		if deltaErr != nil {
@@ -1024,8 +1229,8 @@ func (r *Runner) runWarnings(model *parser.Model, table string, result *Result) 
 	// Set search_path so delta macros can resolve table_changes() + memory macros.
 	parts := strings.SplitN(model.Target, ".", 2)
 	if len(parts) == 2 {
-		r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'", r.sess.CatalogAlias(), parts[0], r.sess.DefaultSearchPath()))
-		defer r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", r.sess.DefaultSearchPath()))
+		r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'", escapeSQL(r.sess.CatalogAlias()), escapeSQL(parts[0]), escapeSQL(r.sess.DefaultSearchPath())))
+		defer r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
 	}
 
 	for _, warning := range model.Warnings {
@@ -1197,13 +1402,14 @@ func splitArgsRespectingNesting(s string) []string {
 
 
 func sanitizeTableName(target string) string {
-	// Replace dots with underscores
+	// Replace non-alphanumeric characters with underscores.
+	// Temp table names must be safe for unquoted SQL identifiers.
 	result := ""
 	for _, c := range target {
-		if c == '.' {
-			result += "_"
-		} else {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
 			result += string(c)
+		} else {
+			result += "_"
 		}
 	}
 	return result

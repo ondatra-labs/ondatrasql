@@ -9,6 +9,7 @@ dist/
 .vscode/
 .obsidian/
 .claude/
+.codex/
 
 # Temp
 *.log
@@ -20,8 +21,9 @@ cmd_cov.out
 # rapid testing failure dumps
 internal/*/testdata/rapid/
 
-# Docs (internal)
-docs/
+
+# Work
+work/
 
 # Runtime
 .sandbox/

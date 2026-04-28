@@ -675,3 +675,203 @@ func TestNormalizeType_Timestamp(t *testing.T) {
 		t.Errorf("TIMESTAMP_NS: precision = %v, want ns", result["precision"])
 	}
 }
+
+// --- Bugcheck regression tests ---
+
+// TestRewriteLibCallsByString_OccurrenceSkipEmpty verifies that when a lib-call
+// has empty TempTable (0 rows), the occurrence counter is still incremented
+// so subsequent calls rewrite the correct SQL occurrence.
+func TestRewriteLibCallsByString_OccurrenceSkipEmpty(t *testing.T) {
+	t.Parallel()
+
+	// Two calls to same function: first has no data, second has data.
+	// The second call should rewrite the SECOND occurrence, not the first.
+	sql := "SELECT * FROM myapi('a') UNION ALL SELECT * FROM myapi('b')"
+	calls := []LibCall{
+		{FuncName: "myapi", CallIndex: 0, TempTable: ""},           // empty — skip rewrite
+		{FuncName: "myapi", CallIndex: 1, TempTable: "tmp_myapi_1"}, // has data
+	}
+
+	result := rewriteLibCallsByString(sql, calls)
+
+	// First occurrence should be untouched, second should be rewritten
+	if !strings.Contains(result, "myapi('a')") {
+		t.Errorf("first occurrence should be untouched, got: %s", result)
+	}
+	if !strings.Contains(result, "tmp_myapi_1") {
+		t.Errorf("second occurrence should be rewritten to tmp_myapi_1, got: %s", result)
+	}
+	if strings.Count(result, "myapi(") != 1 {
+		t.Errorf("expected exactly one unrewritten myapi( call, got: %s", result)
+	}
+}
+
+// TestStripStringsAndComments_DollarQuoted verifies that dollar-quoted strings
+// ($$...$$) are stripped, preventing false positive lib-call detection.
+func TestStripStringsAndComments_DollarQuoted(t *testing.T) {
+	t.Parallel()
+
+	sql := "SELECT * FROM $$myapi('hello')$$ AS x"
+	stripped := stripStringsAndComments(sql)
+
+	if strings.Contains(stripped, "myapi") {
+		t.Errorf("dollar-quoted content should be stripped, got: %s", stripped)
+	}
+	// The SELECT and AS x should survive
+	if !strings.Contains(stripped, "SELECT") {
+		t.Errorf("non-quoted SQL should survive, got: %s", stripped)
+	}
+}
+
+// TestSanitizeTableName_SpecialChars verifies that sanitizeTableName replaces
+// all non-alphanumeric characters (not just dots) with underscores.
+func TestSanitizeTableName_SpecialChars(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"raw.orders", "raw_orders"},
+		{"schema.table", "schema_table"},
+		{"has spaces", "has_spaces"},
+		{"semi;colon", "semi_colon"},
+		{"quote'inject", "quote_inject"},
+		{"normal_name", "normal_name"},
+		{"UPPER.Case", "UPPER_Case"},
+	}
+	for _, tt := range tests {
+		got := sanitizeTableName(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeTableName(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestLoadExtension_InvalidName verifies that extension names with SQL-unsafe
+// characters are rejected before interpolation into INSTALL/LOAD statements.
+func TestLoadExtension_InvalidName(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{}
+
+	// These should fail validation BEFORE reaching the session
+	invalidTests := []string{
+		"bad;name",
+		"bad'name",
+		"bad name",
+		"ext FROM bad;repo",
+		"ext FROM --drop",
+	}
+	for _, ext := range invalidTests {
+		err := r.loadExtension(ext)
+		if err == nil {
+			t.Errorf("loadExtension(%q): expected validation error, got nil", ext)
+		} else if !strings.Contains(err.Error(), "invalid extension") {
+			t.Errorf("loadExtension(%q): expected 'invalid extension' error, got: %v", ext, err)
+		}
+	}
+}
+
+// TestLoadExtension_BlockCommentInRepo verifies that /* block comment markers
+// in extension repo names are rejected.
+func TestLoadExtension_BlockCommentInRepo(t *testing.T) {
+	t.Parallel()
+	r := &Runner{}
+
+	invalidRepos := []string{
+		"ext FROM community /* ignored */ core_nightly",
+		"ext FROM /* drop */",
+		"ext FROM 'https://repo' LOAD unsafe",
+		"ext FROM 'https://repo' ; DROP TABLE x",
+	}
+	for _, ext := range invalidRepos {
+		err := r.loadExtension(ext)
+		if err == nil {
+			t.Errorf("loadExtension(%q): expected validation error for block comment, got nil", ext)
+		}
+	}
+}
+
+// TestLoadExtension_URLRepoAllowed verifies that URL-based extension repos
+// (containing :, /, quotes) are NOT rejected by the validation.
+func TestLoadExtension_URLRepoAllowed(t *testing.T) {
+	t.Parallel()
+	r := &Runner{}
+
+	// These should pass validation (will panic on nil session after validation).
+	// We recover the panic to verify validation itself passed.
+	validRepos := []string{
+		"ext FROM 'https://example.com/repo'",
+		"ext FROM community",
+		"ext FROM core_nightly",
+	}
+	for _, ext := range validRepos {
+		func() {
+			defer func() { recover() }() // recover nil session panic
+			err := r.loadExtension(ext)
+			if err != nil && strings.Contains(err.Error(), "invalid extension") {
+				t.Errorf("loadExtension(%q): URL repo should pass validation, got: %v", ext, err)
+			}
+		}()
+	}
+}
+
+// TestStripStringsAndComments_UnterminatedDollarQuote verifies that an
+// unterminated $$ string blanks all remaining characters including the last byte.
+func TestStripStringsAndComments_UnterminatedDollarQuote(t *testing.T) {
+	t.Parallel()
+
+	// Unterminated: $$ opens but never closes
+	sql := "SELECT $$myapi('x')"
+	stripped := stripStringsAndComments(sql)
+
+	if strings.Contains(stripped, "myapi") {
+		t.Errorf("unterminated dollar-quoted content should be stripped, got: %s", stripped)
+	}
+	// Last character should also be blanked
+	if stripped[len(stripped)-1] != ' ' {
+		t.Errorf("last character should be blanked in unterminated $$, got: %q", stripped)
+	}
+}
+
+// TestStripStringsAndComments_TaggedDollarQuote verifies that tagged dollar-quoted
+// strings ($tag$...$tag$) are stripped correctly.
+func TestStripStringsAndComments_TaggedDollarQuote(t *testing.T) {
+	t.Parallel()
+
+	sql := "SELECT $foo$myapi('hello')$foo$ AS x"
+	stripped := stripStringsAndComments(sql)
+
+	if strings.Contains(stripped, "myapi") {
+		t.Errorf("tagged dollar-quoted content should be stripped, got: %s", stripped)
+	}
+	if !strings.Contains(stripped, "SELECT") || !strings.Contains(stripped, "AS x") {
+		t.Errorf("non-quoted SQL should survive, got: %s", stripped)
+	}
+}
+
+// TestLoadExtension_NewlineInRepo verifies that newlines in extension repo
+// are rejected (prevents newline-based SQL injection).
+func TestLoadExtension_NewlineInRepo(t *testing.T) {
+	t.Parallel()
+	r := &Runner{}
+
+	invalidRepos := []string{
+		"ext FROM community\nLOAD 'malicious.so'",
+		"ext FROM core\r\nDROP TABLE x",
+	}
+	for _, ext := range invalidRepos {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("loadExtension(%q): panicked instead of returning validation error: %v", ext, r)
+				}
+			}()
+			err := r.loadExtension(ext)
+			if err == nil {
+				t.Errorf("loadExtension(%q): expected validation error for newline, got nil", ext)
+			}
+		}()
+	}
+}

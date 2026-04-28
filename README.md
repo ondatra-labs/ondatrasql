@@ -50,7 +50,6 @@ API = {
     "base_url": "https://restcountries.com",
     "fetch": {
         "args": [],
-        "dynamic_columns": True,
     },
 }
 
@@ -123,7 +122,7 @@ SELECT * FROM my_api('users')
 ```python
 # lib/my_api.star — fetch function called by the SQL model
 API = {"base_url": "https://api.example.com", "auth": {"env": "API_KEY"},
-       "fetch": {"args": ["resource"], "page_size": 100, "dynamic_columns": True}}
+       "fetch": {"args": ["resource"], "page_size": 100}}
 
 def fetch(resource, page):
     resp = http.get("/v1/" + resource, params={"limit": page.size, "cursor": page.cursor})
@@ -140,7 +139,7 @@ All models execute in the same pipeline and share the same dependency graph.
 |---|---|
 | SQL transformation | SQL models with automatic materialization and CDC |
 | API ingestion | Built-in HTTP, OAuth, pagination via Starlark |
-| Event collection | Embedded HTTP endpoint with durable buffering |
+| Event collection | Embedded HTTP endpoint with in-memory and durable buffering |
 | Outbound sync | Push to APIs via @sink with raw DuckLake change types |
 | Validation | 30 constraint macros, 18 audit macros, 14 warning macros |
 | Schema evolution | Automatic via ALTER TABLE (metadata-only in DuckLake) |

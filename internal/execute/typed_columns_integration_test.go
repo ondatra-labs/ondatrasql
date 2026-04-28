@@ -15,7 +15,6 @@ import (
 )
 
 func TestExtractTypedSelectColumns_CastTypes(t *testing.T) {
-	t.Parallel()
 	p := testutil.NewProject(t)
 
 	astJSON, err := lineage.GetAST(p.Sess, "SELECT total::DECIMAL AS total, qty::INTEGER AS qty, name FROM t")
@@ -48,7 +47,6 @@ func TestExtractTypedSelectColumns_CastTypes(t *testing.T) {
 }
 
 func TestExtractTypedSelectColumns_AliasOverrides(t *testing.T) {
-	t.Parallel()
 	p := testutil.NewProject(t)
 
 	astJSON, err := lineage.GetAST(p.Sess, "SELECT price::DOUBLE AS unit_price FROM t")
@@ -70,7 +68,6 @@ func TestExtractTypedSelectColumns_AliasOverrides(t *testing.T) {
 }
 
 func TestExtractTypedSelectColumns_NoCast(t *testing.T) {
-	t.Parallel()
 	p := testutil.NewProject(t)
 
 	astJSON, _ := lineage.GetAST(p.Sess, "SELECT name, email FROM t")

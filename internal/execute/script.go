@@ -36,6 +36,28 @@ func (r *Runner) loadExtension(ext string) error {
 		name = strings.ToLower(trimmed)
 	}
 
+	// Validate extension name — only alphanumeric + underscore allowed
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return fmt.Errorf("invalid extension name %q: only a-z, 0-9, _ allowed", name)
+		}
+	}
+	// Validate repo — reject SQL injection characters.
+	// Repo can be a short name (community) or a quoted URL ('https://...').
+	if repo != "" {
+		if strings.ContainsAny(repo, ";") || strings.Contains(repo, "--") || strings.Contains(repo, "/*") {
+			return fmt.Errorf("invalid extension repo %q: contains SQL-unsafe characters", repo)
+		}
+		// Reject multi-token repos unless it's a single quoted string
+		if strings.ContainsAny(repo, " \t") {
+			// Must be exactly one quoted token: starts with ', ends with ', no internal quotes
+			trimmedRepo := strings.TrimSpace(repo)
+			if !(strings.HasPrefix(trimmedRepo, "'") && strings.HasSuffix(trimmedRepo, "'") && strings.Count(trimmedRepo, "'") == 2) {
+				return fmt.Errorf("invalid extension repo %q: must be a single token or a single-quoted string", repo)
+			}
+		}
+	}
+
 	// Build INSTALL statement
 	var installSQL string
 	if repo != "" {

@@ -5,6 +5,8 @@
 package execute
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -256,5 +258,40 @@ func TestValidate_TableMaxConcurrentAllowed(t *testing.T) {
 
 	if err := ValidateModelSinkCompat(models, reg); err != nil {
 		t.Errorf("table + max_concurrent > 1 should be allowed, got: %v", err)
+	}
+}
+
+// TestValidate_SCD2SinkRejected verifies that @sink is rejected for scd2 kind
+// at the runtime validation layer (not just parser).
+// Docs claim: "All kinds except events and scd2 support @sink."
+func TestValidate_SCD2SinkRejected(t *testing.T) {
+	t.Parallel()
+	reg := makeReg(map[string]*libregistry.LibFunc{"test_push": syncSink("sync")})
+	models := []*parser.Model{{Target: "sync.history", Kind: "scd2", Sink: "test_push", UniqueKey: "id"}}
+
+	err := ValidateModelSinkCompat(models, reg)
+	if err == nil {
+		t.Fatal("expected scd2 + @sink to be rejected")
+	}
+	if !strings.Contains(err.Error(), "scd2") {
+		t.Errorf("expected error mentioning scd2, got: %v", err)
+	}
+}
+
+// TestValidate_EventsSinkRejectedAtParser verifies that @sink is rejected for
+// events kind at the parser level (not at runtime validation).
+// The parser returns an error when @sink is combined with @kind: events.
+func TestValidate_EventsSinkRejectedAtParser(t *testing.T) {
+	t.Parallel()
+	// Events + @sink is rejected by the parser, not ValidateModelSinkCompat.
+	// Verify by trying to parse a model with both directives.
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "models", "raw"), 0755)
+	modelPath := filepath.Join(dir, "models", "raw", "clicks.sql")
+	os.WriteFile(modelPath, []byte("-- @kind: events\n-- @sink: test_push\n\nevent_name VARCHAR\n"), 0644)
+
+	_, err := parser.ParseModel(modelPath, dir)
+	if err == nil {
+		t.Fatal("expected parser to reject events + @sink")
 	}
 }
