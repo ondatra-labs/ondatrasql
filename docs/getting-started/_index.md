@@ -57,10 +57,11 @@ ondatrasql edit raw.countries
 ```sql
 -- @kind: table
 
-SELECT * FROM rest_countries('europe')
+SELECT name::VARCHAR AS name, capital::VARCHAR AS capital, population::BIGINT AS population
+FROM rest_countries('europe')
 ```
 
-The file path determines the target table: `raw.countries`.
+The file path determines the target table: `raw.countries`. Lib-backed models cast every projected column explicitly — see [SQL schema contract](/reference/lib-functions/fetch-contract/#sql-schema-contract).
 
 ## 4. Transform with SQL
 

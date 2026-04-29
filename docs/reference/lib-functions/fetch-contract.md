@@ -19,9 +19,9 @@ API = {"fetch": {"args": ["resource"]}}
 ```
 
 ```sql
-SELECT * FROM my_api('users')
---                    ↑
---                 resource
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM my_api('users')
+--                                                          ↑
+--                                                       resource
 ```
 
 Declare only the parameters your blueprint uses. The runtime automatically filters kwargs to match your function signature — undeclared kwargs are silently dropped, not errors.
@@ -59,24 +59,24 @@ columns = [
 ]
 ```
 
-SQL casts control the types:
+SQL casts control the types. Every column from a lib must be cast (see [SQL schema contract](#sql-schema-contract) below):
 
-| SQL | `type` | `json_schema_type` | Extra fields |
-|---|---|---|---|
-| `name` (no cast) | `string` | `string` | — |
-| `total::DECIMAL` | `decimal` | `number` | `precision`, `scale` |
-| `total::DECIMAL(10,2)` | `decimal` | `number` | `precision: "10"`, `scale: "2"` |
-| `count::INTEGER` | `integer` | `integer` | — |
-| `rate::DOUBLE` | `float` | `number` | — |
-| `active::BOOLEAN` | `boolean` | `boolean` | — |
-| `date` (DATE column) | `date` | `string` | — |
-| `ts::TIMESTAMP` | `timestamp` | `string` | `tz: false`, `precision: "us"` |
-| `ts::TIMESTAMPTZ` | `timestamp` | `string` | `tz: true`, `precision: "us"` |
-| `items::JSON` | `json` | `array` | — |
-| `id::UUID` | `uuid` | `string` | — |
-| `tags::VARCHAR[]` | `list` | `array` | `element: {"type": "string"}` |
-| `person::STRUCT(...)` | `struct` | `object` | `fields: [...]` (recursive) |
-| `m::MAP(VARCHAR, INT)` | `map` | `object` | `key: {...}`, `value: {...}` |
+| SQL                    | `type`      | `json_schema_type` | Extra fields                    |
+| ---------------------- | ----------- | ------------------ | ------------------------------- |
+| `name::VARCHAR`        | `string`    | `string`           | —                               |
+| `total::DECIMAL`       | `decimal`   | `number`           | `precision`, `scale`            |
+| `total::DECIMAL(10,2)` | `decimal`   | `number`           | `precision: "10"`, `scale: "2"` |
+| `count::INTEGER`       | `integer`   | `integer`          | —                               |
+| `rate::DOUBLE`         | `float`     | `number`           | —                               |
+| `active::BOOLEAN`      | `boolean`   | `boolean`          | —                               |
+| `date::DATE`           | `date`      | `string`           | —                               |
+| `ts::TIMESTAMP`        | `timestamp` | `string`           | `tz: false`, `precision: "us"`  |
+| `ts::TIMESTAMPTZ`      | `timestamp` | `string`           | `tz: true`, `precision: "us"`   |
+| `items::JSON`          | `json`      | `array`            | —                               |
+| `id::UUID`             | `uuid`      | `string`           | —                               |
+| `tags::VARCHAR[]`      | `list`      | `array`            | `element: {"type": "string"}`   |
+| `person::STRUCT(...)`  | `struct`    | `object`           | `fields: [...]` (recursive)     |
+| `m::MAP(VARCHAR, INT)` | `map`       | `object`           | `key: {...}`, `value: {...}`    |
 
 Blueprints choose which field to use:
 
@@ -92,6 +92,57 @@ Read-only struct:
 |---|---|---|
 | `page.cursor` | any | `None` on first page. On subsequent pages, whatever you returned as `next`. |
 | `page.size` | int | From `API.fetch.page_size`. Constant across all pages. |
+
+## SQL schema contract
+
+For lib-backed models, SQL is the complete schema source. Every output column must be selected explicitly, cast explicitly to its final DuckDB type, and named explicitly. Schema inference from returned rows, from existing targets, or from `SELECT *` is not part of the contract.
+
+```sql
+SELECT
+    id::BIGINT          AS id,
+    name::VARCHAR       AS name,
+    total::DECIMAL(10,2) AS total,
+    items::JSON         AS items,
+    created_at::TIMESTAMPTZ AS created_at
+FROM my_lib('items')
+```
+
+The rules apply to every projection in every SELECT in the model — top-level, CTEs, set-op branches (`UNION`, `INTERSECT`, `EXCEPT`), and subqueries:
+
+- `SELECT *` is rejected.
+- The outermost node of every projection must be a `CAST`. Bare column refs, computed expressions, function calls, and literals are all rejected unless wrapped in a cast.
+- Every projection must carry an explicit alias (`AS name`). Implicit names from underlying column refs do not count.
+- Two projections in the same SELECT cannot share the same output name.
+
+The rule applies uniformly to every output column — including columns from regular tables joined with the lib. Columns referenced only in `WHERE`, `JOIN ON`, or `GROUP BY` (not projected) are unaffected; they are not in the output schema.
+
+Valid:
+
+```sql
+SELECT
+    u.name::VARCHAR AS name,
+    s.score::BIGINT AS score
+FROM reg.users u
+JOIN my_lib('scores') s ON u.user_id = s.user_id
+```
+
+Invalid:
+
+```sql
+SELECT * FROM my_lib('items')
+SELECT id, name, total FROM my_lib('items')
+SELECT id::BIGINT AS id, price * qty AS total FROM my_lib('items')
+SELECT id::BIGINT, name::VARCHAR FROM my_lib('items')
+```
+
+The fix for the third row is `(price * qty)::DECIMAL(10,2) AS total`. The fix for the fourth row is `AS id` and `AS name`.
+
+Validation runs at the start of every `ondatrasql run` / `ondatrasql sandbox`. A violation aborts the run before any `fetch()` is called, naming the offending projection.
+
+Two consequences worth knowing:
+
+- **Empty fetches** produce a typed target from the SQL alone — the runtime never has to guess types on the first run or after a schema change.
+- **Schema evolution** is detected from the SQL diff, not from runtime data inspection. Add a column to the SELECT and the next run alters the target.
 
 ## Return format
 
@@ -214,7 +265,10 @@ Blueprints return raw API data. SQL transforms it in a downstream model. This ke
 -- @kind: append
 -- @incremental: date
 
-SELECT series, date, value
+SELECT
+    series::VARCHAR AS series,
+    date::DATE AS date,
+    value::DECIMAL(18,6) AS value
 FROM my_api('SERIES_A,SERIES_B')
 ```
 

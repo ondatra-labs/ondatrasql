@@ -121,7 +121,7 @@ API = {"fetch": {"args": ["resource", "options"]}}
 ```
 
 ```sql
-SELECT * FROM my_api('users', '{"filter": "active"}')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM my_api('users', '{"filter": "active"}')
 ```
 
 Args are positional strings. For structured configuration, pass JSON and decode in Starlark:

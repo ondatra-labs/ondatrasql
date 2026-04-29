@@ -83,31 +83,6 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 	return result == "true", nil
 }
 
-// fetchTargetColumnTypes returns column_name → DuckDB type for the target
-// table, used as fallback when SQL-shape stub building has no explicit cast
-// for a column and an established target type would be more accurate than
-// VARCHAR. The caller should already have verified the target exists.
-func (r *Runner) fetchTargetColumnTypes(target string) (map[string]string, error) {
-	parts := strings.Split(target, ".")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("target must be schema.table, got %q", target)
-	}
-	query := fmt.Sprintf(
-		"SELECT column_name, data_type FROM information_schema.columns "+
-			"WHERE table_schema = '%s' AND table_name = '%s'",
-		escapeSQL(parts[0]), escapeSQL(parts[1]),
-	)
-	rows, err := r.sess.QueryRowsMap(query)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(rows))
-	for _, row := range rows {
-		out[row["column_name"]] = row["data_type"]
-	}
-	return out, nil
-}
-
 // materialize creates the target table from the temp table.
 // It runs the CREATE/INSERT, audits, and commit metadata in a single
 // transaction. If schemaChange is provided, schema evolution (ALTER

@@ -97,11 +97,12 @@ Use the two-model pattern — raw fetches, staging transforms:
 -- @kind: append
 -- @incremental: updated_at
 
-SELECT id, name, email, updated_at, metadata::JSON AS metadata
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email,
+       updated_at::TIMESTAMP AS updated_at, metadata::JSON AS metadata
 FROM my_api('users')
 ```
 
-SQL casts flow to the blueprint as [normalized types](/reference/lib-functions/fetch-contract/#typed-columns): `::JSON` becomes `"json"`, `::DECIMAL` becomes `"decimal"`. Columns without casts default to `"string"`.
+Every column from a lib must be cast — see [SQL schema contract](/reference/lib-functions/fetch-contract/#sql-schema-contract). The casts also flow to the blueprint as [normalized types](/reference/lib-functions/fetch-contract/#typed-columns): `::JSON` becomes `"json"`, `::DECIMAL` becomes `"decimal"`.
 
 **Staging model** — SQL transforms, casts types, expands JSON:
 
@@ -196,7 +197,8 @@ GROUP BY id, name, email
 ```sql
 -- @kind: append
 -- @incremental: updated_at
-SELECT * FROM my_api('events')
+SELECT id::BIGINT AS id, kind::VARCHAR AS kind, updated_at::TIMESTAMP AS updated_at
+FROM my_api('events')
 ```
 
 ```python

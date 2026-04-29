@@ -685,6 +685,128 @@ func extractColumnsForLib(ast *duckast.AST, alias string, singleSource bool) []s
 }
 
 
+// validateStrictLibSchema enforces the strict-schema contract on lib-backed
+// models: SQL is the complete schema source. Every output column must be
+// explicitly selected, explicitly cast to its final DuckDB type, and
+// explicitly aliased. The runtime never infers the output schema from data,
+// from the target table, or from regular-table catalog metadata.
+//
+// Rules — applied to every projection in every SELECT in the model
+// (top-level, CTEs, set-op branches, subqueries):
+//   - SELECT * is rejected.
+//   - Outermost node must be CAST. Bare COLUMN_REF, computed expressions,
+//     literals, function calls — all rejected unless wrapped in a cast.
+//   - The projection must carry an explicit alias (`AS name`). Implicit
+//     names from underlying COLUMN_REFs do not count.
+//   - Two projections in the same SELECT cannot share the same output name.
+//
+// Walking every SELECT_NODE (not only the top-level one) is what closes
+// the bypass via CTE / UNION — without that, an inner `SELECT *` could
+// hide behind a properly-typed outer projection.
+//
+// The rules apply uniformly: a column from a regular table joined with a
+// lib still needs a cast and alias. The contract is the same whether the
+// lib declares its columns statically or dynamically — for any lib-backed
+// model, SQL is the schema authority.
+//
+// Returns nil only when there are no lib calls in the model (pure SQL
+// transforms are not subject to this contract).
+func validateStrictLibSchema(ast *duckast.AST, libCalls []LibCall) error {
+	if ast == nil || len(libCalls) == 0 {
+		return nil
+	}
+
+	var validationErr error
+	ast.Walk(func(n *duckast.Node) bool {
+		if validationErr != nil {
+			return false // stop walking
+		}
+		if !n.IsSelectNode() {
+			return true
+		}
+		if err := validateSelectProjections(n); err != nil {
+			validationErr = err
+			return false
+		}
+		return true
+	})
+	return validationErr
+}
+
+// validateSelectProjections applies the strict-schema rules to a single
+// SELECT_NODE's select list. Used by validateStrictLibSchema for every
+// SELECT_NODE in the AST (including those inside CTEs, set-op branches,
+// and subqueries).
+func validateSelectProjections(selectNode *duckast.Node) error {
+	seenNames := make(map[string]bool)
+	for _, item := range selectNode.SelectList() {
+		// SELECT * is unconditionally rejected.
+		if item.Class() == "STAR" {
+			return fmt.Errorf(
+				"SELECT * is not allowed in a lib-backed model; project each output column with an explicit cast and alias (e.g. col::TYPE AS col)",
+			)
+		}
+
+		// Outermost node must be CAST.
+		if item.Class() != "CAST" {
+			name := projectionDisplayName(item)
+			return fmt.Errorf(
+				"projection %q is not cast; lib-backed models require every output column to be wrapped in an explicit cast (e.g. (%s)::TYPE AS alias)",
+				name, name,
+			)
+		}
+
+		// CAST must carry an explicit alias.
+		alias := item.Alias()
+		if alias == "" {
+			name := projectionDisplayName(item)
+			return fmt.Errorf(
+				"cast projection %q has no explicit alias; lib-backed models require every output column to be aliased (e.g. %s::TYPE AS alias)",
+				name, name,
+			)
+		}
+
+		// Duplicate alias check — output schema must be unambiguous.
+		key := strings.ToLower(alias)
+		if seenNames[key] {
+			return fmt.Errorf(
+				"duplicate output column name %q; each projection must produce a uniquely-named column",
+				alias,
+			)
+		}
+		seenNames[key] = true
+	}
+	return nil
+}
+
+// projectionDisplayName returns a short string suitable for naming a
+// projection in an error message. CAST → underlying column / "<expression>";
+// COLUMN_REF → the column name; everything else → "<expression>".
+func projectionDisplayName(item *duckast.Node) string {
+	if item == nil {
+		return "<expression>"
+	}
+	switch item.Class() {
+	case "CAST":
+		child := item.Field("child")
+		if child != nil && child.Class() == "COLUMN_REF" {
+			names := child.ColumnNames()
+			if len(names) > 0 {
+				return names[len(names)-1]
+			}
+		}
+		return "<expression>"
+	case "COLUMN_REF":
+		names := item.ColumnNames()
+		if len(names) > 0 {
+			return names[len(names)-1]
+		}
+		return "<expression>"
+	default:
+		return "<expression>"
+	}
+}
+
 // allLibsReturnedNoChange reports whether every lib call in this run
 // returned 0 rows AND declared `empty_result == "no_change"` (the default).
 // Used by tracked materialize to decide whether to preserve the target
@@ -907,20 +1029,30 @@ func sqlTypeFromCastNode(castType *duckast.Node) string {
 		return "VARCHAR"
 	}
 
-	// LIST<element>, STRUCT, MAP — best-effort reconstruction. For stub
-	// purposes the outer kind is what matters; element-type fidelity is
-	// not required for correct CREATE TABLE.
+	// Composite + parameterized types — DuckDB needs the full shape
+	// (`STRUCT(a INT, b VARCHAR)`, `UNION(...)`, `ENUM(...)`) which we
+	// can't reconstruct from the stub-side AST. The stub holds 0 rows;
+	// VARCHAR is the safest column type that won't fail CREATE and won't
+	// constrain anything (the real data flows through the rewrite path,
+	// not the stub).
 	switch id {
 	case "LIST", "ARRAY":
 		return "VARCHAR[]" // simplification: stub doesn't need true element type
 	case "STRUCT":
-		return "VARCHAR" // stub doesn't construct; the rewrite path produces real data
+		return "VARCHAR"
 	case "MAP":
+		return "VARCHAR"
+	case "UNION":
+		return "VARCHAR"
+	case "ENUM":
 		return "VARCHAR"
 	}
 
-	// Most types in DuckDB use the id verbatim as DDL: VARCHAR, BIGINT,
-	// INTEGER, DOUBLE, BOOLEAN, DATE, TIMESTAMP, JSON, BLOB, UUID, etc.
+	// Most DuckDB types accept their id verbatim as DDL: numeric (TINYINT,
+	// SMALLINT, INTEGER, BIGINT, HUGEINT, UTINYINT..UHUGEINT, FLOAT, DOUBLE,
+	// BIGNUM, VARINT), string (VARCHAR), boolean (BOOLEAN), temporal (DATE,
+	// TIME, TIMETZ, TIMESTAMP, TIMESTAMPTZ, INTERVAL), binary (BLOB, BIT,
+	// UUID), JSON.
 	return id
 }
 

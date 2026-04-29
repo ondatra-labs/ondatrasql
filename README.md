@@ -62,7 +62,8 @@ def fetch(page):
 ```sql
 -- models/raw/countries.sql
 -- @kind: table
-SELECT * FROM countries_fetch()
+SELECT name::VARCHAR AS name, capital::VARCHAR AS capital, population::BIGINT AS population
+FROM countries_fetch()
 ```
 
 Transform with SQL:
@@ -116,7 +117,7 @@ FROM staging.orders GROUP BY date
 ```sql
 -- models/raw/users.sql
 -- @kind: table
-SELECT * FROM my_api('users')
+SELECT id::BIGINT AS id, email::VARCHAR AS email, name::VARCHAR AS name FROM my_api('users')
 ```
 
 ```python

@@ -182,7 +182,7 @@ def fetch(page, **kwargs):
 `)
 
 	p.AddModel("raw/int_test.sql", `-- @kind: table
-SELECT * FROM int_fetch()
+SELECT id::BIGINT AS id, value::BIGINT AS value FROM int_fetch()
 `)
 
 	result := runModelWithSinkE2E(t, p, "raw/int_test.sql")
@@ -390,7 +390,7 @@ def push(rows):
 -- @unique_key: id
 -- @sink: threshold_push
 
-SELECT * FROM threshold_fetch()
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM threshold_fetch()
 `)
 
 	// Run 1: backfill — should succeed
@@ -425,7 +425,7 @@ def fetch(page, **kwargs):
 `)
 
 	p.AddModel("raw/from_lib.sql", `-- @kind: table
-SELECT * FROM source_test()
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM source_test()
 `)
 
 	// Should succeed — model.Source gets set so materialize knows
@@ -461,7 +461,7 @@ def fetch(page, **kwargs):
 `)
 
 	p.AddModel("raw/fail_test.sql", `-- @kind: table
-SELECT * FROM fail_fetch()
+SELECT id::BIGINT AS id FROM fail_fetch()
 `)
 
 	// Should fail but not leak Badger resources

@@ -91,7 +91,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, name, val FROM testapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, val::VARCHAR AS val FROM testapi('items')
 `)
 
 	// First run — backfill, should insert 3 rows
@@ -159,7 +159,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, name, val FROM testapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, val::VARCHAR AS val FROM testapi('items')
 `)
 
 	// First run
@@ -200,7 +200,7 @@ def fetch(resource, page):
 	// Model with a constraint that will fail
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @constraint: not_null(missing_col)
-SELECT id, name FROM testapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
 `)
 
 	// First run — should fail on constraint
@@ -222,7 +222,7 @@ SELECT id, name FROM testapi('items')
 
 	// Fix the model — remove bad constraint
 	os.WriteFile(modelPath, []byte(`-- @kind: append
-SELECT id, name FROM testapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
 `), 0644)
 
 	// Second run — should succeed. Nacked claims from first run are retried,
@@ -262,7 +262,7 @@ def fetch(resource, page):
 `)
 
 	p.AddModel("raw/data.sql", `-- @kind: append
-SELECT id FROM badapi('items')
+SELECT id::BIGINT AS id FROM badapi('items')
 `)
 
 	// Run should fail
@@ -309,7 +309,7 @@ def fetch(resource, page):
 	// Model with audit that fails (val must be > 200)
 	p.AddModel("raw/data.sql", `-- @kind: table
 -- @audit: compare(val, >, 200)
-SELECT id, val FROM countapi('items')
+SELECT id::BIGINT AS id, val::BIGINT AS val FROM countapi('items')
 `)
 
 	// First run — should fail on audit
@@ -334,7 +334,7 @@ SELECT id, val FROM countapi('items')
 	// Fix model — remove audit
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
-SELECT id, val FROM countapi('items')
+SELECT id::BIGINT AS id, val::BIGINT AS val FROM countapi('items')
 `), 0644)
 
 	// Second run — should succeed. Claims were acked (not nacked),
@@ -373,7 +373,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, val FROM emptyapi('items')
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM emptyapi('items')
 `)
 
 	// First run — backfill, 1 row
@@ -443,7 +443,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	p.AddModel("raw/data.sql", `-- @kind: tracked
 -- @group_key: grp
-SELECT grp, id, name FROM testapi('items')
+SELECT grp::VARCHAR AS grp, id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
 `)
 
 	// First run — backfill
@@ -491,7 +491,7 @@ def fetch(resource, page):
 
 	// Model with explicit columns — schema can be inferred from AST
 	p.AddModel("raw/empty.sql", `-- @kind: table
-SELECT id, name FROM emptyapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM emptyapi('items')
 `)
 
 	// First run with 0 rows — columns inferred from SELECT list,
@@ -576,7 +576,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, val FROM testapi('items')
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM testapi('items')
 `)
 
 	// First run — backfill, creates target
@@ -610,7 +610,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	os.WriteFile(modelPath, []byte(`-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, val FROM testapi('items') WHERE val > '2025-01-01'
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM testapi('items') WHERE val > '2025-01-01'
 `), 0644)
 
 	// Third run — SQL changed (hash change → backfill), lib returns 0 rows.
@@ -648,7 +648,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	p.AddModel("raw/data.sql", `-- @kind: table
-SELECT id, name FROM testapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
 `)
 
 	// First run — creates target with columns (id, name)
@@ -688,7 +688,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
-SELECT id, name, email FROM testapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email FROM testapi('items')
 `), 0644)
 
 	// Second run — hash changed (new column), lib returns 0 rows.
@@ -733,7 +733,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, val FROM testapi('items')
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM testapi('items')
 `)
 
 	// First run — backfill, creates target
@@ -750,7 +750,7 @@ SELECT id, val FROM testapi('items')
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
 -- @constraint: not_null(nonexistent_col)
-SELECT id, val FROM testapi('items')
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM testapi('items')
 `), 0644)
 
 	// Second run — 0 rows, but constraint should still be evaluated
@@ -789,7 +789,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	p.AddModel("raw/auditdata.sql", `-- @kind: table
-SELECT id, val FROM auditapi('items')
+SELECT id::BIGINT AS id, val::BIGINT AS val FROM auditapi('items')
 `)
 
 	// First run — creates target
@@ -817,7 +817,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	modelPath := filepath.Join(p.Dir, "models", "raw/auditdata.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
 -- @audit: not a valid macro
-SELECT id, val FROM auditapi('items') WHERE 1=1
+SELECT id::BIGINT AS id, val::BIGINT AS val FROM auditapi('items') WHERE 1=1
 `), 0644)
 
 	// Second run — 0 rows, but audit parsing should still happen and fail
@@ -953,7 +953,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	p.AddModel("raw/regional.sql", `-- @kind: tracked
 -- @group_key: region
-SELECT region, product, amount FROM trackedapi('items')
+SELECT region::VARCHAR AS region, product::VARCHAR AS product, amount::BIGINT AS amount FROM trackedapi('items')
 `)
 
 	// Run 1 — backfill: 3 rows, 2 groups
@@ -1003,7 +1003,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	modelPath := filepath.Join(p.Dir, "models", "raw/regional.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: tracked
 -- @group_key: region
-SELECT region, product, amount FROM trackedapi('items') WHERE 1=1
+SELECT region::VARCHAR AS region, product::VARCHAR AS product, amount::BIGINT AS amount FROM trackedapi('items') WHERE 1=1
 `), 0644)
 
 	// Run 4 — backfill with changed data
@@ -1097,7 +1097,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	p.AddModel("raw/joined.sql", `-- @kind: table
-SELECT u.user_id, u.name, s.score
+SELECT u.user_id::BIGINT AS user_id, u.name::VARCHAR AS name, s.score::BIGINT AS score
 FROM users_api('users') u
 JOIN scores_api('scores') s ON u.user_id = s.user_id
 `)
@@ -1150,7 +1150,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	p.AddModel("raw/dyn.sql", `-- @kind: table
-SELECT id, name FROM dynapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM dynapi('items')
 `)
 
 	// Run 1 — creates target with (id, name)
@@ -1177,7 +1177,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	modelPath := filepath.Join(p.Dir, "models", "raw/dyn.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
-SELECT id, name, email FROM dynapi('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email FROM dynapi('items')
 `), 0644)
 
 	// Run 2 — 0 rows, target-clone stub. Must not crash.
@@ -1203,7 +1203,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	os.WriteFile(modelPath, []byte(`-- @kind: table
-SELECT id, name, email FROM dynapi('items') WHERE 1=1
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email FROM dynapi('items') WHERE 1=1
 `), 0644)
 
 	r3 := runModelWithLib(t, p, "raw/dyn.sql")
@@ -1260,7 +1260,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/crash.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id, val FROM crashapi('items')
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM crashapi('items')
 `)
 
 	// Run 1 — backfill, 2 rows
@@ -1333,7 +1333,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/data.sql", `-- @kind: append
 -- @incremental: val
 -- @incremental_initial: 2026-01-01
-SELECT id::BIGINT AS id, val, amount::DOUBLE AS amount FROM src('items')
+SELECT id::BIGINT AS id, val::VARCHAR AS val, amount::DOUBLE AS amount FROM src('items')
 `)
 
 	// Run 1 — backfill, creates target with BIGINT/DOUBLE types
@@ -1384,7 +1384,7 @@ def fetch(resource, page):
 `)
 
 	p.AddModel("raw/empty.sql", `-- @kind: table
-SELECT id, name FROM src('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
 `)
 
 	// First run — 0 rows, no target. Stubs created from AST columns.
@@ -1456,7 +1456,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	// user_id is in JOIN ON but NOT in SELECT
 	p.AddModel("raw/joined.sql", `-- @kind: table
-SELECT u.name, s.score
+SELECT u.name::VARCHAR AS name, s.score::BIGINT AS score
 FROM users_api('users') u
 JOIN scores_api('scores') s ON u.user_id = s.user_id
 `)
@@ -1471,7 +1471,7 @@ JOIN scores_api('scores') s ON u.user_id = s.user_id
 	// (from JOIN ON) even though it's not in SELECT.
 	modelPath := filepath.Join(p.Dir, "models", "raw/joined.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
-SELECT u.name, s.score
+SELECT u.name::VARCHAR AS name, s.score::BIGINT AS score
 FROM users_api('users') u
 JOIN scores_api('scores') s ON u.user_id = s.user_id
 WHERE 1=1
@@ -1512,7 +1512,7 @@ def fetch(resource, page, columns=[]):
 	// plus a literal column. Only col_name and val should be
 	// in the columns kwarg, not the literal.
 	p.AddModel("raw/coltest.sql", `-- @kind: table
-SELECT col_name, val, 'extra' AS extra
+SELECT col_name::VARCHAR AS col_name, val::VARCHAR AS val, 'extra'::VARCHAR AS extra
 FROM colcheck('test')
 `)
 
@@ -1562,7 +1562,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/rates.sql", `-- @kind: append
 -- @incremental: date
 -- @incremental_initial: 2026-01-01
-SELECT series, date, value FROM src('items')
+SELECT series::VARCHAR AS series, date::VARCHAR AS date, value::DOUBLE AS value FROM src('items')
 `)
 
 	// Run 1 — backfill, target gets DOUBLE for value
@@ -1797,7 +1797,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 	p.AddModel("raw/regional.sql", `-- @kind: tracked
 -- @group_key: region
 -- @sink: trackedsink
-SELECT region, amount FROM tracksrc('items')
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tracksrc('items')
 `)
 
 	r1 := runModelWithLib(t, p, "raw/regional.sql")
@@ -1878,7 +1878,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 	p.AddModel("raw/groups.sql", `-- @kind: tracked
 -- @group_key: region
 -- @sink: tgsink
-SELECT region, amount FROM tgsrc('items')
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tgsrc('items')
 `)
 
 	r1 := runModelWithLib(t, p, "raw/groups.sql")
@@ -1971,7 +1971,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 	p.AddModel("raw/regions.sql", `-- @kind: tracked
 -- @group_key: region
 -- @sink: tdsink
-SELECT region, amount FROM tdsrc('items')
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tdsrc('items')
 `)
 
 	r1 := runModelWithLib(t, p, "raw/regions.sql")
@@ -2039,7 +2039,7 @@ def fetch(resource, page):
 
 	// SELECT has explicit casts: id BIGINT, amount DOUBLE
 	p.AddModel("raw/typed.sql", `-- @kind: table
-SELECT id::BIGINT AS id, name, amount::DOUBLE AS amount FROM src('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, amount::DOUBLE AS amount FROM src('items')
 `)
 
 	// First run — 0 rows, no target. Stub built from SQL projection types.
@@ -2089,7 +2089,7 @@ def fetch(resource, page):
 	// Touch the model so the @kind hash changes and table re-runs.
 	modelPath := filepath.Join(p.Dir, "models", "raw/typed.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
-SELECT id::BIGINT AS id, name, amount::DOUBLE AS amount FROM src('items') WHERE 1=1
+SELECT id::BIGINT AS id, name::VARCHAR AS name, amount::DOUBLE AS amount FROM src('items') WHERE 1=1
 `), 0644)
 
 	r2 := runModelWithLib(t, p, "raw/typed.sql")
@@ -2139,7 +2139,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	p.AddModel("raw/regional.sql", `-- @kind: tracked
 -- @group_key: region
-SELECT region, id, name FROM src('items')
+SELECT region::VARCHAR AS region, id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
 `)
 
 	// Run 1 — backfill: 3 rows, 2 groups
@@ -2224,7 +2224,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	p.AddModel("raw/regional.sql", `-- @kind: tracked
 -- @group_key: region
-SELECT region, amount FROM src('items')
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM src('items')
 `)
 
 	r1 := runModelWithLib(t, p, "raw/regional.sql")
@@ -2305,7 +2305,7 @@ def fetch(resource, page):
 	// SELECT projects a.name and b.score, joins on user_id. The stub for
 	// api_b must NOT gain `name` (which qualifies to a, not b).
 	p.AddModel("raw/joined.sql", `-- @kind: table
-SELECT a.name, b.score::BIGINT AS score
+SELECT a.name::VARCHAR AS name, b.score::BIGINT AS score
 FROM api_a('users') a
 JOIN api_b('scores') b ON a.id = b.user_id
 `)
@@ -2360,7 +2360,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	p.AddModel("raw/audited.sql", `-- @kind: tracked
 -- @group_key: region
 -- @audit: row_count(>=, 0)
-SELECT region, amount FROM src('items')
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM src('items')
 `)
 
 	p.AddModel("staging/derived.sql", `-- @kind: table
@@ -2448,7 +2448,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	p.AddModel("raw/upstream.sql", `-- @kind: tracked
 -- @group_key: region
-SELECT region, amount FROM src('items')
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM src('items')
 `)
 
 	// Downstream depends on raw.upstream — should rebuild only when upstream
@@ -2526,7 +2526,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 
 	p.AddModel("raw/data.sql", `-- @kind: tracked
 -- @group_key: region
-SELECT region, id, val1 FROM src('items')
+SELECT region::VARCHAR AS region, id::BIGINT AS id, val1::VARCHAR AS val1 FROM src('items')
 `)
 
 	r1 := runModelWithLib(t, p, "raw/data.sql")
@@ -2554,7 +2554,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: tracked
 -- @group_key: region
-SELECT region, id, val1, val2 FROM src('items')
+SELECT region::VARCHAR AS region, id::BIGINT AS id, val1::VARCHAR AS val1, val2::VARCHAR AS val2 FROM src('items')
 `), 0644)
 
 	r2 := runModelWithLib(t, p, "raw/data.sql")
@@ -2578,6 +2578,420 @@ SELECT region, id, val1, val2 FROM src('items')
 	}
 	if !strings.Contains(cols, "val2") {
 		t.Fatalf("smart-skip suppressed schema evolution: expected `val2` column in target, got %q", cols)
+	}
+}
+
+// ===========================================================================
+// v0.25.0: strict lib schema mode
+// ===========================================================================
+
+// TestStrictLibSchema_RejectsSelectStar pins that `SELECT *` against a
+// dynamic-column lib is rejected. SQL is the schema authority for
+// lib-backed models — the runtime no longer guesses output columns.
+func TestStrictLibSchema_RejectsSelectStar(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: table
+SELECT * FROM src('items')
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/data.sql")
+	if err == nil {
+		t.Fatal("expected validation error for SELECT * against dynamic lib")
+	}
+	if !strings.Contains(err.Error(), "SELECT *") {
+		t.Fatalf("error should mention SELECT *: %v", err)
+	}
+}
+
+// TestStrictLibSchema_RejectsBareProjection pins that bare COLUMN_REF
+// projections from a dynamic-column lib are rejected. The user must cast
+// each output column.
+func TestStrictLibSchema_RejectsBareProjection(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: table
+SELECT id, name FROM src('items')
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/data.sql")
+	if err == nil {
+		t.Fatal("expected validation error for bare projection")
+	}
+	if !strings.Contains(err.Error(), "not cast") {
+		t.Fatalf("error should mention missing cast: %v", err)
+	}
+}
+
+// TestStrictLibSchema_AcceptsTypedProjections pins the success path: every
+// projected column from a dynamic-column lib has an explicit cast.
+func TestStrictLibSchema_AcceptsTypedProjections(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice", "amount": 9.5}], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: table
+SELECT id::BIGINT AS id, name::VARCHAR AS name, amount::DOUBLE AS amount FROM src('items')
+`)
+
+	r := runModelWithLib(t, p, "raw/data.sql")
+	if r.RowsAffected != 1 {
+		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
+	}
+}
+
+// TestStrictLibSchema_RejectsComputedExprWithoutCast pins that a computed
+// expression that references a dynamic-column lib must be wrapped in a cast.
+// `a + b AS total` is rejected; `(a + b)::BIGINT AS total` is accepted.
+func TestStrictLibSchema_RejectsComputedExprWithoutCast(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "amount": 100}], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: table
+SELECT id::BIGINT AS id, amount * 2 AS doubled FROM src('items')
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/data.sql")
+	if err == nil {
+		t.Fatal("expected validation error for computed expression without outer cast")
+	}
+	if !strings.Contains(err.Error(), "not cast") {
+		t.Fatalf("error should mention missing cast: %v", err)
+	}
+}
+
+// TestStrictLibSchema_AcceptsComputedExprWithCast pins that a computed
+// expression wrapped in an explicit cast satisfies the rule.
+func TestStrictLibSchema_AcceptsComputedExprWithCast(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "amount": 100}], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: table
+SELECT id::BIGINT AS id, (amount * 2)::BIGINT AS doubled FROM src('items')
+`)
+
+	r := runModelWithLib(t, p, "raw/data.sql")
+	if r.RowsAffected != 1 {
+		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
+	}
+}
+
+// TestStrictLibSchema_RegularTableColumnsAlsoNeedCasts pins that the
+// strict-cast rule applies uniformly to every projection in a lib-backed
+// model — even columns from a regular (non-lib) table joined with the lib.
+// SQL is the *only* schema source for the model output; reading types from
+// DuckDB's catalog still counts as inference and is rejected.
+func TestStrictLibSchema_RegularTableColumnsAlsoNeedCasts(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	if err := p.Sess.Exec(`CREATE SCHEMA IF NOT EXISTS reg`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if err := p.Sess.Exec(`CREATE TABLE reg.users AS SELECT 1::BIGINT AS user_id, 'Alice' AS name`); err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+
+	writeLib(t, p, "scores", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"user_id": 1, "score": 100}], "next": None}
+`)
+
+	// `u.name` from a regular table — bare projection, must be rejected
+	// under strict mode even though DuckDB knows the type.
+	p.AddModel("raw/joined_bad.sql", `-- @kind: table
+SELECT u.name, s.score::BIGINT AS score
+FROM reg.users u
+JOIN scores('items') s ON u.user_id = s.user_id
+`)
+	_, err := runModelWithLibErr(t, p, "raw/joined_bad.sql")
+	if err == nil {
+		t.Fatal("expected validation error for bare regular-table projection in lib-backed model")
+	}
+	if !strings.Contains(err.Error(), "not cast") {
+		t.Fatalf("error should mention missing cast: %v", err)
+	}
+
+	// Re-cast `u.name` and the model is accepted.
+	p.AddModel("raw/joined_ok.sql", `-- @kind: table
+SELECT u.name::VARCHAR AS name, s.score::BIGINT AS score
+FROM reg.users u
+JOIN scores('items') s ON u.user_id = s.user_id
+`)
+	r := runModelWithLib(t, p, "raw/joined_ok.sql")
+	if r.RowsAffected != 1 {
+		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
+	}
+}
+
+// TestStrictLibSchema_RejectsCastWithoutAlias pins that the cast must be
+// followed by an explicit `AS name`. Implicit names from underlying
+// COLUMN_REFs do not satisfy the contract — the SELECT must declare every
+// output column name.
+func TestStrictLibSchema_RejectsCastWithoutAlias(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: table
+SELECT id::BIGINT, name::VARCHAR FROM src('items')
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/data.sql")
+	if err == nil {
+		t.Fatal("expected validation error for cast without explicit alias")
+	}
+	if !strings.Contains(err.Error(), "no explicit alias") {
+		t.Fatalf("error should mention missing alias: %v", err)
+	}
+}
+
+// TestStrictLibSchema_RejectsCTEHidingSelectStar pins that the strict-schema
+// rules apply to SELECT_NODEs nested inside CTEs, not just the top-level
+// SELECT. Otherwise a user could route a `SELECT *` through a CTE and have
+// the outer SELECT project a typed subset, bypassing the contract.
+func TestStrictLibSchema_RejectsCTEHidingSelectStar(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	p.AddModel("raw/cte.sql", `-- @kind: table
+WITH src_data AS (SELECT * FROM src('items'))
+SELECT id::BIGINT AS id FROM src_data
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/cte.sql")
+	if err == nil {
+		t.Fatal("expected validation error for SELECT * inside CTE")
+	}
+	if !strings.Contains(err.Error(), "SELECT *") {
+		t.Fatalf("error should mention SELECT *: %v", err)
+	}
+}
+
+// TestStrictLibSchema_RejectsUnionBranchBareProjection pins that the rules
+// apply to every branch of a set-operation (UNION, INTERSECT, EXCEPT). A
+// bare projection in one branch must not be hidden by a properly-typed
+// projection in another.
+func TestStrictLibSchema_RejectsUnionBranchBareProjection(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	// Left side has bare projections — must be rejected even though the
+	// right side is properly typed.
+	p.AddModel("raw/union.sql", `-- @kind: table
+SELECT id, name FROM src('items')
+UNION ALL
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/union.sql")
+	if err == nil {
+		t.Fatal("expected validation error for bare projection on UNION-left side")
+	}
+	if !strings.Contains(err.Error(), "not cast") {
+		t.Fatalf("error should mention missing cast: %v", err)
+	}
+}
+
+// TestStrictLibSchema_AcceptsCTEWithTypedProjections pins the success path
+// for CTEs: when both the CTE and the outer SELECT cast and alias every
+// projection, the model is accepted.
+func TestStrictLibSchema_AcceptsCTEWithTypedProjections(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	p.AddModel("raw/cte_ok.sql", `-- @kind: table
+WITH src_data AS (
+    SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
+)
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src_data
+`)
+
+	r := runModelWithLib(t, p, "raw/cte_ok.sql")
+	if r.RowsAffected != 1 {
+		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
+	}
+}
+
+// TestStrictLibSchema_RejectsDuplicateAliases pins that two projections
+// cannot share the same output name. The model's output schema must be
+// unambiguous.
+func TestStrictLibSchema_RejectsDuplicateAliases(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
+`)
+
+	p.AddModel("raw/dup.sql", `-- @kind: table
+SELECT id::BIGINT AS x, name::VARCHAR AS x FROM src('items')
+`)
+
+	_, err := runModelWithLibErr(t, p, "raw/dup.sql")
+	if err == nil {
+		t.Fatal("expected validation error for duplicate alias")
+	}
+	if !strings.Contains(err.Error(), "duplicate output column name") {
+		t.Fatalf("error should mention duplicate name: %v", err)
+	}
+}
+
+// TestStrictLibSchema_AllowsInputOnlyRefsWithoutCast pins that columns
+// referenced only in WHERE / JOIN ON / GROUP BY (i.e. not projected) do
+// not require a cast. The strict-cast rule applies to output schema only.
+func TestStrictLibSchema_AllowsInputOnlyRefsWithoutCast(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [
+        {"id": 1, "region": "US", "amount": 100},
+        {"id": 2, "region": "EU", "amount": 200},
+    ], "next": None}
+`)
+
+	// `region` is filtered on but never projected — no cast required for it.
+	p.AddModel("raw/filtered.sql", `-- @kind: table
+SELECT id::BIGINT AS id, amount::BIGINT AS amount
+FROM src('items')
+WHERE region = 'US'
+`)
+
+	r := runModelWithLib(t, p, "raw/filtered.sql")
+	if r.RowsAffected != 1 {
+		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
 	}
 }
 

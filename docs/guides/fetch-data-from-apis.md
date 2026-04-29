@@ -57,7 +57,8 @@ def fetch(resource, page):
 -- models/raw/users.sql
 -- @kind: table
 
-SELECT id, name, email, metadata::JSON AS metadata
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email,
+       metadata::JSON AS metadata
 FROM my_api('users')
 ```
 
@@ -92,8 +93,8 @@ The runtime extracts column names and [normalized types](/reference/lib-function
 | `total::DECIMAL` | `decimal` | Numeric field |
 | `count::INTEGER` | `integer` | Integer field |
 | `items::JSON` | `json` | Structured data (arrays, objects) |
-| `date` (DATE column) | `date` | Date field |
-| `name` (no cast) | `string` | String (default) |
+| `date::DATE` | `date` | Date field |
+| `name::VARCHAR` | `string` | String field |
 
 Blueprints can use this to adapt their API requests. For example, the GAM blueprint splits columns into dimensions (`string`) and metrics (anything else) based on normalized type.
 
@@ -200,7 +201,7 @@ APIs return nested JSON. Blueprints return it as-is — SQL handles expansion in
 
 ```sql
 -- Raw: fetch with arrays as JSON
-SELECT id, name, tags::JSON AS tags FROM my_api('users')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, tags::JSON AS tags FROM my_api('users')
 
 -- Staging: expand
 SELECT id, name, j.value->>'name' AS tag
@@ -229,7 +230,8 @@ When the API returns one row per measurement:
 
 ```sql
 -- Raw: normalized (series, date, value)
-SELECT series, date, value FROM riksbank('SEKEURPMI,SEKUSDPMI')
+SELECT series::VARCHAR AS series, date::DATE AS date, value::DECIMAL(18,6) AS value
+FROM riksbank('SEKEURPMI,SEKUSDPMI')
 
 -- Staging: pivoted
 SELECT date::DATE,
@@ -254,7 +256,8 @@ Use `@incremental` to fetch only new data on subsequent runs:
 -- @kind: append
 -- @incremental: created_at
 
-SELECT * FROM my_api('events')
+SELECT id::BIGINT AS id, name::VARCHAR AS name, created_at::TIMESTAMP AS created_at
+FROM my_api('events')
 ```
 
 ```python

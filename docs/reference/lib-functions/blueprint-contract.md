@@ -17,7 +17,7 @@ These are the parts of the API we consider stable. During v0.x, breaking changes
 
 **Push return:** per-row status dict (`sync`), nothing (`atomic`), or job reference dict (`async`).
 
-**Typed columns:** column dicts with `name` and `type`. Columns with explicit casts also include `json_schema_type` (`"string"`, `"number"`, `"integer"`, `"array"`). Columns without casts get `type: "string"`.
+**Typed columns:** column dicts with `name`, `type`, and `json_schema_type` (`"string"`, `"number"`, `"integer"`, `"array"`). Every projected column is cast (the [SQL schema contract](/reference/lib-functions/fetch-contract/#sql-schema-contract) requires it), so the column dict always carries the cast type — the runtime never falls back to `"string"`.
 
 **Built-in functions:** see [Starlark Modules](/reference/lib-functions/starlark-modules/) for the complete list.
 
@@ -29,12 +29,9 @@ Column extraction, stub table creation, and CDC filtering may change between ver
 
 **Stub tables for empty runs:**
 
-| Situation | Stub source | Schema evolution |
-|---|---|---|
-| Static-column lib | Declared column names and types | Detected |
-| Dynamic lib, columns referenced in model SQL | Typed from explicit casts in the SELECT projection (`col::BIGINT`, `col::DOUBLE`, etc.); VARCHAR for unqualified refs. When the target exists, established target types are preferred over the VARCHAR fallback so unchanged columns don't trigger spurious type-change warnings. | Detected (additive + type changes) |
-| Dynamic lib, no columns inferrable from SQL, target exists | Cloned from target table | Not detected until next non-empty run |
-| Dynamic lib, no columns inferrable, no target | Skip (no table created) | N/A |
+In strict-schema mode, the model SQL fully determines the stub: every projection is a cast (`col::TYPE AS col`), so the runtime knows the type of every output column without consulting data or the target. Columns used only in `WHERE` / `JOIN ON` are VARCHAR in the stub — they're not in the output schema, so their type doesn't matter for stub correctness.
+
+The only case where SQL-shape extraction returns nothing is the degenerate one: the lib appears in `FROM` but no projection or filter ever references its columns (e.g. a cross join where the lib is unused, like `SELECT 1::INTEGER AS x FROM api() a, reg.other o` with no reference to `a`). Then the runtime falls back to cloning the target's schema if the target exists, or skips the run with a warning if it doesn't.
 
 ## Empty-run guarantees
 
@@ -44,7 +41,7 @@ When a lib returns 0 rows:
 2. Schema evolution, constraints, and audits run against stub
 3. Sink processes pending backlog
 4. Commit metadata written
-5. First run with inferrable columns creates empty target table
-6. First run without inferrable columns skips with warning
+5. Target table is created (empty, fully typed) on the first run
+6. Schema evolution is detected on every empty run, not deferred to the next non-empty run
 
 **Tracked-specific:** the runtime distinguishes "source has no new data" from "source is fully enumerated and empty". The lib declares which one applies via `empty_result` on the final fetch page (`"no_change"` is the default; `"delete_missing"` opts in to deleting groups absent from the empty result). When the run carries `no_change` and the model has no schema evolution or audits to apply in the materialize transaction, the runtime skips that transaction entirely so dependent models don't see a spurious "dep changed" signal. Models that declare `@audit` or whose temp-table schema diverges from the target still go through materialize so those checks run on every empty run. `@constraint` checks run before materialize (read-only) regardless of which path is taken. See [Fetch Contract](/reference/lib-functions/fetch-contract/#empty-fetches-and-tracked).

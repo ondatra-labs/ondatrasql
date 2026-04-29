@@ -392,6 +392,13 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					}
 				}
 
+				// Strict lib schema: every projected column from a
+				// dynamic-column lib must be wrapped in an explicit cast.
+				// SQL is the schema authority for lib-backed models.
+				if err := validateStrictLibSchema(parsedAST, libCalls); err != nil {
+					return nil, fmt.Errorf("%s: %w", model.Target, err)
+				}
+
 				// Mark model as having lib calls so materialize knows
 				// tmpTable contains all rows (not CDC-filtered)
 				model.Source = libCalls[0].FuncName
@@ -561,41 +568,18 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					}
 
 					// 2. Dynamic-column libs: build the stub from the model
-					//    SQL's column shape — typed projection where there
-					//    are explicit casts, plus input-only refs (JOIN ON,
-					//    WHERE, etc) as VARCHAR. SQL is the schema authority;
-					//    the runner already extracts this AST info elsewhere.
-					//    This catches schema evolution on 0-row runs that
-					//    target-clone would have hidden.
-					//
-					//    When target exists, prefer the target's established
-					//    type for VARCHAR fallback columns (no explicit cast)
-					//    so we don't trigger false schema-evolution warnings.
-					//    Explicit SQL casts always win.
+					//    SQL's column shape — typed from explicit casts in
+					//    the SELECT projection (validated upstream), plus
+					//    input-only refs (JOIN ON, WHERE, etc) as VARCHAR.
+					//    SQL is the schema authority for lib-backed models;
+					//    target-type lookups and VARCHAR-on-projection
+					//    fallbacks are no longer needed because every
+					//    projected column is already cast.
 					alias := ""
 					if call.ASTNode != nil {
 						alias = call.ASTNode.Alias()
 					}
 					if shape := extractColShapeForLib(parsedAST, alias, singleLibSource); len(shape) > 0 {
-						if targetExists, _ := r.tableExistsCheck(model.Target); targetExists {
-							targetTypes, fetchErr := r.fetchTargetColumnTypes(model.Target)
-							if fetchErr != nil {
-								// Surface the failure rather than silently degrading
-								// to all-VARCHAR, which would trigger false schema
-								// evolution warnings on subsequent runs with data.
-								result.Warnings = append(result.Warnings,
-									fmt.Sprintf("lib stub: target type lookup failed for %s: %v (falling back to SQL-shape types)",
-										model.Target, fetchErr))
-							}
-							for i := range shape {
-								if shape[i].sqlType != "VARCHAR" {
-									continue
-								}
-								if t, ok := targetTypes[shape[i].name]; ok && t != "" {
-									shape[i].sqlType = t
-								}
-							}
-						}
 						var colDefs []string
 						for _, c := range shape {
 							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.name), c.sqlType))
