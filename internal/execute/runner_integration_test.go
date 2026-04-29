@@ -5261,13 +5261,16 @@ func TestRun_CDCGate_RunsWhenSourceChanged(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tracked content hash behavior (docs/reference/known-limitations.md)
+// Tracked content hash behavior (sum(hash(row(...))), MSet-Add-Hash, v0.23.0)
 // ---------------------------------------------------------------------------
 
-// TestTracked_ContentHash_ColumnOrderMatters verifies that reordering columns
-// in a tracked model's SELECT changes the content hash and triggers a group
-// replace, even though the data values are identical.
-func TestTracked_ContentHash_ColumnOrderMatters(t *testing.T) {
+// TestTracked_ContentHash_ColumnOrderIndependent pins that reordering the
+// columns in a tracked model's SELECT does NOT change the content hash.
+// hashCols is sorted alphabetically before the row() expression is built,
+// so column-order in the user's SQL is irrelevant. Before v0.23.0, this
+// asserted the opposite (column reorder changed the hash) — that behaviour
+// was a footgun: a cosmetic SELECT reorder triggered a full group replace.
+func TestTracked_ContentHash_ColumnOrderIndependent(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	p.AddModel("raw/data.sql", `-- @kind: tracked
@@ -5281,20 +5284,20 @@ SELECT 'A' AS grp, 'x' AS col1, 'y' AS col2
 		t.Fatalf("run 1: expected 1 row, got %d", r1.RowsAffected)
 	}
 
-	// Get content hash from first run
 	hash1, err := p.Sess.QueryValue("SELECT _content_hash FROM raw.data WHERE grp='A'")
 	if err != nil {
 		t.Fatalf("hash1: %v", err)
 	}
 
-	// Reorder columns (col2 before col1) — same data, different order
+	// Reorder columns (col2 before col1) — same data, different SELECT order
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: tracked
 -- @group_key: grp
 SELECT 'A' AS grp, 'y' AS col2, 'x' AS col1
 `), 0644)
 
-	// Run 2 — SQL changed → backfill. Hash should differ.
+	// Run 2 — SQL hash changed (forces backfill) but content hash must
+	// stay the same because hashCols are sorted on the runner side.
 	r2 := runModel(t, p, "raw/data.sql")
 	t.Logf("run 2: rows=%d type=%s", r2.RowsAffected, r2.RunType)
 
@@ -5303,15 +5306,18 @@ SELECT 'A' AS grp, 'y' AS col2, 'x' AS col1
 		t.Fatalf("hash2: %v", err)
 	}
 
-	if hash1 == hash2 {
-		t.Fatalf("content hash should differ after column reorder: both %s", hash1)
+	if hash1 != hash2 {
+		t.Fatalf("content hash should match after column reorder (hashCols are sorted): %s vs %s", hash1, hash2)
 	}
 }
 
-// TestTracked_ContentHash_NullCoercedToEmpty verifies that a column changing
-// from NULL to empty string does NOT trigger a group replace (both coerce
-// to '' in the hash).
-func TestTracked_ContentHash_NullCoercedToEmpty(t *testing.T) {
+// TestTracked_ContentHash_NullDistinctFromEmpty pins that a column changing
+// from NULL to empty string DOES trigger a group replace. row() preserves
+// typed NULL natively, so `hash(row('A', NULL))` ≠ `hash(row('A', ''))`.
+// Before v0.23.0, this asserted the opposite (NULL coerced to empty in the
+// hash) — that behaviour conflated two genuinely different states and
+// missed real changes that downstream sinks needed to see.
+func TestTracked_ContentHash_NullDistinctFromEmpty(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// First: create with NULL
@@ -5330,7 +5336,7 @@ SELECT 'A' AS grp, NULL AS val
 		t.Fatalf("hash1: %v", err)
 	}
 
-	// Change to empty string — hash should be identical (COALESCE(NULL,'') == '')
+	// Change to empty string — hash MUST differ now (NULL is not the same as '')
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: tracked
 -- @group_key: grp
@@ -5345,8 +5351,8 @@ SELECT 'A' AS grp, '' AS val
 		t.Fatalf("hash2: %v", err)
 	}
 
-	if hash1 != hash2 {
-		t.Fatalf("content hash should match (NULL coerced to empty): got %s vs %s", hash1, hash2)
+	if hash1 == hash2 {
+		t.Fatalf("content hash should differ between NULL and '': both %s — NULL is being silently coerced", hash1)
 	}
 }
 

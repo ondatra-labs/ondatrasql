@@ -866,33 +866,46 @@ func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBack
 		}
 	}
 
-	// Build hash columns (all except group_key columns)
+	// Build hash columns (all except group_key columns), sorted alphabetically
+	// so that reordering columns in the SELECT does not change the hash.
 	var hashCols []string
 	for _, col := range cleanCols {
 		if !keyCols[col] {
 			hashCols = append(hashCols, col)
 		}
 	}
+	sort.Strings(hashCols)
 
-	// Build deterministic hash expression:
-	// md5(string_agg(concat_ws('|', COALESCE(col1::VARCHAR,''), ...), '|' ORDER BY col1, col2, ...))
+	// Build deterministic content-hash expression for the group:
+	//
+	//   sum(hash(row(col1, col2, ...)))::VARCHAR
+	//
+	// MSet-Add-Hash (Clarke et al, MIT 2003): sum of per-row hashes is
+	// commutative + associative + multiset-collision-resistant. Properties:
+	//   - order-independent across rows (sum is commutative)
+	//   - multiset-safe: duplicate rows do not cancel (vs bit_xor) and
+	//     N copies of the same row contribute N * hash, not 0
+	//   - NULL-distinct from zero/empty: hash(row(x, NULL)) != hash(row(x, 0))
+	//     because row() preserves typed NULL natively (concat_ws would have
+	//     silently dropped NULL — that was the bug in the previous form)
+	//   - precision-safe: hash() returns UBIGINT, sum(UBIGINT) returns
+	//     HUGEINT (not DOUBLE), so the 64-bit row hashes accumulate into
+	//     a 128-bit group hash without precision loss
+	//   - heterogeneous columns supported: row() takes any types, unlike
+	//     a list literal which requires homogeneous element types
+	//   - O(1) memory per group: no string accumulation
+	//
+	// hashCols was sorted above, so the row's column order is fixed
+	// regardless of SELECT column order.
 	var hashAggExpr string
 	if len(hashCols) == 0 {
-		hashAggExpr = "md5('')"
+		hashAggExpr = "0::HUGEINT"
 	} else {
-		var concatParts []string
+		var rowParts []string
 		for _, col := range hashCols {
-			concatParts = append(concatParts, fmt.Sprintf("COALESCE(%s::VARCHAR, '')", duckdb.QuoteIdentifier(col)))
+			rowParts = append(rowParts, duckdb.QuoteIdentifier(col))
 		}
-		concatExpr := fmt.Sprintf("concat_ws('|', %s)", strings.Join(concatParts, ", "))
-
-		var orderParts []string
-		for _, col := range hashCols {
-			orderParts = append(orderParts, duckdb.QuoteIdentifier(col))
-		}
-		orderExpr := strings.Join(orderParts, ", ")
-
-		hashAggExpr = fmt.Sprintf("md5(string_agg(%s, '|' ORDER BY %s))", concatExpr, orderExpr)
+		hashAggExpr = fmt.Sprintf("sum(hash(row(%s)))::VARCHAR", strings.Join(rowParts, ", "))
 	}
 
 	// Build qualified column list for SELECT (s."col1", s."col2", ...)
