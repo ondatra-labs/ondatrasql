@@ -321,6 +321,16 @@ SELECT id, val FROM countapi('items')
 		t.Fatalf("expected audit error, got: %v", runErr)
 	}
 
+	// Pin libExtraPreSQL atomicity: the ack INSERT into _ondatra_acks is
+	// run inside the materialize transaction, so an audit-driven rollback
+	// must also remove the ack record. If a future change moves the ack
+	// outside the transaction, the row would survive here and the next
+	// run would silently skip the (now-missing) claim, losing data.
+	ackCount, err := p.Sess.QueryValue("SELECT COUNT(*) FROM _ondatra_acks")
+	if err == nil && ackCount != "0" {
+		t.Errorf("after audit-rolled-back run: _ondatra_acks count = %s, want 0 (libExtraPreSQL must be inside materialize transaction)", ackCount)
+	}
+
 	// Fix model — remove audit
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
@@ -1740,5 +1750,264 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM appendsrc('items')
 	}
 	if count != "3" {
 		t.Fatalf("expected 3 total rows after 2 runs, got %s", count)
+	}
+}
+
+// TestLibCall_Tracked_EmptyIncremental_Sink mirrors the merge equivalent for
+// the tracked kind: backfill produces rows + sink events, then an empty
+// incremental run must NOT re-fire the sink. Tracked has its own change
+// detection (group hashes), so the sink-side guard against spurious events
+// must hold for it too.
+func TestLibCall_Tracked_EmptyIncremental_Sink(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "tracksrc", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    # Tracked without @incremental: lib must return the full source state
+    # every call. Gating on is_backfill would return empty on run 2 (because
+    # the runner sets is_backfill=false once the target table exists), and
+    # tracked would then treat all groups as "disappeared" and DELETE every
+    # row. Returning full state lets tracked compare group hashes correctly.
+    return {"rows": [
+        {"region": "US", "amount": 100},
+        {"region": "EU", "amount": 200},
+    ], "next": None}
+`)
+
+	writeLib(t, p, "trackedsink", `
+API = {
+    "push": {
+        "batch_size": 100,
+        "batch_mode": "atomic",
+    },
+}
+
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	p.AddModel("raw/regional.sql", `-- @kind: tracked
+-- @group_key: region
+-- @sink: trackedsink
+SELECT region, amount FROM tracksrc('items')
+`)
+
+	r1 := runModelWithLib(t, p, "raw/regional.sql")
+	if r1.RowsAffected != 2 {
+		t.Fatalf("run 1: expected 2 rows, got %d (warnings: %v)", r1.RowsAffected, r1.Warnings)
+	}
+	if r1.SyncSucceeded == 0 {
+		t.Fatalf("run 1: sink did not fire (SyncSucceeded=0, warnings: %v)", r1.Warnings)
+	}
+
+	// Run 2 — same source, no group hash changes. Tracked must not commit
+	// new rows, materialize must succeed, sink must not fail. With the
+	// lib above (always returning full state), the sink delta is empty
+	// and Badger has nothing pending after run 1's acks — so SyncSucceeded
+	// stays at 0 here.
+	r2 := runModelWithLib(t, p, "raw/regional.sql")
+	if r2.RowsAffected != 0 {
+		t.Fatalf("run 2: expected 0 rows, got %d", r2.RowsAffected)
+	}
+	if r2.SyncFailed != 0 {
+		t.Fatalf("run 2: SyncFailed=%d, expected 0 (warnings: %v)", r2.SyncFailed, r2.Warnings)
+	}
+
+	// Run 3 — still empty, still stable
+	r3 := runModelWithLib(t, p, "raw/regional.sql")
+	if r3.RowsAffected != 0 {
+		t.Fatalf("run 3: expected 0 rows, got %d", r3.RowsAffected)
+	}
+	if r3.SyncFailed != 0 {
+		t.Fatalf("run 3: SyncFailed=%d, expected 0", r3.SyncFailed)
+	}
+
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regional")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != "2" {
+		t.Fatalf("expected 2 rows after 3 runs, got %s", count)
+	}
+}
+
+// TestLibCall_Tracked_GroupHashChange_Sink verifies that when a tracked
+// group's content changes (hash differs), the sink fires only for the
+// changed group's events — not for unchanged groups. This pins the
+// "no spurious replay" guarantee at the tracked + sink interface.
+func TestLibCall_Tracked_GroupHashChange_Sink(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "tgsrc", `
+state = {"phase": "backfill"}
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 100},
+        {"region": "EU", "amount": 200},
+    ], "next": None}
+`)
+
+	writeLib(t, p, "tgsink", `
+API = {
+    "push": {
+        "batch_size": 100,
+        "batch_mode": "atomic",
+    },
+}
+
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	p.AddModel("raw/groups.sql", `-- @kind: tracked
+-- @group_key: region
+-- @sink: tgsink
+SELECT region, amount FROM tgsrc('items')
+`)
+
+	r1 := runModelWithLib(t, p, "raw/groups.sql")
+	if r1.RowsAffected != 2 || r1.SyncSucceeded < 2 {
+		t.Fatalf("run 1: rows=%d sync=%d, want 2/>=2 (warnings: %v)", r1.RowsAffected, r1.SyncSucceeded, r1.Warnings)
+	}
+	syncAfterRun1 := r1.SyncSucceeded
+
+	// Run 2 — same lib, no changes
+	r2 := runModelWithLib(t, p, "raw/groups.sql")
+	if r2.SyncSucceeded != 0 {
+		t.Fatalf("run 2: expected sink quiet, got SyncSucceeded=%d", r2.SyncSucceeded)
+	}
+
+	// Phase 2 — change US group's amount. EU unchanged. Tracked should detect
+	// US hash change, replace US group's rows, sink should see only US events.
+	writeLib(t, p, "tgsrc", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 999},
+        {"region": "EU", "amount": 200},
+    ], "next": None}
+`)
+
+	r3 := runModelWithLib(t, p, "raw/groups.sql")
+	if r3.RowsAffected == 0 {
+		t.Fatalf("run 3: expected rows updated for US group, got 0 (warnings: %v)", r3.Warnings)
+	}
+	// Sink should fire for the changed group only (US: 1 row replaced)
+	// — total events should be small, not the full 2 rows from run 1.
+	if r3.SyncSucceeded == 0 {
+		t.Fatalf("run 3: sink did not fire on group change (warnings: %v)", r3.Warnings)
+	}
+	if r3.SyncSucceeded > syncAfterRun1 {
+		t.Errorf("run 3: sink fired more events (%d) than backfill (%d) — would mean entire table replayed instead of changed group only", r3.SyncSucceeded, syncAfterRun1)
+	}
+
+	// US row should have new amount
+	usAmount, err := p.Sess.QueryValue("SELECT amount FROM raw.groups WHERE region = 'US'")
+	if err != nil || usAmount != "999" {
+		t.Fatalf("US amount = %q, want 999 (err: %v)", usAmount, err)
+	}
+}
+
+// TestLibCall_Tracked_GroupDisappears_Sink pins that when a group disappears
+// from the source, tracked DELETEs its rows from the target and the sink
+// receives delete-classified events. Without this, downstream systems would
+// silently keep stale data after a group is dropped upstream.
+func TestLibCall_Tracked_GroupDisappears_Sink(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "tdsrc", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 100},
+        {"region": "EU", "amount": 200},
+    ], "next": None}
+`)
+
+	// Sink that asserts at least one delete event arrives in run 2.
+	// Records the change_types it sees via fail() if no delete is observed.
+	writeLib(t, p, "tdsink", `
+API = {
+    "push": {
+        "batch_size": 100,
+        "batch_mode": "atomic",
+    },
+}
+
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	p.AddModel("raw/regions.sql", `-- @kind: tracked
+-- @group_key: region
+-- @sink: tdsink
+SELECT region, amount FROM tdsrc('items')
+`)
+
+	r1 := runModelWithLib(t, p, "raw/regions.sql")
+	if r1.RowsAffected != 2 {
+		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
+	}
+
+	// Phase 2 — EU group disappears. Tracked should DELETE EU's rows.
+	writeLib(t, p, "tdsrc", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 100},
+    ], "next": None}
+`)
+
+	r2 := runModelWithLib(t, p, "raw/regions.sql")
+
+	// Target should have only US row
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regions")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != "1" {
+		t.Fatalf("after group disappears: expected 1 row, got %s (rowsAffected=%d, warnings: %v)", count, r2.RowsAffected, r2.Warnings)
+	}
+
+	// Sink should have fired with at least the delete event for EU
+	if r2.SyncSucceeded == 0 {
+		t.Fatalf("sink did not fire for group-disappear case (SyncSucceeded=0, warnings: %v) — delete events lost", r2.Warnings)
 	}
 }

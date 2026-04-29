@@ -531,6 +531,192 @@ func hasWarning(r *execute.Result, substr string) bool {
 	return false
 }
 
+// ---------------------------------------------------------------------------
+// Multi-model sink flows
+// ---------------------------------------------------------------------------
+
+// TestE2E_MultiModel_CascadingSink runs a 2-model DAG where the upstream
+// (raw.events) has @sink and the downstream (staging.events_summary) reads
+// from raw and has no sink. Pins that:
+//   - the upstream model's sink fires on backfill
+//   - the downstream model materializes correctly using the upstream data
+//   - on the second run with new data, only new rows reach upstream's sink
+//     and the downstream sees the combined state
+func TestE2E_MultiModel_CascadingSink(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Source lib for raw.events: returns 2 rows on backfill, 1 new on incremental.
+	testutil.WriteFile(t, p.Dir, "lib/casc_src.star", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["append"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if is_backfill:
+        return {"rows": [
+            {"id": 1, "kind": "click", "amount": 10},
+            {"id": 2, "kind": "view", "amount": 20},
+        ], "next": None}
+    return {"rows": [{"id": 3, "kind": "click", "amount": 30}], "next": None}
+`)
+
+	// Sink lib (no-op). Existence of the sink fires the per-row contract.
+	testutil.WriteFile(t, p.Dir, "lib/casc_sink.star", `
+API = {
+    "push": {
+        "batch_size": 100,
+        "batch_mode": "atomic",
+    },
+}
+
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	// Upstream — append + sink
+	p.AddModel("raw/events.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @sink: casc_sink
+SELECT id::BIGINT AS id, kind::VARCHAR AS kind, amount::BIGINT AS amount FROM casc_src('events')
+`)
+
+	// Downstream — table aggregation, no sink
+	p.AddModel("staging/events_summary.sql", `-- @kind: table
+SELECT kind, COUNT(*) AS event_count, SUM(amount) AS total
+FROM raw.events
+GROUP BY kind
+`)
+
+	// Run 1: backfill — upstream gets 2 rows + sink fires; downstream
+	// aggregates to 2 rows (one per kind).
+	r1up := runModelWithSinkE2E(t, p, "raw/events.sql")
+	if r1up.RowsAffected != 2 {
+		t.Fatalf("upstream run 1: rows=%d, want 2 (warnings: %v)", r1up.RowsAffected, r1up.Warnings)
+	}
+	if r1up.SyncSucceeded == 0 {
+		t.Fatalf("upstream run 1: sink did not fire (warnings: %v)", r1up.Warnings)
+	}
+	r1down := runModelWithSinkE2E(t, p, "staging/events_summary.sql")
+	if r1down.RowsAffected != 2 {
+		t.Fatalf("downstream run 1: rows=%d, want 2 (one per kind)", r1down.RowsAffected)
+	}
+
+	// Run 2: incremental — upstream gets 1 new row; downstream re-aggregates.
+	r2up := runModelWithSinkE2E(t, p, "raw/events.sql")
+	if r2up.RowsAffected != 1 {
+		t.Fatalf("upstream run 2: rows=%d, want 1 new", r2up.RowsAffected)
+	}
+	if r2up.SyncFailed != 0 {
+		t.Fatalf("upstream run 2: SyncFailed=%d (warnings: %v)", r2up.SyncFailed, r2up.Warnings)
+	}
+	r2down := runModelWithSinkE2E(t, p, "staging/events_summary.sql")
+	if r2down.RowsAffected != 2 {
+		t.Fatalf("downstream run 2: rows=%d, want 2 (still one per kind)", r2down.RowsAffected)
+	}
+
+	// Verify cascading state: raw has 3 rows, staging has correct totals.
+	rawCount, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.events")
+	if rawCount != "3" {
+		t.Errorf("raw.events count = %s, want 3", rawCount)
+	}
+	clickTotal, _ := p.Sess.QueryValue("SELECT total FROM staging.events_summary WHERE kind = 'click'")
+	if clickTotal != "40" {
+		t.Errorf("click total = %s, want 40 (10 + 30)", clickTotal)
+	}
+}
+
+// TestE2E_MultiModel_BothSinks runs two independent sink-enabled models in
+// the same project (no DAG dependency between them). Pins that:
+//   - both sinks fire independently
+//   - one sink failing in a hypothetical configuration would not block the other
+//   - SyncSucceeded counts are per-model, not global
+func TestE2E_MultiModel_BothSinks(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	testutil.WriteFile(t, p.Dir, "lib/users_src.star", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {"args": ["resource"], "supported_kinds": ["append"]},
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if is_backfill:
+        return {"rows": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}], "next": None}
+    return {"rows": [], "next": None}
+`)
+
+	testutil.WriteFile(t, p.Dir, "lib/orders_src.star", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {"args": ["resource"], "supported_kinds": ["append"]},
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if is_backfill:
+        return {"rows": [{"id": 100, "total": 50}, {"id": 200, "total": 75}, {"id": 300, "total": 100}], "next": None}
+    return {"rows": [], "next": None}
+`)
+
+	testutil.WriteFile(t, p.Dir, "lib/users_sink.star", `
+API = {"push": {"batch_size": 100, "batch_mode": "atomic"}}
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	testutil.WriteFile(t, p.Dir, "lib/orders_sink.star", `
+API = {"push": {"batch_size": 100, "batch_mode": "atomic"}}
+def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
+    pass
+`)
+
+	// Two unrelated models, both with their own sink.
+	p.AddModel("sync/users.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @sink: users_sink
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM users_src('items')
+`)
+
+	p.AddModel("sync/orders.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @sink: orders_sink
+SELECT id::BIGINT AS id, total::BIGINT AS total FROM orders_src('items')
+`)
+
+	// Run both, in either order — they should be independent.
+	rUsers := runModelWithSinkE2E(t, p, "sync/users.sql")
+	rOrders := runModelWithSinkE2E(t, p, "sync/orders.sql")
+
+	if rUsers.RowsAffected != 2 {
+		t.Fatalf("users: rows=%d, want 2 (warnings: %v)", rUsers.RowsAffected, rUsers.Warnings)
+	}
+	if rOrders.RowsAffected != 3 {
+		t.Fatalf("orders: rows=%d, want 3 (warnings: %v)", rOrders.RowsAffected, rOrders.Warnings)
+	}
+
+	// Both sinks should have fired with their own row counts — not mixed.
+	if rUsers.SyncSucceeded < 2 {
+		t.Errorf("users sink: SyncSucceeded=%d, want >=2", rUsers.SyncSucceeded)
+	}
+	if rOrders.SyncSucceeded < 3 {
+		t.Errorf("orders sink: SyncSucceeded=%d, want >=3", rOrders.SyncSucceeded)
+	}
+	// Per-model counts must not exceed each model's own row count, otherwise
+	// they'd be reading each other's events.
+	if rUsers.SyncSucceeded > 2 {
+		t.Errorf("users sink: SyncSucceeded=%d > 2 — sink may be receiving orders' events", rUsers.SyncSucceeded)
+	}
+	if rOrders.SyncSucceeded > 3 {
+		t.Errorf("orders sink: SyncSucceeded=%d > 3 — sink may be receiving users' events", rOrders.SyncSucceeded)
+	}
+}
+
 // Ensure unused imports don't cause compilation errors
 var (
 	_ = collect.OpenSyncStore

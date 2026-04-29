@@ -713,15 +713,22 @@ func (s *Session) captureSandboxOrphansLocked() []string {
 // reconstruct the full relative path "<schema>/<table>/<filename>".
 //
 // Caller holds s.mu.
-func (s *Session) queryDataFilePathsLocked(alias string) ([]string, error) {
-	// Sanitize alias for use as part of system schema name
-	// (QuoteIdentifier can't be used here since it's part of __ducklake_metadata_<alias>)
-	safeAlias := strings.Map(func(r rune) rune {
+// sanitizeSchemaAlias replaces every non-alphanumeric/non-underscore rune
+// with '_'. Used when interpolating a user-controlled alias into a system
+// schema name like `__ducklake_metadata_<alias>` — we cannot use
+// QuoteIdentifier there because the alias is part of the schema-name
+// itself, not a quotable identifier. The output is safe for unquoted SQL.
+func sanitizeSchemaAlias(s string) string {
+	return strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
 			return r
 		}
 		return '_'
-	}, alias)
+	}, s)
+}
+
+func (s *Session) queryDataFilePathsLocked(alias string) ([]string, error) {
+	safeAlias := sanitizeSchemaAlias(alias)
 	q := fmt.Sprintf(`
 		SELECT sch.schema_name || '/' || tbl.table_name || '/' || df.path AS rel_path
 		FROM __ducklake_metadata_%s.ducklake_data_file df

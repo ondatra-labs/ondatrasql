@@ -7,6 +7,7 @@ package script
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -136,6 +137,55 @@ func TestInjectAPIAuth_ServiceAccount_EmptyResolve(t *testing.T) {
 	err := injectAPIAuth(auth, headers, &urlStr, &apiHTTPConfig{})
 	if err == nil {
 		t.Fatal("expected error when service_account env resolves to empty")
+	}
+}
+
+// TestInjectAPIAuth_ServiceAccount_ReadFileFailure pins that os.ReadFile
+// failures (file path resolves but doesn't exist on disk) are propagated
+// as errors, not silently dropped. The bug class: a future change adds a
+// fallback "if read fails, just skip auth" branch and OAuth-protected
+// API calls go out unauthenticated.
+func TestInjectAPIAuth_ServiceAccount_ReadFileFailure(t *testing.T) {
+	t.Setenv("SA_PATH_NOT_EXIST", "/this/path/does/not/exist/sa.json")
+	headers := make(map[string]string)
+	urlStr := "https://api.example.com"
+	auth := map[string]any{
+		"service_account": map[string]any{"env": "SA_PATH_NOT_EXIST"},
+	}
+
+	err := injectAPIAuth(auth, headers, &urlStr, &apiHTTPConfig{})
+	if err == nil {
+		t.Fatal("expected error when service_account file does not exist")
+	}
+	if !strings.Contains(err.Error(), "read service_account") {
+		t.Errorf("error %q should mention read failure (saw: %v)", err.Error(), err)
+	}
+}
+
+// TestInjectAPIAuth_ServiceAccount_MalformedJSON pins that json.Unmarshal
+// failures (file exists but is not valid JSON) are propagated as errors.
+// The bug class: a future change might catch and ignore the parse error,
+// leaving the runtime to call AccessToken() with a zero-value key and
+// emit a confusing downstream error instead of a clear "bad SA file" one.
+func TestInjectAPIAuth_ServiceAccount_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	saPath := filepath.Join(dir, "sa.json")
+	if err := os.WriteFile(saPath, []byte("not valid json {{{"), 0o600); err != nil {
+		t.Fatalf("write sa file: %v", err)
+	}
+	t.Setenv("SA_PATH_BAD_JSON", saPath)
+	headers := make(map[string]string)
+	urlStr := "https://api.example.com"
+	auth := map[string]any{
+		"service_account": map[string]any{"env": "SA_PATH_BAD_JSON"},
+	}
+
+	err := injectAPIAuth(auth, headers, &urlStr, &apiHTTPConfig{})
+	if err == nil {
+		t.Fatal("expected error when service_account file is malformed JSON")
+	}
+	if !strings.Contains(err.Error(), "parse service_account") {
+		t.Errorf("error %q should mention parse failure (saw: %v)", err.Error(), err)
 	}
 }
 

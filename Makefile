@@ -64,6 +64,8 @@ bugcheck-static:
 	if [ -n "$$out" ]; then echo "[sink-call-missing-auth] FAIL"; echo "$$out"; echo; fail=1; fi; \
 	out=$$(grep -nE '\bmodel\.Kind\b|\.Kind\b' internal/execute/sink_delta.go 2>/dev/null); \
 	if [ -n "$$out" ]; then echo "[sink-delta-kind-specific] FAIL"; echo "$$out"; echo "    createSinkDelta must be kind-agnostic — all kinds use the same table_changes() query."; echo; fail=1; fi; \
+	out=$$(grep -rnE "fmt\.Sprintf\([^)]*\"ATTACH '%s'" internal/ --include='*.go' --exclude='*_test.go' 2>/dev/null | grep -v EscapeSQL); \
+	if [ -n "$$out" ]; then echo "[attach-no-escape] FAIL"; echo "$$out"; echo "    ATTACH 'connstr' interpolations must wrap the conn string with EscapeSQL(...)."; echo; fail=1; fi; \
 	if [ $$fail -eq 1 ]; then echo "bugcheck-static: failures above"; exit 1; fi; \
 	echo "bugcheck-static: clean"
 

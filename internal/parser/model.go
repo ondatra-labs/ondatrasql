@@ -318,6 +318,15 @@ func ParseModel(path, projectDir string) (*Model, error) {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
+		// Directives belong in the header (before any SQL line). If a
+		// directive-shaped comment appears after SQL has started, that's
+		// almost always a leftover from a refactor or a generated-template
+		// glitch. Silently overwriting model fields was the previous
+		// behavior and easy to miss; reject it instead.
+		if !inHeader && isDirectiveLine(trimmed) {
+			return nil, fmt.Errorf("directive %q appears after SQL body — directives must be in the header before any SQL", trimmed)
+		}
+
 		switch {
 		case kindRe.MatchString(trimmed):
 			matches := kindRe.FindStringSubmatch(trimmed)
@@ -486,6 +495,34 @@ func ParseModel(path, projectDir string) (*Model, error) {
 // columnTagRe matches a single-word tag (letters, digits, underscores).
 // Hyphens are not allowed — they produce invalid SQL (interpreted as subtraction).
 var columnTagRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
+
+// isDirectiveLine reports whether a trimmed line matches any of the
+// `@directive`-style comments the parser recognises. Used to reject
+// directives that appear after the SQL body has started.
+func isDirectiveLine(trimmed string) bool {
+	switch {
+	case kindRe.MatchString(trimmed),
+		scriptRe.MatchString(trimmed),
+		uniqueKeyRe.MatchString(trimmed),
+		groupKeyRe.MatchString(trimmed),
+		partitionedByRe.MatchString(trimmed),
+		incrementalRe.MatchString(trimmed),
+		incrementalInitialRe.MatchString(trimmed),
+		constraintRe.MatchString(trimmed),
+		auditRe.MatchString(trimmed),
+		warningRe.MatchString(trimmed),
+		extensionRe.MatchString(trimmed),
+		descriptionRe.MatchString(trimmed),
+		columnRe.MatchString(trimmed),
+		sortedByRe.MatchString(trimmed),
+		exposeRe.MatchString(trimmed),
+		sinkRe.MatchString(trimmed),
+		sinkDetectDeletesRe.MatchString(trimmed),
+		sinkDeleteThresholdRe.MatchString(trimmed):
+		return true
+	}
+	return false
+}
 
 // extractColumnTags extracts trailing pipe-separated tags from a column description.
 // Tags must be single-word tokens (e.g. "PII", "mask_email").

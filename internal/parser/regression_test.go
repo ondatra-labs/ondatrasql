@@ -121,3 +121,72 @@ func TestParseModel_SemicolonInString_OK(t *testing.T) {
 		t.Errorf("SQL should preserve semicolon in string, got: %s", model.SQL)
 	}
 }
+
+// --- Directives in SQL body rejected ---
+//
+// Before fix: a `-- @kind: ...`-style line anywhere in the file matched
+// the directive regex and overwrote the model's field, silently. A leftover
+// from a refactor or a generated-template glitch could land in the SQL body
+// and quietly change the model's kind / unique_key / sink / etc.
+//
+// After fix: directives must be in the header (before any SQL line). A
+// directive line that appears after SQL has started returns an error.
+
+func TestParseModel_DirectiveAfterSQLBody_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
+		"-- @kind: table\nSELECT 1 AS id\n-- @kind: view"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
+	if err == nil {
+		t.Fatal("directive after SQL body should be rejected")
+	}
+	if !strings.Contains(err.Error(), "after SQL body") {
+		t.Errorf("error should mention 'after SQL body', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "@kind") {
+		t.Errorf("error should name the offending directive, got: %v", err)
+	}
+}
+
+// Same check for sink/unique_key/incremental — every directive shape, not
+// just @kind. Picks @sink because it's a recent addition and easy to leave
+// behind when refactoring.
+func TestParseModel_SinkDirectiveAfterSQLBody_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "sink_late.sql"), []byte(
+		"-- @kind: append\nSELECT 1 AS id\n-- @sink: my_push"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "sink_late.sql"), dir)
+	if err == nil {
+		t.Fatal("@sink after SQL body should be rejected")
+	}
+	if !strings.Contains(err.Error(), "after SQL body") {
+		t.Errorf("error should mention 'after SQL body', got: %v", err)
+	}
+}
+
+// Comments that aren't directives must still work in the SQL body — the
+// fix only rejects directive-shaped comments, not all comments.
+func TestParseModel_PlainCommentInSQLBody_OK(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "comments.sql"), []byte(
+		"-- @kind: table\nSELECT\n  -- this is a normal comment\n  id, name\nFROM source"), 0o644)
+
+	model, err := ParseModel(filepath.Join(modelsDir, "comments.sql"), dir)
+	if err != nil {
+		t.Fatalf("plain comments in SQL body should be allowed, got error: %v", err)
+	}
+	if model.Kind != "table" {
+		t.Errorf("model.Kind = %q, want table", model.Kind)
+	}
+}
