@@ -299,8 +299,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		r.trace(result, "incremental.set_vars", stepStart, "ok")
 	}
 
-	// Get the SQL to execute - apply CDC transformation for incremental append/merge
-	execSQL := model.SQL
+	// Track the SQL transformation pipeline through this Run().
+	// state.Current() is what we execute; state.Rewritten() is the snapshot
+	// preserved as the retry target when CDC must be reverted. See sql_state.go.
+	state := newRunSQLState(model.SQL)
 
 	// Auto-detect tables and column lineage from SQL (single AST query)
 	stepStart = time.Now()
@@ -615,7 +617,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					if desErr != nil {
 						return nil, fmt.Errorf("deserialize rewritten AST: %w", desErr)
 					}
-					execSQL = rewrittenSQL
+					state.Promote(rewrittenSQL)
 				}
 
 				// String-based rewrite for API dict libs (macro-expanded, not
@@ -629,18 +631,16 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						}
 					}
 					if len(stringCalls) > 0 {
-						execSQL = rewriteLibCallsByString(execSQL, stringCalls)
+						state.Promote(rewriteLibCallsByString(state.Current(), stringCalls))
 					}
 				}
 
 				// Re-parse AST for lineage/CDC (now references temp tables, not lib functions)
-				astJSON, _ = r.getAST(execSQL)
+				astJSON, _ = r.getAST(state.Current())
 			}
 	}  // end if r.libRegistry != nil
-
-	// Save the (possibly lib-rewritten) SQL so CDC fallback paths
-	// use the rewritten version, not the original model.SQL.
-	baseExecSQL := execSQL
+	// state.Rewritten() is now the post-lib-rewrite SQL — used as retry target
+	// when CDC must be reverted.
 
 	tables, _ := lineage.ExtractTablesFromAST(astJSON)
 	colLineage, _ := lineage.ExtractFromAST(astJSON)
@@ -774,37 +774,38 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 			if schemaChanged {
 				result.Warnings = append(result.Warnings, "upstream schema changed, skipping CDC")
-				execSQL = baseExecSQL
+				state.RevertToRewritten()
 				needsBackfill = true
 			} else if insertOnly {
 				// Phase 2: all source changes are inserts — apply CDC with
 				// the same EXCEPT approach but log the optimization.
-				var cdcErr error
-				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
+				cdcSQL, cdcErr := r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					execSQL = baseExecSQL
+					state.RevertToRewritten()
 				} else {
+					state.SetCurrent(cdcSQL)
 					r.trace(result, "cdc.applied_insert_only:"+strings.Join(cdcTables, ","), stepStart, "ok")
 				}
 			} else {
 				// Mixed changes (updates/deletes) — full EXCEPT
-				var cdcErr error
-				execSQL, cdcErr = r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
+				cdcSQL, cdcErr := r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					execSQL = baseExecSQL
+					state.RevertToRewritten()
 				} else {
+					state.SetCurrent(cdcSQL)
 					r.trace(result, "cdc.applied:"+strings.Join(cdcTables, ","), stepStart, "ok")
 				}
 			}
 		} else {
 			// No upstream changes — sources unchanged since last run
-			var emptyErr error
-			execSQL, emptyErr = r.applyEmptySmartCDC(astJSON, cdcTables)
+			emptySQL, emptyErr := r.applyEmptySmartCDC(astJSON, cdcTables)
 			if emptyErr != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("CDC empty failed, using full query: %v", emptyErr))
-				execSQL = baseExecSQL
+				state.RevertToRewritten()
+			} else {
+				state.SetCurrent(emptySQL)
 			}
 		}
 	} else if tableExtractTime > time.Millisecond {
@@ -844,14 +845,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			}
 		}
 		if len(tablesToQualify) > 0 {
-			// Re-parse the current execSQL AST for qualification
+			// Re-parse the current SQL AST for qualification
 			qualified := false
-			if execAST, qualErr := r.getAST(execSQL); qualErr == nil {
+			if execAST, qualErr := r.getAST(state.Current()); qualErr == nil {
 				if root, parseErr := parseASTJSON(execAST); parseErr == nil {
 					qualifyTablesInAST(root, tablesToQualify, r.sess.ProdAlias())
 					if modified, marshalErr := json.Marshal(root); marshalErr == nil {
 						if deserialized, deserErr := r.deserializeAST(string(modified)); deserErr == nil {
-							execSQL = deserialized
+							state.SetCurrent(deserialized)
 							qualified = true
 						}
 					}
@@ -864,21 +865,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	}
 
 	// Apply column masking if @column tags reference masking macros
-	execSQL = applyColumnMasking(execSQL, model)
+	state.SetCurrent(applyColumnMasking(state.Current(), model))
 
 	// Create temp model
-	tmpTable := "tmp_" + sanitizeTableName(model.Target)
-	createSQL := fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, execSQL)
+	state.SetTmpTable("tmp_" + sanitizeTableName(model.Target))
+	tmpTable := state.TmpTable()
+	createSQL := fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, state.Current())
 	stepStart = time.Now()
 	if err := r.sess.Exec(createSQL); err != nil {
 		// CDC EXCEPT can fail on edge cases (e.g. DuckDB unicode stats after TRUNCATE+INSERT).
 		// Fall back to full query without CDC.
-		if isIncremental && execSQL != baseExecSQL {
+		if isIncremental && !state.CurrentMatchesRewritten() {
 			r.trace(result, "create_temp", stepStart, "retry")
 			result.Warnings = append(result.Warnings, fmt.Sprintf("CDC query failed (%v), retrying with full query", err))
-			execSQL = baseExecSQL
+			state.RevertToRewritten()
 			needsBackfill = true
-			createSQL = fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, execSQL)
+			createSQL = fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, state.Current())
 			stepStart = time.Now()
 			if retryErr := r.sess.Exec(createSQL); retryErr != nil {
 				r.trace(result, "create_temp", stepStart, "error")
@@ -891,7 +893,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			// rewritten SQL, then create an empty temp table with that
 			// schema. DESCRIBE plans but does not execute the query.
 			r.trace(result, "create_temp", stepStart, "retry_describe")
-			descRows, descErr := r.sess.QueryRows(fmt.Sprintf("SELECT column_name || ' ' || column_type FROM (DESCRIBE %s)", execSQL))
+			descRows, descErr := r.sess.QueryRows(fmt.Sprintf("SELECT column_name || ' ' || column_type FROM (DESCRIBE %s)", state.Current()))
 			if descErr == nil && len(descRows) > 0 {
 				r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
 				descCreateSQL := fmt.Sprintf("CREATE TEMP TABLE %s (%s)", tmpTable, strings.Join(descRows, ", "))
