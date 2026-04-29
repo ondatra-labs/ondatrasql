@@ -56,14 +56,56 @@ func (r *Runtime) SetIngestDir(dir string) {
 	r.ingestDir = dir
 }
 
+// parseEmptyResult reads the optional "empty_result" key from a fetch
+// return dict and returns the parsed intent, falling back to defaultIntent
+// when the key is missing or carries an unknown string. Unknown values
+// are silently coerced rather than rejected — the runner treats this as
+// soft metadata, not a contract that should fail the run.
+func parseEmptyResult(retDict *starlark.Dict, defaultIntent EmptyResultIntent) EmptyResultIntent {
+	v, found, _ := retDict.Get(starlark.String("empty_result"))
+	if !found {
+		return defaultIntent
+	}
+	s, ok := starlark.AsString(v)
+	if !ok {
+		return defaultIntent
+	}
+	switch EmptyResultIntent(s) {
+	case EmptyNoChange:
+		return EmptyNoChange
+	case EmptyDeleteMissing:
+		return EmptyDeleteMissing
+	default:
+		return defaultIntent
+	}
+}
+
+// EmptyResultIntent describes what a 0-row fetch return means in the context
+// of a tracked-kind model. The lib declares this per-call via its fetch
+// return dict; the runner uses it to decide whether to delete groups that
+// disappeared from the source or preserve the existing target.
+type EmptyResultIntent string
+
+const (
+	// EmptyNoChange means "the source genuinely has no new data; target
+	// state is still authoritative". Tracked materialize must NOT delete
+	// groups missing from this empty result. Default for lib-backed tracked.
+	EmptyNoChange EmptyResultIntent = "no_change"
+	// EmptyDeleteMissing means "the source is fully enumerated, and the
+	// 0-row response represents a real empty state". Tracked materialize
+	// proceeds with delete-on-missing semantics. Opt-in.
+	EmptyDeleteMissing EmptyResultIntent = "delete_missing"
+)
+
 // Result contains the outcome of script execution.
 type Result struct {
-	TempTable string        // Name of temp table with collected data
-	RowCount  int64         // Number of rows collected
-	Duration  time.Duration // Script execution time
-	ClaimIDs  []string      // Badger claim IDs (non-nil only when Badger is used)
-	collector *saveCollector   // internal: deferred temp table creation (in-memory mode)
-	badger    *badgerCollector // internal: durable mode
+	TempTable   string            // Name of temp table with collected data
+	RowCount    int64             // Number of rows collected
+	Duration    time.Duration     // Script execution time
+	ClaimIDs    []string          // Badger claim IDs (non-nil only when Badger is used)
+	EmptyResult EmptyResultIntent // Lib's intent when RowCount==0; defaults to EmptyNoChange
+	collector   *saveCollector    // internal: deferred temp table creation (in-memory mode)
+	badger      *badgerCollector  // internal: durable mode
 }
 
 // fileOptions returns the shared Starlark syntax options (Python-like semantics).
@@ -298,7 +340,13 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 	result := &Result{
 		Duration: time.Since(start),
 		RowCount: int64(collector.count()),
-		badger:   bc,
+		// Script-kind models don't currently flow through the lib smart-skip
+		// path, but defaulting to no_change keeps Result construction
+		// consistent across all four entry points (Run / RunSource /
+		// RunSourcePaginated / RunSourceAsync) and avoids a footgun if a
+		// future code path routes script kind through allLibsReturnedNoChange.
+		EmptyResult: EmptyNoChange,
+		badger:      bc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -419,7 +467,11 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 	result := &Result{
 		Duration: time.Since(start),
 		RowCount: int64(collector.count()),
-		badger:   bc,
+		// Legacy save.row() libs have no contract for declaring empty
+		// semantics — default to no_change so they get the same safe
+		// preserve-target behavior as the lib-API path.
+		EmptyResult: EmptyNoChange,
+		badger:      bc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -525,6 +577,9 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 	// Pagination loop
 	var cursor starlark.Value = starlark.None
 	pageNum := 1 // internal counter for error messages only
+	// Default for lib-backed tracked: 0 rows means "no change", preserve target.
+	// Lib can override per-call by setting "empty_result" in the final fetch dict.
+	emptyIntent := EmptyNoChange
 
 	for {
 		if ctx.Err() != nil {
@@ -577,9 +632,11 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 		// Extract next cursor. None, missing, or empty string = last page.
 		nextVal, found, _ := retDict.Get(starlark.String("next"))
 		if !found || nextVal == starlark.None {
+			emptyIntent = parseEmptyResult(retDict, emptyIntent)
 			break
 		}
 		if s, ok := nextVal.(starlark.String); ok && string(s) == "" {
+			emptyIntent = parseEmptyResult(retDict, emptyIntent)
 			break
 		}
 		cursor = nextVal
@@ -597,9 +654,10 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 	}
 
 	result := &Result{
-		Duration: time.Since(start),
-		RowCount: int64(collector.count()),
-		badger:   bc,
+		Duration:    time.Since(start),
+		RowCount:    int64(collector.count()),
+		EmptyResult: emptyIntent,
+		badger:      bc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -702,8 +760,11 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		return nil, fmt.Errorf("submit: %w", err)
 	}
 	if submitRet == nil || submitRet == starlark.None {
-		// abort() in submit — 0 rows
-		return &Result{Duration: time.Since(start)}, nil
+		// abort() in submit — 0 rows. Default to no_change so the runner's
+		// smart-skip path preserves target rows; without this, an aborted
+		// async fetch would silently fall through to destructive
+		// delete-on-missing semantics for tracked models.
+		return &Result{Duration: time.Since(start), EmptyResult: EmptyNoChange}, nil
 	}
 
 	// Phase 2: poll check() until done
@@ -751,6 +812,7 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 	// Phase 3: fetch_result() with pagination
 	var cursor starlark.Value = starlark.None
 	pageNum := 1
+	emptyIntent := EmptyNoChange
 
 	for {
 		if ctx.Err() != nil {
@@ -798,9 +860,11 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 
 		nextVal, _, _ := retDict.Get(starlark.String("next"))
 		if nextVal == nil || nextVal == starlark.None {
+			emptyIntent = parseEmptyResult(retDict, emptyIntent)
 			break
 		}
 		if s, ok := starlark.AsString(nextVal); ok && s == "" {
+			emptyIntent = parseEmptyResult(retDict, emptyIntent)
 			break
 		}
 		cursor = nextVal
@@ -808,9 +872,10 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 	}
 
 	result := &Result{
-		Duration: time.Since(start),
-		RowCount: int64(collector.count()),
-		badger:   bc,
+		Duration:    time.Since(start),
+		RowCount:    int64(collector.count()),
+		EmptyResult: emptyIntent,
+		badger:      bc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc

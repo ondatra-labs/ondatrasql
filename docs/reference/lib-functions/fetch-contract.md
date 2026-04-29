@@ -106,12 +106,34 @@ return {
 |---|---|---|
 | `"rows"` | Yes | List of dicts. Each dict is one row. |
 | `"next"` | No | Cursor for the next page. Any type — string, int, dict. `None`, missing, or `""` stops pagination. |
+| `"empty_result"` | No | Read from the final page; takes effect only when the fetch returned 0 rows total. `"no_change"` (default) tells `tracked` materialize to preserve the existing target. `"delete_missing"` tells it the source is fully enumerated and groups absent from the empty result should be deleted from the target. |
 
 The cursor is opaque — the runtime stores and returns it as-is. Dicts pass through directly:
 
 ```python
 next_cursor = {"idx": series_idx, "from": next_date, "until": yesterday}
 ```
+
+## Empty fetches and `tracked` {#empty-fetches-and-tracked}
+
+For `tracked`-kind models the runtime needs to know what a 0-row fetch *means*. Two cases:
+
+1. **Source has nothing new this run** — the lib reads a cache key, last-modified timestamp, or pre-computed digest, decides nothing changed upstream, and returns 0 rows. The target should stay as-is.
+2. **Source is fully enumerated and is genuinely empty** — every row in the target should be deleted.
+
+Set `empty_result` on the final page (the one whose `next` is `None` / missing / `""`) to disambiguate. The default is `no_change`, which is safe for fetches that may return 0 rows for any reason. Use `delete_missing` only when the lib enumerates the full source on every run and an empty fetch is the authoritative "everything is gone" signal.
+
+```python
+def fetch(page):
+    if cache_key_unchanged():
+        return {"rows": [], "next": None}  # implicit empty_result=no_change
+
+def fetch(page):
+    rows = http.get("/items").json
+    return {"rows": rows, "next": None, "empty_result": "delete_missing"}
+```
+
+`empty_result` has no effect when the fetch returned any rows in total. Unknown string values fall back to the default rather than failing the run.
 
 ## Pagination
 

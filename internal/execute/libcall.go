@@ -685,6 +685,245 @@ func extractColumnsForLib(ast *duckast.AST, alias string, singleSource bool) []s
 }
 
 
+// allLibsReturnedNoChange reports whether every lib call in this run
+// returned 0 rows AND declared `empty_result == "no_change"` (the default).
+// Used by tracked materialize to decide whether to preserve the target
+// or proceed with delete-on-missing semantics. If any lib returned rows
+// or any lib explicitly set `delete_missing`, this is false.
+func allLibsReturnedNoChange(libCalls []LibCall) bool {
+	if len(libCalls) == 0 {
+		return false
+	}
+	for i := range libCalls {
+		sr := libCalls[i].ScriptResult
+		if sr == nil {
+			return false
+		}
+		if sr.RowCount > 0 {
+			return false
+		}
+		if sr.EmptyResult != script.EmptyNoChange {
+			return false
+		}
+	}
+	return true
+}
+
+// colShape is a single column's name + DuckDB type, used for building
+// 0-row stub temp tables that need to match the model's declared schema.
+type colShape struct {
+	name    string
+	sqlType string // DuckDB DDL type, e.g. "VARCHAR", "DECIMAL(18,3)", "JSON"
+}
+
+// extractColShapeForLib produces the column shape that a 0-row stub for
+// this lib call must satisfy, derived entirely from the model's SQL.
+//
+// The model's SELECT is the schema authority. This walks the projection
+// for typed information (explicit casts) and merges with all-AST refs
+// (JOIN ON, WHERE, etc) so the stub also covers input-only columns the
+// query needs but doesn't project.
+//
+// Rules:
+//   - Projection columns with explicit cast (`col::TYPE` or `col::TYPE AS alias`)
+//     get that DuckDB type
+//   - Other projection columns (bare COLUMN_REF, computed expressions) get VARCHAR
+//   - Input-only refs (in WHERE/JOIN but not projected) get VARCHAR
+//   - Result is sorted by column name for deterministic ordering
+//
+// Returns empty if the SQL doesn't reference any columns belonging to this
+// lib (e.g. `SELECT *` against a single lib source — falls back to caller).
+func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) []colShape {
+	if ast == nil {
+		return nil
+	}
+
+	// Step 1: typed projection — walk SELECT list, capture (name → sqlType)
+	// for projections that belong to THIS lib alias. Multi-lib queries must
+	// not leak another lib's projection types into this stub. Bare
+	// COLUMN_REF and other forms get VARCHAR.
+	projTypes := make(map[string]string)
+	stmts := ast.Statements()
+	if len(stmts) > 0 {
+		for _, item := range stmts[0].SelectList() {
+			name, sqlType, sourceAlias := projectionNameTypeAndAlias(item)
+			if name == "" {
+				continue
+			}
+			// Filter by alias the same way extractColumnsForLib does for refs:
+			//   - qualified projection: only keep when its alias matches
+			//   - unqualified projection: keep only in single-source mode
+			if sourceAlias != "" {
+				if alias == "" || !strings.EqualFold(sourceAlias, alias) {
+					continue
+				}
+			} else if !singleSource {
+				continue
+			}
+			projTypes[name] = sqlType
+		}
+	}
+
+	// Step 2: all refs for this lib (projection + JOIN ON + WHERE + ...)
+	refCols := extractColumnsForLib(ast, alias, singleSource)
+	if len(refCols) == 0 && len(projTypes) == 0 {
+		return nil
+	}
+
+	// Step 3: union — refs determine which columns appear, projTypes
+	// supplies types where known, VARCHAR otherwise.
+	seen := make(map[string]bool)
+	var shape []colShape
+	for _, name := range refCols {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		t, ok := projTypes[name]
+		if !ok {
+			t = "VARCHAR"
+		}
+		shape = append(shape, colShape{name: name, sqlType: t})
+	}
+	// Projection-only columns (typed projection but not referenced as input —
+	// rare but possible with `SELECT 'literal' AS col FROM lib(...)`).
+	// Only valid in single-source mode: in multi-lib queries we cannot
+	// attribute an unqualified projection to a specific lib without the
+	// risk of leaking another lib's columns into this stub.
+	if singleSource {
+		for name, t := range projTypes {
+			if seen[name] {
+				continue
+			}
+			shape = append(shape, colShape{name: name, sqlType: t})
+		}
+	}
+
+	sort.Slice(shape, func(i, j int) bool { return shape[i].name < shape[j].name })
+	return shape
+}
+
+// projectionNameTypeAndAlias extracts (column-name, DuckDB-DDL-type, source-alias)
+// from a single SELECT-list AST node. The source-alias is the table alias
+// the underlying COLUMN_REF qualifies to (e.g. "a" for `a.id::BIGINT`), or
+// "" for unqualified refs and non-COLUMN_REF expressions. Returns "" name
+// for unrecognised forms.
+//
+// CAST nodes carry an `id` field on their cast_type child holding the DuckDB
+// type name ("DECIMAL", "VARCHAR", "JSON", etc). Composite types (DECIMAL with
+// precision/scale, LIST<X>, STRUCT) are reconstructed best-effort from
+// cast_type's `type_info`.
+func projectionNameTypeAndAlias(item *duckast.Node) (string, string, string) {
+	if item == nil {
+		return "", "", ""
+	}
+
+	switch item.Class() {
+	case "CAST":
+		castType := item.Field("cast_type")
+		sqlType := sqlTypeFromCastNode(castType)
+		var sourceAlias, underlyingName string
+		child := item.Field("child")
+		if child != nil && child.Class() == "COLUMN_REF" {
+			names := child.ColumnNames()
+			if len(names) >= 2 {
+				sourceAlias = names[0]
+				underlyingName = names[len(names)-1]
+			} else if len(names) == 1 {
+				underlyingName = names[0]
+			}
+		}
+		// Name preference: alias > underlying column name
+		if alias := item.Alias(); alias != "" {
+			return alias, sqlType, sourceAlias
+		}
+		if underlyingName != "" {
+			return underlyingName, sqlType, sourceAlias
+		}
+		return "", sqlType, sourceAlias
+
+	case "COLUMN_REF":
+		names := item.ColumnNames()
+		if len(names) == 0 {
+			return "", "VARCHAR", ""
+		}
+		var sourceAlias string
+		if len(names) >= 2 {
+			sourceAlias = names[0]
+		}
+		name := names[len(names)-1]
+		if alias := item.Alias(); alias != "" {
+			name = alias
+		}
+		return name, "VARCHAR", sourceAlias
+
+	default:
+		// Computed expression, function call, literal — VARCHAR is the safe
+		// default; explicit cast in the SELECT recovers precision. We can't
+		// attribute these to a specific lib alias.
+		if alias := item.Alias(); alias != "" {
+			return alias, "VARCHAR", ""
+		}
+		return "", "VARCHAR", ""
+	}
+}
+
+// sqlTypeFromCastNode reconstructs a DuckDB DDL type string from a cast_type
+// AST node. Returns "VARCHAR" if the node is missing or unrecognised.
+func sqlTypeFromCastNode(castType *duckast.Node) string {
+	if castType == nil {
+		return "VARCHAR"
+	}
+	id := castType.String("id")
+	if id == "" {
+		return "VARCHAR"
+	}
+
+	// DECIMAL / NUMERIC carry precision + scale in type_info.
+	if id == "DECIMAL" || id == "NUMERIC" {
+		typeInfo := castType.Field("type_info")
+		if typeInfo != nil {
+			width := typeInfo.String("width")
+			scale := typeInfo.String("scale")
+			if width != "" && scale != "" {
+				return fmt.Sprintf("DECIMAL(%s,%s)", width, scale)
+			}
+			if width != "" {
+				return fmt.Sprintf("DECIMAL(%s,0)", width)
+			}
+		}
+		return "DECIMAL"
+	}
+
+	// UNBOUND is DuckDB's encoding for user-defined types (JSON, UUID,
+	// extension types). The actual type name lives on type_info.name.
+	if id == "UNBOUND" {
+		typeInfo := castType.Field("type_info")
+		if typeInfo != nil {
+			if name := typeInfo.String("name"); name != "" {
+				return name
+			}
+		}
+		return "VARCHAR"
+	}
+
+	// LIST<element>, STRUCT, MAP — best-effort reconstruction. For stub
+	// purposes the outer kind is what matters; element-type fidelity is
+	// not required for correct CREATE TABLE.
+	switch id {
+	case "LIST", "ARRAY":
+		return "VARCHAR[]" // simplification: stub doesn't need true element type
+	case "STRUCT":
+		return "VARCHAR" // stub doesn't construct; the rewrite path produces real data
+	case "MAP":
+		return "VARCHAR"
+	}
+
+	// Most types in DuckDB use the id verbatim as DDL: VARCHAR, BIGINT,
+	// INTEGER, DOUBLE, BOOLEAN, DATE, TIMESTAMP, JSON, BLOB, UUID, etc.
+	return id
+}
+
 // buildLibCallKwargs builds the kwargs map for calling a Starlark lib function.
 func buildLibCallKwargs(lib *libregistry.LibFunc, args []any, cols []string, typedCols []any) map[string]any {
 	kwargs := make(map[string]any)

@@ -2011,3 +2011,573 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 		t.Fatalf("sink did not fire for group-disappear case (SyncSucceeded=0, warnings: %v) — delete events lost", r2.Warnings)
 	}
 }
+
+// TestLibCall_Stub_SQLShape_Typed pins that on a first run with no target,
+// when the lib returns 0 rows, the stub uses the SQL projection's typed
+// columns (BIGINT, DOUBLE, etc) — not VARCHAR for everything. The target
+// table is then created with the typed schema, so subsequent runs with
+// real data don't fire false schema-evolution warnings.
+//
+// Regression for v0.24.0 Item 2 (SQL-shape primary in 0-row stub).
+func TestLibCall_Stub_SQLShape_Typed(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Phase 1: lib that returns 0 rows on first call (e.g., upstream not
+	// ready yet). Target does not exist → no target-clone fallback.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [], "next": None}
+`)
+
+	// SELECT has explicit casts: id BIGINT, amount DOUBLE
+	p.AddModel("raw/typed.sql", `-- @kind: table
+SELECT id::BIGINT AS id, name, amount::DOUBLE AS amount FROM src('items')
+`)
+
+	// First run — 0 rows, no target. Stub built from SQL projection types.
+	r1 := runModelWithLib(t, p, "raw/typed.sql")
+	if r1.RowsAffected != 0 {
+		t.Fatalf("run 1: expected 0 rows, got %d (warnings: %v)", r1.RowsAffected, r1.Warnings)
+	}
+
+	// Verify target was created with typed columns from the SQL,
+	// not VARCHAR fallbacks.
+	rows, err := p.Sess.QueryRowsMap(
+		"SELECT column_name, data_type FROM information_schema.columns " +
+			"WHERE table_schema='raw' AND table_name='typed' ORDER BY column_name")
+	if err != nil {
+		t.Fatalf("schema query: %v", err)
+	}
+	want := map[string]string{
+		"id":     "BIGINT",
+		"amount": "DOUBLE",
+		"name":   "VARCHAR", // bare COLUMN_REF, no cast → VARCHAR
+	}
+	got := make(map[string]string)
+	for _, row := range rows {
+		got[row["column_name"]] = row["data_type"]
+	}
+	for col, expectedType := range want {
+		if got[col] != expectedType {
+			t.Errorf("column %q: got type %q, want %q (full schema: %v)", col, got[col], expectedType, got)
+		}
+	}
+
+	// Phase 2: lib now returns real data. No false schema-evolution warning
+	// because the target's typed schema already matches what the data fits.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "Alice", "amount": 9.5}], "next": None}
+`)
+
+	// Touch the model so the @kind hash changes and table re-runs.
+	modelPath := filepath.Join(p.Dir, "models", "raw/typed.sql")
+	os.WriteFile(modelPath, []byte(`-- @kind: table
+SELECT id::BIGINT AS id, name, amount::DOUBLE AS amount FROM src('items') WHERE 1=1
+`), 0644)
+
+	r2 := runModelWithLib(t, p, "raw/typed.sql")
+	if r2.RowsAffected != 1 {
+		t.Fatalf("run 2: expected 1 row, got %d (warnings: %v)", r2.RowsAffected, r2.Warnings)
+	}
+	for _, w := range r2.Warnings {
+		if strings.Contains(w, "schema evolution") {
+			t.Fatalf("run 2: unexpected schema evolution warning (target was already typed): %s", w)
+		}
+	}
+}
+
+// TestLibCall_Tracked_EmptyResult_DefaultNoChange_PreservesTarget pins that
+// when a tracked-kind lib returns 0 rows on an incremental run AND does not
+// set empty_result (so it defaults to no_change), the target rows are
+// preserved — the runner does not interpret an empty fetch as "every group
+// disappeared from the source".
+//
+// This is the bug class hit by mistral_ocr's smart-skip pattern: lib detects
+// "nothing changed upstream" via cache key, returns 0 rows; without this
+// guard, tracked materialize would DELETE every group on each smart-skip
+// run, then re-fetch on the next, oscillating data forever.
+//
+// Regression for v0.24.0 Item 1 (tracked empty_result fetch metadata).
+func TestLibCall_Tracked_EmptyResult_DefaultNoChange_PreservesTarget(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Phase 1: lib returns 3 rows across 2 groups (smart-skip will be
+	// activated by rewriting the lib in phase 2).
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "id": 1, "name": "Alice"},
+        {"region": "US", "id": 2, "name": "Bob"},
+        {"region": "EU", "id": 3, "name": "Carol"},
+    ], "next": None}
+`)
+
+	p.AddModel("raw/regional.sql", `-- @kind: tracked
+-- @group_key: region
+SELECT region, id, name FROM src('items')
+`)
+
+	// Run 1 — backfill: 3 rows, 2 groups
+	r1 := runModelWithLib(t, p, "raw/regional.sql")
+	if r1.RowsAffected != 3 {
+		t.Fatalf("run 1: expected 3 rows, got %d (warnings: %v)", r1.RowsAffected, r1.Warnings)
+	}
+
+	// Phase 2: lib smart-skips — returns 0 rows with NO empty_result key
+	// (defaults to no_change). Tracked materialize MUST preserve the
+	// existing target.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [], "next": None}
+`)
+
+	// Run 2 — smart-skip. RowsAffected==0, target unchanged. The runner
+	// still goes through stub creation, schema-evolution, and materialize
+	// so SQL-only changes (new columns, audit changes) would still apply
+	// — only the delete-missing-groups branch is suppressed.
+	r2 := runModelWithLib(t, p, "raw/regional.sql")
+	if r2.RowsAffected != 0 {
+		t.Fatalf("run 2: expected 0 rows, got %d", r2.RowsAffected)
+	}
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regional")
+	if err != nil {
+		t.Fatalf("count after run 2: %v", err)
+	}
+	if count != "3" {
+		t.Fatalf("run 2: target preservation failed — expected 3 rows, got %s", count)
+	}
+
+	// Run 3 — same smart-skip, no oscillation
+	r3 := runModelWithLib(t, p, "raw/regional.sql")
+	if r3.RowsAffected != 0 {
+		t.Fatalf("run 3: expected 0 rows, got %d", r3.RowsAffected)
+	}
+	count, err = p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regional")
+	if err != nil {
+		t.Fatalf("count after run 3: %v", err)
+	}
+	if count != "3" {
+		t.Fatalf("run 3: target preservation failed — expected 3 rows, got %s", count)
+	}
+}
+
+// TestLibCall_Tracked_EmptyResult_DeleteMissing pins that a tracked-kind lib
+// can opt in to legacy hard-delete-on-empty semantics by setting
+// empty_result="delete_missing" in its fetch return. This is the explicit
+// "fully-enumerated source, the empty really means empty" contract — every
+// group gets deleted from the target.
+//
+// Regression for v0.24.0 Item 1 — opt-in path for the explicit hard-delete
+// case (industry parallel: dbt hard_deletes, Airbyte CDC removal).
+func TestLibCall_Tracked_EmptyResult_DeleteMissing(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Phase 1: lib returns 2 rows across 2 groups
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 100},
+        {"region": "EU", "amount": 200},
+    ], "next": None}
+`)
+
+	p.AddModel("raw/regional.sql", `-- @kind: tracked
+-- @group_key: region
+SELECT region, amount FROM src('items')
+`)
+
+	r1 := runModelWithLib(t, p, "raw/regional.sql")
+	if r1.RowsAffected != 2 {
+		t.Fatalf("run 1: expected 2 rows, got %d (warnings: %v)", r1.RowsAffected, r1.Warnings)
+	}
+
+	// Phase 2: lib explicitly declares the source is fully enumerated and
+	// has gone empty. Tracked must delete all groups.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [], "empty_result": "delete_missing", "next": None}
+`)
+
+	r2 := runModelWithLib(t, p, "raw/regional.sql")
+	t.Logf("run 2: rows=%d type=%s warnings=%v", r2.RowsAffected, r2.RunType, r2.Warnings)
+
+	// Target should now be empty — both groups were deleted.
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regional")
+	if err != nil {
+		t.Fatalf("count after run 2: %v", err)
+	}
+	if count != "0" {
+		t.Fatalf("delete_missing failed: expected 0 rows, got %s — opt-in hard-delete did not fire", count)
+	}
+}
+
+// TestLibCall_Stub_SQLShape_MultiLib_NoLeak pins that, in a multi-lib query
+// where one lib returns 0 rows, the SQL-shape stub for that lib is built
+// only from columns qualified to its alias — projection-only columns that
+// belong to OTHER libs are not leaked into this stub. Without the per-alias
+// filter, the stub would gain spurious columns and bind ambiguously against
+// the rewritten SQL.
+//
+// Regression for v0.24.0 reviewer concern #3 (extractColShapeForLib leak).
+func TestLibCall_Stub_SQLShape_MultiLib_NoLeak(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Lib A: always has data
+	writeLib(t, p, "api_a", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"},
+    ], "next": None}
+`)
+
+	// Lib B: returns 0 rows on first call (drives the stub path)
+	writeLib(t, p, "api_b", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["table"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [], "next": None}
+`)
+
+	// SELECT projects a.name and b.score, joins on user_id. The stub for
+	// api_b must NOT gain `name` (which qualifies to a, not b).
+	p.AddModel("raw/joined.sql", `-- @kind: table
+SELECT a.name, b.score::BIGINT AS score
+FROM api_a('users') a
+JOIN api_b('scores') b ON a.id = b.user_id
+`)
+
+	r1 := runModelWithLib(t, p, "raw/joined.sql")
+	t.Logf("run 1: rows=%d type=%s warnings=%v", r1.RowsAffected, r1.RunType, r1.Warnings)
+	// Build must not have failed with binding ambiguity on `name` between
+	// api_a's stub-or-real and api_b's stub.
+	if len(r1.Errors) > 0 {
+		t.Fatalf("run 1 failed: %v", r1.Errors)
+	}
+}
+
+// TestLibCall_Tracked_EmptyResult_NoChange_AuditBypassesFastPath pins
+// that the no-cascade fast path is correctly *bypassed* when a tracked
+// model declares an `@audit`. Audits are wrapped into the materialize
+// transaction so a failing audit can roll back the schema ALTER + data
+// write + commit metadata together; if the runtime took the fast path
+// on a 0-row no_change run the audit would never execute and any
+// invariant it pins would silently stop being checked.
+//
+// We verify by checking that a downstream model sees a dep change after
+// the empty no_change run — proving materialize committed (which only
+// happens when the fast path is bypassed). Compare with
+// TestLibCall_Tracked_EmptyResult_NoChange_NoSnapshotCascade which uses
+// the same shape minus the @audit and DOES skip downstream.
+//
+// Note: `@constraint` checks run before materialize (read-only) and
+// therefore are independent of the fast-path decision — they are not
+// part of this contract.
+func TestLibCall_Tracked_EmptyResult_NoChange_AuditBypassesFastPath(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 100},
+    ], "next": None}
+`)
+
+	// Model with an audit that always passes (vacuously true on 0 rows
+	// too). The runner builds auditSQL != "", which must disable the
+	// no-cascade fast path on the empty no_change run.
+	p.AddModel("raw/audited.sql", `-- @kind: tracked
+-- @group_key: region
+-- @audit: row_count(>=, 0)
+SELECT region, amount FROM src('items')
+`)
+
+	p.AddModel("staging/derived.sql", `-- @kind: table
+SELECT region, amount * 10 AS scaled FROM raw.audited
+`)
+
+	r1up := runModelWithLib(t, p, "raw/audited.sql")
+	if r1up.RowsAffected != 1 {
+		t.Fatalf("upstream run 1: expected 1 row, got %d (warnings: %v errors: %v)", r1up.RowsAffected, r1up.Warnings, r1up.Errors)
+	}
+	r1ds := runModelWithLib(t, p, "staging/derived.sql")
+	if r1ds.RowsAffected != 1 {
+		t.Fatalf("downstream run 1: expected 1 row, got %d", r1ds.RowsAffected)
+	}
+
+	// Phase 2: lib returns 0 rows. Audit must keep materialize on the
+	// slow path (commit happens, snapshot bumps), so downstream sees the
+	// dep as changed and re-runs.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [], "next": None}
+`)
+
+	r2up := runModelWithLib(t, p, "raw/audited.sql")
+	if r2up.RowsAffected != 0 {
+		t.Fatalf("upstream run 2: expected 0 rows, got %d (warnings: %v errors: %v)", r2up.RowsAffected, r2up.Warnings, r2up.Errors)
+	}
+	// Target row preserved (audit doesn't change semantics — no_change
+	// still suppresses the delete branch in materializeTracked).
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.audited")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != "1" {
+		t.Fatalf("audited tracked + 0-row no_change: expected 1 row preserved, got %s", count)
+	}
+
+	// Downstream: dep changed (because audit forced a commit). RunType
+	// must NOT be 'skip' — that would mean the fast path fired despite
+	// the audit, leaving the audit unevaluated.
+	r2ds := runModelWithLib(t, p, "staging/derived.sql")
+	if r2ds.RunType == "skip" {
+		t.Fatalf("downstream run 2: RunType=skip indicates upstream took the no-cascade fast path despite having an @audit")
+	}
+}
+
+// TestLibCall_Tracked_EmptyResult_NoChange_NoSnapshotCascade pins that a
+// tracked + lib + 0-row + no_change run does NOT create a new DuckLake
+// snapshot when there is nothing to record (no schema evolution, no audits,
+// no extra SQL). Without this fast path, every smart-skip would bump the
+// model's snapshot id and trigger a downstream dep-change cascade — every
+// dependent model would rebuild on every smart-skip, defeating the purpose
+// of the whole no_change semantics.
+//
+// We verify by checking that a downstream `table` model marks the dep as
+// unchanged after the smart-skip — if a snapshot got created, it would
+// instead see "dep changed" and run.
+//
+// Regression for v0.24.0 efficiency: smart-skip must not cascade.
+func TestLibCall_Tracked_EmptyResult_NoChange_NoSnapshotCascade(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "amount": 100},
+    ], "next": None}
+`)
+
+	p.AddModel("raw/upstream.sql", `-- @kind: tracked
+-- @group_key: region
+SELECT region, amount FROM src('items')
+`)
+
+	// Downstream depends on raw.upstream — should rebuild only when upstream
+	// genuinely changes.
+	p.AddModel("staging/downstream.sql", `-- @kind: table
+SELECT region, amount * 2 AS doubled FROM raw.upstream
+`)
+
+	// Run 1: backfill upstream + downstream
+	r1up := runModelWithLib(t, p, "raw/upstream.sql")
+	if r1up.RowsAffected != 1 {
+		t.Fatalf("upstream run 1: expected 1 row, got %d", r1up.RowsAffected)
+	}
+	r1ds := runModelWithLib(t, p, "staging/downstream.sql")
+	if r1ds.RowsAffected != 1 {
+		t.Fatalf("downstream run 1: expected 1 row, got %d", r1ds.RowsAffected)
+	}
+
+	// Phase 2: lib smart-skips upstream
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [], "next": None}
+`)
+
+	r2up := runModelWithLib(t, p, "raw/upstream.sql")
+	if r2up.RowsAffected != 0 {
+		t.Fatalf("upstream run 2: expected 0 rows, got %d", r2up.RowsAffected)
+	}
+
+	// Downstream run 2: dep upstream smart-skipped (no real change). The
+	// runner should mark this as 'skip' — same dep snapshot id as before.
+	r2ds := runModelWithLib(t, p, "staging/downstream.sql")
+	if r2ds.RunType != "skip" {
+		t.Errorf("downstream run 2: expected RunType=skip (smart-skip didn't change dep), got %q reason=%q",
+			r2ds.RunType, r2ds.RunReason)
+	}
+}
+
+// TestLibCall_Tracked_EmptyResult_NoChange_SchemaEvolves pins that even when
+// a tracked-kind lib smart-skips with 0 rows + default no_change semantics,
+// SQL-only changes (a new column added to the model SELECT) are still
+// applied to the target. The runner must NOT take a global skip path that
+// suppresses schema evolution — only the delete-missing-groups branch of
+// tracked materialize should be suppressed.
+//
+// Regression for v0.24.0 reviewer concern #1.
+func TestLibCall_Tracked_EmptyResult_NoChange_SchemaEvolves(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Phase 1: lib returns rows with two value columns; tracked target gets
+	// (region, id, val1) schema.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [
+        {"region": "US", "id": 1, "val1": "alpha"},
+        {"region": "EU", "id": 2, "val1": "beta"},
+    ], "next": None}
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: tracked
+-- @group_key: region
+SELECT region, id, val1 FROM src('items')
+`)
+
+	r1 := runModelWithLib(t, p, "raw/data.sql")
+	if r1.RowsAffected != 2 {
+		t.Fatalf("run 1: expected 2 rows, got %d (warnings: %v)", r1.RowsAffected, r1.Warnings)
+	}
+
+	// Phase 2: lib smart-skips (returns 0 rows, no empty_result key →
+	// default no_change). The model SELECT gains a new column `val2`.
+	// Schema evolution must add `val2` to the target even though no
+	// data is being written this run.
+	writeLib(t, p, "src", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["tracked"],
+    },
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    return {"rows": [], "next": None}
+`)
+
+	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
+	os.WriteFile(modelPath, []byte(`-- @kind: tracked
+-- @group_key: region
+SELECT region, id, val1, val2 FROM src('items')
+`), 0644)
+
+	r2 := runModelWithLib(t, p, "raw/data.sql")
+	t.Logf("run 2: rows=%d type=%s warnings=%v", r2.RowsAffected, r2.RunType, r2.Warnings)
+
+	// Existing target rows must still be there (smart-skip preserves data).
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.data")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != "2" {
+		t.Fatalf("smart-skip + schema evolution: expected target preserved at 2 rows, got %s", count)
+	}
+
+	// Schema evolution must have added the new column even with 0-row run.
+	cols, err := p.Sess.QueryValue(
+		"SELECT string_agg(column_name, ',' ORDER BY ordinal_position) " +
+			"FROM information_schema.columns WHERE table_schema='raw' AND table_name='data'")
+	if err != nil {
+		t.Fatalf("schema query: %v", err)
+	}
+	if !strings.Contains(cols, "val2") {
+		t.Fatalf("smart-skip suppressed schema evolution: expected `val2` column in target, got %q", cols)
+	}
+}
+

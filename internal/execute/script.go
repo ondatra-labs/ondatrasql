@@ -320,7 +320,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// Audits run inside the same BEGIN/COMMIT, so a failing audit aborts
 	// the whole materialize atomically — no separate rollback() needed.
 	stepStart = time.Now()
-	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, scriptHash, result.RunType, result, start, extraPreSQL...)
+	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, scriptHash, result.RunType, result, start, trackedRunOpts{}, extraPreSQL...)
 	if err != nil {
 		r.trace(result, "materialize", stepStart, "error")
 		// A failed audit raises error() inside the BEGIN/COMMIT, which

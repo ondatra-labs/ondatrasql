@@ -310,7 +310,8 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Detect and execute lib function calls in FROM clause (e.g. FROM gam_fetch(...))
 	var libCalls []LibCall
-	var hasInferredStubs bool // true when 0-row lib stubs were created from AST/column inference
+	var hasInferredStubs bool        // true when 0-row lib stubs were created from AST/column inference
+	var trackedOpts trackedRunOpts   // populated when tracked + lib + all-empty + no_change semantics
 	// Ensure all lib-call Badger stores are cleaned up on any exit path.
 	// Claims that were not explicitly acked are nacked (returned to queue).
 	// The acked flag is set in the success path after materialize.
@@ -524,6 +525,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					stepStart = time.Now()
 				}
 
+				// Tracked + lib + all 0-row returns + every lib's empty_result
+				// is "no_change" (the default) → tell tracked materialize to
+				// suppress the delete-missing-groups branch so target rows
+				// are preserved. The rest of the pipeline (stubs, rewrite,
+				// schema evolution, audits, materialize) still runs so that
+				// SQL-only changes (new columns, audit changes) are applied.
+				trackedOpts.noDeleteOnMissingGroups = model.Kind == "tracked" && allLibsReturnedNoChange(libCalls)
+
 				// For lib calls that returned 0 rows, create empty stub
 				// temp tables using the input-shape columns the query
 				// references for each specific lib call — not the output
@@ -551,30 +560,45 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						continue
 					}
 
-					// 2. Dynamic-column libs: if target exists, clone from
-					//    it (real types, no false schema evolution). Otherwise
-					//    extract referenced columns from the query and use
-					//    VARCHAR (the lib's raw output type).
-					if targetExists, _ := r.tableExistsCheck(model.Target); targetExists {
-						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
-						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", stubName, model.Target)); err != nil {
-							return nil, fmt.Errorf("create empty lib stub from target %s: %w", model.Target, err)
-						}
-						call.TempTable = stubName
-						hasInferredStubs = true
-						continue
-					}
-
+					// 2. Dynamic-column libs: build the stub from the model
+					//    SQL's column shape — typed projection where there
+					//    are explicit casts, plus input-only refs (JOIN ON,
+					//    WHERE, etc) as VARCHAR. SQL is the schema authority;
+					//    the runner already extracts this AST info elsewhere.
+					//    This catches schema evolution on 0-row runs that
+					//    target-clone would have hidden.
+					//
+					//    When target exists, prefer the target's established
+					//    type for VARCHAR fallback columns (no explicit cast)
+					//    so we don't trigger false schema-evolution warnings.
+					//    Explicit SQL casts always win.
 					alias := ""
 					if call.ASTNode != nil {
 						alias = call.ASTNode.Alias()
 					}
-					refCols := extractColumnsForLib(parsedAST, alias, singleLibSource)
-
-					if len(refCols) > 0 {
+					if shape := extractColShapeForLib(parsedAST, alias, singleLibSource); len(shape) > 0 {
+						if targetExists, _ := r.tableExistsCheck(model.Target); targetExists {
+							targetTypes, fetchErr := r.fetchTargetColumnTypes(model.Target)
+							if fetchErr != nil {
+								// Surface the failure rather than silently degrading
+								// to all-VARCHAR, which would trigger false schema
+								// evolution warnings on subsequent runs with data.
+								result.Warnings = append(result.Warnings,
+									fmt.Sprintf("lib stub: target type lookup failed for %s: %v (falling back to SQL-shape types)",
+										model.Target, fetchErr))
+							}
+							for i := range shape {
+								if shape[i].sqlType != "VARCHAR" {
+									continue
+								}
+								if t, ok := targetTypes[shape[i].name]; ok && t != "" {
+									shape[i].sqlType = t
+								}
+							}
+						}
 						var colDefs []string
-						for _, name := range refCols {
-							colDefs = append(colDefs, fmt.Sprintf("%s VARCHAR", duckdb.QuoteIdentifier(name)))
+						for _, c := range shape {
+							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.name), c.sqlType))
 						}
 						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
 						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
@@ -585,7 +609,20 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						continue
 					}
 
-					// 3. No columns, no target — first run, skip.
+					// 3. SQL didn't reference any columns belonging to this
+					//    lib (e.g. `SELECT *` against a single lib source).
+					//    Fall back to cloning the existing target.
+					if targetExists, _ := r.tableExistsCheck(model.Target); targetExists {
+						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", stubName, model.Target)); err != nil {
+							return nil, fmt.Errorf("create empty lib stub from target %s: %w", model.Target, err)
+						}
+						call.TempTable = stubName
+						hasInferredStubs = true
+						continue
+					}
+
+					// 4. No SQL shape, no target — first run, skip.
 					ackLibClaims()
 					result.RowsAffected = 0
 					result.RunType = "skip"
@@ -1015,7 +1052,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Execute based on kind (includes audits + commit metadata in same transaction)
 	stepStart = time.Now()
-	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, sqlHash, result.RunType, result, start, libExtraPreSQL...)
+	rowsAffected, err := r.materialize(model, tmpTable, needsBackfill, schemaChange, auditSQL, sqlHash, result.RunType, result, start, trackedOpts, libExtraPreSQL...)
 	if err != nil {
 		r.trace(result, "materialize", stepStart, "error")
 		// A failed audit raises error() inside the BEGIN/COMMIT, which

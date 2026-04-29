@@ -2747,6 +2747,78 @@ def simple(save, greeting="hello"):
 	}
 }
 
+// TestParseEmptyResult covers the parser used by every paginated/async fetch
+// path. The contract: missing key → default; known strings → that value;
+// unknown values → default (silent coercion, never fails the run); non-string
+// values → default. Pinning every branch matters because the public docs
+// promise "Unknown string values fall back to the default rather than
+// failing the run" — a future change that flips coercion to error would
+// break tracked libs that pass arbitrary strings.
+func TestParseEmptyResult(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		value   starlark.Value // nil = key not present
+		dflt    EmptyResultIntent
+		want    EmptyResultIntent
+	}{
+		{"missing key keeps default no_change", nil, EmptyNoChange, EmptyNoChange},
+		{"missing key keeps default delete_missing", nil, EmptyDeleteMissing, EmptyDeleteMissing},
+		{"explicit no_change", starlark.String("no_change"), EmptyDeleteMissing, EmptyNoChange},
+		{"explicit delete_missing", starlark.String("delete_missing"), EmptyNoChange, EmptyDeleteMissing},
+		{"unknown string falls back to default", starlark.String("garbage"), EmptyNoChange, EmptyNoChange},
+		{"unknown string falls back even when default is delete_missing", starlark.String("garbage"), EmptyDeleteMissing, EmptyDeleteMissing},
+		{"empty string falls back to default", starlark.String(""), EmptyNoChange, EmptyNoChange},
+		{"non-string value falls back to default", starlark.MakeInt(42), EmptyNoChange, EmptyNoChange},
+		{"None falls back to default", starlark.None, EmptyNoChange, EmptyNoChange},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := starlark.NewDict(1)
+			if tc.value != nil {
+				if err := d.SetKey(starlark.String("empty_result"), tc.value); err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+			}
+			got := parseEmptyResult(d, tc.dflt)
+			if got != tc.want {
+				t.Errorf("parseEmptyResult(%v, %q) = %q, want %q", tc.value, tc.dflt, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunSource_DefaultEmptyResult pins that legacy save.row() libs default to
+// EmptyNoChange when their fetch returns 0 rows. The runner uses this to
+// decide whether to preserve target rows on tracked-kind models — without
+// the default, allLibsReturnedNoChange would treat zero-value EmptyResult
+// as "delete missing groups", silently regressing the v0.24.0 contract for
+// any code path that still calls RunSource.
+func TestRunSource_DefaultEmptyResult(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "lib"), 0755)
+	os.WriteFile(filepath.Join(dir, "lib", "noop.star"), []byte(`
+def noop(save):
+    pass
+`), 0644)
+
+	rt := NewRuntime(nil, nil, dir)
+	result, err := rt.RunSource(context.Background(), "test.target", "noop", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RowCount != 0 {
+		t.Fatalf("expected 0 rows, got %d", result.RowCount)
+	}
+	if result.EmptyResult != EmptyNoChange {
+		t.Fatalf("EmptyResult = %q, want %q (legacy libs must default to no_change)",
+			result.EmptyResult, EmptyNoChange)
+	}
+}
+
 func TestLoad_CycleDetection(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

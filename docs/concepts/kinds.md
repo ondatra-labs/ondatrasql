@@ -44,6 +44,8 @@ Tracked groups your rows by `@group_key`, computes a content hash per group, and
 
 With `@sink`, your push function receives `delete` and `insert` events grouped by key. If a key has both deletes and inserts, it's an update. If only deletes, the entity was truly removed. This gives you full mirror sync — including deletes.
 
+When the source is a lib, a 0-row fetch defaults to "no change" — target rows are preserved rather than deleted. A lib that fully enumerates its source and treats an empty fetch as "everything is gone" must opt in to deletion via `empty_result` in the fetch return; see [Fetch Contract](/reference/lib-functions/fetch-contract/#empty-fetches-and-tracked).
+
 The tradeoff: tracked adds a `_content_hash` column and does full-state comparison per group, which is more expensive than merge's row-level CDC. But for the use cases where you need it — grouped data, document extraction, line-item APIs — there's no simpler alternative.
 
 ## scd2 — keeping history

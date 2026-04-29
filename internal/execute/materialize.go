@@ -83,6 +83,31 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 	return result == "true", nil
 }
 
+// fetchTargetColumnTypes returns column_name → DuckDB type for the target
+// table, used as fallback when SQL-shape stub building has no explicit cast
+// for a column and an established target type would be more accurate than
+// VARCHAR. The caller should already have verified the target exists.
+func (r *Runner) fetchTargetColumnTypes(target string) (map[string]string, error) {
+	parts := strings.Split(target, ".")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("target must be schema.table, got %q", target)
+	}
+	query := fmt.Sprintf(
+		"SELECT column_name, data_type FROM information_schema.columns "+
+			"WHERE table_schema = '%s' AND table_name = '%s'",
+		escapeSQL(parts[0]), escapeSQL(parts[1]),
+	)
+	rows, err := r.sess.QueryRowsMap(query)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		out[row["column_name"]] = row["data_type"]
+	}
+	return out, nil
+}
+
 // materialize creates the target table from the temp table.
 // It runs the CREATE/INSERT, audits, and commit metadata in a single
 // transaction. If schemaChange is provided, schema evolution (ALTER
@@ -97,7 +122,16 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 //
 // Optional extraPreSQL statements are prepended to the transaction
 // (e.g. ack inserts for Starlark scripts).
-func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bool, schemaChange *backfill.SchemaChange, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
+// trackedNoDeleteOnEmpty is set by the runner when a tracked-kind run was
+// driven by libs that all returned 0 rows AND declared empty_result=no_change
+// (the default). materializeTracked uses this to suppress the delete-missing
+// branch of its change-detection query, so target rows are preserved while
+// schema evolution and audits still run.
+type trackedRunOpts struct {
+	noDeleteOnMissingGroups bool
+}
+
+func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bool, schemaChange *backfill.SchemaChange, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, opts trackedRunOpts, extraPreSQL ...string) (int64, error) {
 	// Get row count from temp table first
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable)
 	countResult, err := r.sess.QueryValue(countSQL)
@@ -234,7 +268,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// Tracked handles its own transaction - return early
-		return r.materializeTracked(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime, extraPreSQL...)
+		return r.materializeTracked(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime, opts, extraPreSQL...)
 
 	default:
 		return 0, fmt.Errorf("unknown kind: %s", model.Kind)
@@ -816,7 +850,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 // Groups rows by group_key and computes an md5 hash of all non-key columns per group.
 // On incremental runs, only groups with changed or new hashes are replaced (DELETE + INSERT).
 // The _content_hash column is added automatically, like SCD2's valid_from_snapshot.
-func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
+func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, opts trackedRunOpts, extraPreSQL ...string) (int64, error) {
 	// Parse composite group_key: "region, year" → ["region", "year"]
 	var keyParts []string
 	for _, part := range strings.Split(model.GroupKey, ",") {
@@ -1032,6 +1066,11 @@ FROM %s s JOIN group_hash g ON %s`,
 	}
 	nuk := strings.Join(nPrefixed, ", ")
 	ouk := strings.Join(oPrefixed, ", ")
+	// The upsert branch is always present. The delete branch (groups in
+	// target but not in source) is suppressed when opts.noDeleteOnMissingGroups
+	// is set — this preserves target rows when a lib smart-skips with 0 rows
+	// and declares empty_result=no_change. Schema evolution still runs via
+	// the schemaEvolutionSQL path.
 	detectSQL := fmt.Sprintf(`CREATE TEMP TABLE tracked_changes AS
 SELECT %[1]s, 'upsert' AS _action FROM (
     SELECT DISTINCT %[3]s, _content_hash FROM tracked_hashed
@@ -1039,20 +1078,24 @@ SELECT %[1]s, 'upsert' AS _action FROM (
 LEFT JOIN (
     SELECT DISTINCT %[3]s, _content_hash FROM %[4]s
 ) o ON %[5]s AND n._content_hash = o._content_hash
-WHERE %[6]s
-UNION ALL
-SELECT %[2]s, 'delete' AS _action FROM (
-    SELECT DISTINCT %[3]s FROM %[4]s
-) o
-LEFT JOIN (
-    SELECT DISTINCT %[3]s FROM tracked_hashed
-) h ON %[7]s
-WHERE h.%[8]s IS NULL`,
+WHERE %[6]s`,
 		nuk, ouk, uk, model.Target,
 		strings.Join(nojoin, " AND "),
-		strings.Join(nullcheck, " AND "),
-		strings.Join(lojoin, " AND "),
-		quotedKeys[0])
+		strings.Join(nullcheck, " AND "))
+	if !opts.noDeleteOnMissingGroups {
+		detectSQL += fmt.Sprintf(`
+UNION ALL
+SELECT %[1]s, 'delete' AS _action FROM (
+    SELECT DISTINCT %[2]s FROM %[3]s
+) o
+LEFT JOIN (
+    SELECT DISTINCT %[2]s FROM tracked_hashed
+) h ON %[4]s
+WHERE h.%[5]s IS NULL`,
+			ouk, uk, model.Target,
+			strings.Join(lojoin, " AND "),
+			quotedKeys[0])
+	}
 
 	if err := r.sess.Exec(detectSQL); err != nil {
 		return 0, fmt.Errorf("detect tracked changes: %w", err)
@@ -1068,6 +1111,16 @@ WHERE h.%[8]s IS NULL`,
 	fmt.Sscanf(changeCount, "%d", &changedGroups)
 
 	if changedGroups == 0 {
+		// Smart-skip fast path: when a tracked + lib + 0-row + no_change
+		// run produces no change AND has no schema evolution, no audits,
+		// and no extraPreSQL, skip the commit entirely. Otherwise the
+		// registry upsert would create a fresh DuckLake snapshot, which
+		// downstream dep-change detection sees as "the model changed",
+		// cascading rebuilds across every dependent model on every
+		// smart-skip run. Nothing actually changed, so don't pretend it did.
+		if opts.noDeleteOnMissingGroups && schemaEvolutionSQL == "" && auditSQL == "" && len(extraPreSQL) == 0 {
+			return 0, nil
+		}
 		// Nothing changed — commit with 0 rows.
 		// Registry upsert ensures DuckLake creates a snapshot (so schema metadata is committed).
 		info.RowsAffected = 0
