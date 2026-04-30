@@ -105,22 +105,22 @@ func handleDelta(
 	// 1. Decode + verify HMAC + max-age
 	tok, err := decodeDeltaToken(tokenStr, keyset, maxAge)
 	if err != nil {
-		// Distinguish expiry from other invalid-token reasons so the
-		// client can react appropriately. Both still return 410 Gone but
-		// the OData error code differs. Sentinel match (errDeltaTokenExpired)
-		// rather than substring so error wording can change without
-		// breaking this branch.
+		// Status-code split per Part 1 §11.4: 410 Gone for tokens whose
+		// underlying snapshot is no longer addressable (expired) or
+		// whose query shape no longer matches (filter-changed). 400 Bad
+		// Request for tampered, malformed, or wrong-entity tokens —
+		// those are client errors, not "resource gone".
 		if errors.Is(err, errDeltaTokenExpired) {
 			writeError(w, 410, "DeltaLinkExpired", err.Error())
 			return
 		}
-		writeError(w, 410, "DeltaLinkInvalid", err.Error())
+		writeError(w, 400, "DeltaLinkInvalid", err.Error())
 		return
 	}
 	// Token must be for this entity. Catches e.g. clients that copy a
 	// deltaLink between sessions and hit the wrong route.
 	if tok.Entity != entity.ODataName {
-		writeError(w, 410, "DeltaLinkInvalid",
+		writeError(w, 400, "DeltaLinkInvalid",
 			fmt.Sprintf("token was issued for entity %q, not %q", tok.Entity, entity.ODataName))
 		return
 	}
@@ -271,19 +271,21 @@ func writeDeltaResponse(
 			}
 			value = append(value, clean)
 		case "delete":
-			// For deletes, OData wants @removed. Carry the @odata.id so
-			// the client can match against its local cache; carry the key
-			// column so clients without @odata.id matching can use it.
+			// For deletes, OData wants `@removed` plus the entity-id so
+			// the client can match against its local cache. Spec example
+			// (JSON Format §15) is exactly two fields: `@removed` and
+			// `@odata.id` (long-form to stay consistent with the rest of
+			// our annotation set; v4.01 also accepts short-form `@id`,
+			// but mixing forms within one response is worse).
+			//
+			// Earlier drafts also injected the key column as a regular
+			// field — that was non-spec; clients that need the key
+			// extract it from the @odata.id URL.
 			tomb := map[string]any{
 				"@removed": map[string]string{"reason": "deleted"},
 			}
 			if id := formatODataID(baseURL, entity.ODataName, entity, row); id != "" {
 				tomb["@odata.id"] = id
-			}
-			if entity.KeyColumn != "" {
-				if v, ok := row[entity.KeyColumn]; ok {
-					tomb[entity.KeyColumn] = toODataValue(v, colTypes[entity.KeyColumn])
-				}
 			}
 			value = append(value, tomb)
 		}

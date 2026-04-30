@@ -1,10 +1,10 @@
 ---
-description: Complete OData v4 API reference for OndatraSQL. Endpoints, filter functions, aggregation, navigation properties, batch requests, and data types.
+description: Complete OData v4.01 API reference for OndatraSQL. Endpoints, filter functions, aggregation, navigation properties, batch requests, server-driven paging, change tracking, and data types.
 draft: false
 title: OData API
 weight: 55
 ---
-Complete OData v4 query reference. For setup and tool connections, see [Serve Data via OData](/guides/serve-data-via-odata/).
+Complete OData v4.01 query reference. For setup and tool connections, see [Serve Data via OData](/guides/serve-data-via-odata/).
 
 ## Endpoints
 
@@ -14,8 +14,10 @@ Complete OData v4 query reference. For setup and tool connections, see [Serve Da
 | `GET` | `/odata/$metadata` | CSDL XML (schema for all entities) |
 | `GET` | `/odata/{entity}` | Query collection |
 | `GET` | `/odata/{entity}(key)` | Single entity by key (requires `@expose <column>`) |
+| `GET` | `/odata/{entity}/{N}` | Single entity at ordinal `N` in default key ordering. See [Positional access](#positional-access). |
 | `GET` | `/odata/{entity}/$count` | Row count (plain text) |
 | `GET` | `/odata/$entity?$id=<url>` | Dereference a canonical entity-id URL (the `@odata.id` value) |
+| `GET` | `/odata/$crossjoin(A,B,...)` | Cross-entity-set query. See [Cross-join](#cross-join). |
 | `POST` | `/odata/$batch` | JSON batch (multiple requests in one call) |
 
 Entity names use underscores: `mart.revenue` becomes `mart_revenue` in the URL.
@@ -26,10 +28,11 @@ Every entity response carries OData v4.01 annotations alongside the row data:
 
 | Annotation | When | Description |
 |---|---|---|
-| `@odata.context` | Always | Schema reference. Collection: `<baseURL>/odata/$metadata#<entity>`. Single entity: `…#<entity>/$entity`. Delta: `…#<entity>/$delta`. |
+| `@odata.context` | Always | Schema reference. Collection: `<baseURL>/odata/$metadata#<entity>`. Single entity: `…#<entity>/$entity`. Delta: `…#<entity>/$delta`. Cross-join: `…#Collection(Edm.ComplexType)`. |
 | `@odata.id` | Per row, when entity has `@expose <key>` | Canonical URL of the row. Dereferenceable via `/odata/$entity?$id=<url>`. |
-| `@odata.count` | When `$count=true` | Total row count, independent of `$top`/`$skip`. |
-| `@odata.deltaLink` | When the query has no `$filter`/`$apply`/`$compute`/`$search`/`$expand` and the entity has `@expose <key>` | Stateless, signed URL that returns only what changed since this snapshot. See [Delta tracking](#delta-tracking). |
+| `@odata.count` | When `$count=true` (first page only) | Total row count, independent of `$top`/`$skip`. Not repeated on `@odata.nextLink` follow-ups. |
+| `@odata.deltaLink` | When the query has no `$filter`/`$apply`/`$compute`/`$search`/`$expand` and the entity has `@expose <key>`, AND the response was not capped by paging | Stateless, signed URL that returns only what changed since this snapshot. See [Delta tracking](#delta-tracking). |
+| `@odata.nextLink` | When the response was capped by the server-side page size and there are more rows to fetch | Stateless, signed URL the client follows to fetch the next page. See [Server-driven paging](#server-driven-paging). |
 
 ## Query Parameters
 
@@ -45,8 +48,9 @@ Every entity response carries OData v4.01 annotations alongside the row data:
 | `$expand` | `$expand=raw_orders` | Inline related entities |
 | `$apply` | `$apply=aggregate(amount with sum as total)` | Aggregation |
 | `$compute` | `$compute=amount mul 2 as doubled` | Computed properties (col op literal as alias) |
-| `$format` | `$format=json` | Response format. Only `json` is supported; anything else returns 406. Equivalent to `Accept: application/json`. |
+| `$format` | `$format=json` | Response format. Accepts `json`, `application/json`, and `application/json` with parameters (e.g. `application/json;odata.metadata=minimal`). Anything else returns 406. |
 | `$deltatoken` | `$deltatoken=<opaque>` | Returned in `@odata.deltaLink` URLs; opaque to the client. Asks the server for the diff since the snapshot embedded in the token. See [Delta tracking](#delta-tracking). |
+| `$skiptoken` | `$skiptoken=<opaque>` | Returned in `@odata.nextLink` URLs; opaque to the client. Server-driven paging cursor. See [Server-driven paging](#server-driven-paging). |
 
 ### Filter Operators
 
@@ -97,16 +101,20 @@ Navigation properties appear in `$metadata` automatically. The response nests re
 
 ### $batch
 
-Multiple requests in one HTTP call (JSON batch format):
+Multiple requests in one HTTP call (JSON batch format, OData v4.01):
 
 ```bash
 curl -X POST http://localhost:8090/odata/\$batch \
   -H "Content-Type: application/json" \
   -d '{"requests":[
     {"id":"1","method":"GET","url":"mart_revenue?$top=5"},
-    {"id":"2","method":"GET","url":"mart_revenue/$count"}
+    {"id":"2","method":"GET","url":"mart_revenue/$count","headers":{"Accept":"application/json"}}
   ]}'
 ```
+
+Per-request `headers` are copied onto the inner request handler (JSON Format §19.1.3). Use this to vary `Accept`, `Prefer`, etc. across sub-requests in a single batch.
+
+**`atomicityGroup` is rejected** with `501 Not Implemented` per sub-request. The field requires transactional rollback semantics that don't apply to a read-only server (JSON Format §19.1.4). `dependsOn` is accepted but no-op'd: read-only sub-requests don't share state, so dependency ordering doesn't change observable behavior.
 
 ### Delta tracking {#delta-tracking}
 
@@ -150,7 +158,7 @@ If any of these are missing, the response is normal but the link is omitted.
 
 **Failure modes.** A `$deltatoken` request returns:
 
-- `410 Gone DeltaLinkInvalid` — token signature is wrong (tampered, signed by a different server / different key, or signed by a key that has since been removed from the keyset)
+- `400 Bad Request DeltaLinkInvalid` — token signature is wrong (tampered, signed by a different server / different key, or signed by a key that has since been removed from the keyset), or token is for a different entity than the route. Spec Part 1 §11.4 reserves 410 for resources that no longer exist; tampered tokens are client errors.
 - `410 Gone DeltaLinkExpired` — token age exceeds `ONDATRA_ODATA_DELTA_MAX_AGE` (only emitted when max-age is configured)
 - `410 Gone DeltaLinkFilterChanged` — query options have changed since the link was issued; the client must re-issue the original query
 - `400 Bad Request` — the delta request itself uses `$filter`, `$apply`, `$compute`, `$search`, or `$expand`
@@ -200,6 +208,92 @@ export ONDATRA_ODATA_POOL_SIZE=4
 The DuckLake catalog is ATTACHed once at the DuckDB-instance level by the pipeline (so all conns on the same process see it). Each pool conn additionally runs `LOAD ducklake` + `USE <catalog>` + `SET search_path` at startup so it resolves table names the same way the writer does. The writer's connection is unaffected — the pipeline runner keeps its dedicated conn.
 
 **Backed by DuckLake.** The runtime wraps DuckLake's `table_changes(table, from_snapshot, to_snapshot)` — the delta is the literal CDC diff between the snapshot the client last saw and the current one.
+
+### Server-driven paging {#server-driven-paging}
+
+Collection responses are capped at a server-controlled page size. When more rows exist beyond the cap, the response includes `@odata.nextLink` — a stateless, signed URL the client follows to fetch the next page.
+
+```bash
+# First page
+curl 'http://localhost:8090/odata/mart_orders?$orderby=id'
+# {
+#   "@odata.context": ".../$metadata#mart_orders",
+#   "value": [/* up to PAGE_SIZE rows */],
+#   "@odata.count": 10000,           # only on first page when $count=true
+#   "@odata.nextLink": "http://.../odata/mart_orders?$orderby=id&$skiptoken=eyJl..."
+# }
+
+# Follow the link
+curl 'http://.../odata/mart_orders?$orderby=id&$skiptoken=eyJl...'
+# next page, possibly another @odata.nextLink, until the last page
+```
+
+**Page size.** Default is `10000`. Override with `ONDATRA_ODATA_PAGE_SIZE` (positive integer; unparseable values refuse to start the server):
+
+```bash
+export ONDATRA_ODATA_PAGE_SIZE=5000
+```
+
+**Client-side `$top` interaction.**
+
+- `$top` ≤ page size: client cap honored, no `@odata.nextLink` emitted (response holds at most `$top` rows)
+- `$top` > page size or no `$top`: server-side cap applies, `@odata.nextLink` emitted if there are more rows
+
+**Token format.** `$skiptoken` is opaque — it carries the entity name, the cumulative offset reached, the issued-at timestamp, the signing key id, and a hash of the query options, all signed with HMAC-SHA256. Reuses the same keyset as `@odata.deltaLink` (`ONDATRA_ODATA_DELTA_KEY`).
+
+**Failure modes.**
+
+- `400 Bad Request SkipTokenInvalid` — token signature is wrong, malformed, or for a different entity than the route
+- `410 Gone SkipTokenExpired` — token age exceeds `ONDATRA_ODATA_DELTA_MAX_AGE` (only when max-age is configured)
+- `410 Gone SkipTokenFilterChanged` — query options have changed since the link was issued
+
+`@odata.count` is only emitted on the first page (no `$skiptoken` in the request). Subsequent pages skip the `COUNT(*)` query — clients that want the total fetch it once on page 1.
+
+`@odata.deltaLink` and `@odata.nextLink` are mutually exclusive in a single response: deltaLink describes "track changes from this snapshot onward" while nextLink describes "the rest of this page chain". Emitting both invites confusion about which to poll. The server emits `@odata.deltaLink` only on responses that are not capped by paging.
+
+### Cross-join {#cross-join}
+
+`/odata/$crossjoin(A,B,...)` returns a cross product of two or more exposed entities. Use `$filter` with qualified column refs to express the join condition:
+
+```bash
+curl "http://localhost:8090/odata/\$crossjoin(raw_customers,raw_orders)?\$filter=raw_customers/id%20eq%20raw_orders/customer_id"
+```
+
+```json
+{
+  "@odata.context": ".../$metadata#Collection(Edm.ComplexType)",
+  "value": [
+    {
+      "raw_customers": {"id": 1, "name": "Alice"},
+      "raw_orders":    {"id": 101, "customer_id": 1, "amount": 50}
+    }
+  ]
+}
+```
+
+Each row is a flat object with one nested object per source entity-set, keyed by entity-set name.
+
+**Why this exists.** `@expose` marks tables available; it does not predefine joins. Without `$crossjoin`, the only way to deliver joined data is to add a JOIN-containing SQL model and `@expose` it — which fixes the join shape at the operator level. `$crossjoin` lets clients pick the join condition at request time without operator action.
+
+**Supported in `$crossjoin`.**
+
+- `$filter` with qualified refs (`A/col eq B/col`) for the join condition and additional row filters
+- `$top` / `$skip` for paging
+- `$count=true` for total row count of the filtered cross product
+
+**Not supported in `$crossjoin`.** `$select`, `$orderby`, `$expand`, `$compute`, `$apply`, `$search` return 400 Bad Request. Deep navigation paths (more than 2 segments, e.g. `A/B/col`) are also rejected.
+
+### Positional access {#positional-access}
+
+`/odata/{entity}/{N}` returns the entity at zero-based ordinal `N` in the default key ordering. Sugar over `$orderby=key + $skip=N + $top=1`:
+
+```bash
+curl http://localhost:8090/odata/mart_orders/0    # first row
+curl http://localhost:8090/odata/mart_orders/9    # tenth row
+curl http://localhost:8090/odata/mart_orders/9999 # 404 if past the end
+```
+
+Non-numeric segments (`/Entity/abc`) and negative ordinals return 404 — those paths don't match the OData ordinal form.
 
 ### Examples
 
@@ -271,10 +365,19 @@ NULL values are JSON `null`. Empty strings are preserved as `""`.
 
 ## Scope
 
-Read-only OData v4. Supports `$filter`, `$select`, `$orderby`, `$top`, `$skip`, `$count`, `$expand` (one level), `$batch` (JSON format). Not supported:
+Read-only OData v4.01. Server emits `OData-Version: 4.01` and CSDL `Version="4.01"`.
+
+Supported query options: `$filter`, `$select`, `$orderby`, `$top`, `$skip`, `$count`, `$expand` (one level), `$apply`, `$compute`, `$search`, `$format`, `$deltatoken`, `$skiptoken`. Supported routes: collection, single-entity-by-key, positional access (`/Entity/N`), `$entity?$id=`, `$count`, `$crossjoin`, `$batch` (JSON format), `$metadata`.
+
+Not supported:
 
 - Write operations (POST, PUT, DELETE on entity sets)
 - Complex type functions or actions
 - Deep `$expand` (nested navigation)
+- Deep navigation paths in `$filter` (more than 2 segments)
+- `$crossjoin` with `$select`, `$orderby`, `$expand`, `$compute`, `$apply`, `$search`
+- Multipart `$batch` (only JSON batch is supported)
+- `$format=xml` / Atom serialization
+- `Prefer: respond-async`
 
 For write access to external systems, use `@sink`.

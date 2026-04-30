@@ -184,7 +184,7 @@ func TestE2E_OData_Metadata(t *testing.T) {
 	// Check key structural elements
 	checks := []struct{ label, expect string }{
 		{"edmx_root", "edmx:Edmx"},
-		{"version_4.0", `Version="4.0"`},
+		{"version_4.01", `Version="4.01"`},
 		{"namespace", `Namespace="ondatra"`},
 		{"entity_mart_customers", `Name="mart_customers"`},
 		{"entity_mart_revenue", `Name="mart_revenue"`},

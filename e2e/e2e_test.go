@@ -3161,10 +3161,12 @@ SELECT * FROM (VALUES
 		t.Errorf("/$count Content-Type = %q, want text/plain", ct)
 	}
 
-	// Test OData-Version header present on all responses
+	// Test OData-Version header present on all responses. Server emits
+	// 4.01 because the implementation includes v4.01-only features
+	// ($compute, $apply, JSON $batch, @removed, $crossjoin, $index).
 	resp, _ = http.Get(srv.URL + "/odata")
-	if v := resp.Header.Get("OData-Version"); v != "4.0" {
-		t.Errorf("OData-Version = %q, want 4.0", v)
+	if v := resp.Header.Get("OData-Version"); v != "4.01" {
+		t.Errorf("OData-Version = %q, want 4.01", v)
 	}
 	resp.Body.Close()
 }

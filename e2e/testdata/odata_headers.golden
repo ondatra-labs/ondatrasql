@@ -1,12 +1,12 @@
 --- service_doc ---
-odata-version: 4.0
+odata-version: 4.01
 content-type: application/json;odata.metadata=minimal
 --- metadata ---
-odata-version: 4.0
+odata-version: 4.01
 content-type: application/xml
 --- collection ---
-odata-version: 4.0
+odata-version: 4.01
 content-type: application/json;odata.metadata=minimal
 --- count_path ---
-odata-version: 4.0
+odata-version: 4.01
 content-type: text/plain

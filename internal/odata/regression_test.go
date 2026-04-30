@@ -378,3 +378,38 @@ func TestFilterNodeToSQL_LiteralQuoteEscape(t *testing.T) {
 		})
 	}
 }
+
+// TestFilterNodeToSQL_DeepNavigationRejected pins that a deep navigation
+// path like `A/B/col` (3+ segments) returns a clear error rather than the
+// confusing "unknown qualified column: /col" that the naive 2-segment
+// handler used to emit. Deep nav isn't supported in $crossjoin $filter.
+func TestFilterNodeToSQL_DeepNavigationRejected(t *testing.T) {
+	t.Parallel()
+	// godata represents `A/B/col` as nested Nav nodes:
+	//   Nav("/")
+	//   ├── Nav("/")
+	//   │   ├── Literal("A")
+	//   │   └── Literal("B")
+	//   └── Literal("col")
+	innerNav := &godata.ParseNode{
+		Token: &godata.Token{Value: "/", Type: godata.ExpressionTokenNav},
+		Children: []*godata.ParseNode{
+			{Token: &godata.Token{Value: "A", Type: godata.ExpressionTokenLiteral}},
+			{Token: &godata.Token{Value: "B", Type: godata.ExpressionTokenLiteral}},
+		},
+	}
+	outerNav := &godata.ParseNode{
+		Token: &godata.Token{Value: "/", Type: godata.ExpressionTokenNav},
+		Children: []*godata.ParseNode{
+			innerNav,
+			{Token: &godata.Token{Value: "col", Type: godata.ExpressionTokenLiteral}},
+		},
+	}
+	_, err := filterNodeToSQL(outerNav, map[string]bool{"A/col": true, "B/col": true})
+	if err == nil {
+		t.Fatal("expected error on deep navigation, got nil")
+	}
+	if !strings.Contains(err.Error(), "deep navigation") {
+		t.Errorf("expected 'deep navigation' in error, got: %v", err)
+	}
+}

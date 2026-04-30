@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -94,6 +95,29 @@ func loadPoolSize(envValue string) (int, error) {
 	return n, nil
 }
 
+// defaultPageSize is the server-side cap on rows per response when no
+// ONDATRA_ODATA_PAGE_SIZE is set. Picked to balance two concerns:
+//   - small enough that one request doesn't ship a 100MB JSON payload to
+//     an unsuspecting BI client
+//   - large enough that small collections don't pay the round-trip cost
+//     of @odata.nextLink follow-ups for no benefit
+const defaultPageSize = 10000
+
+// loadPageSize resolves the server-side page size from
+// ONDATRA_ODATA_PAGE_SIZE. Same semantics as loadPoolSize: empty falls
+// back to the default; invalid values fail-closed.
+func loadPageSize(envValue string) (int, error) {
+	envValue = strings.TrimSpace(envValue)
+	if envValue == "" {
+		return defaultPageSize, nil
+	}
+	n, err := strconv.Atoi(envValue)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("ONDATRA_ODATA_PAGE_SIZE=%q: must be a positive integer", envValue)
+	}
+	return n, nil
+}
+
 // acquireDB checks out a read conn for the request. Returns a release fn
 // that the handler must call (typically `defer release()`). On failure
 // writes a 503 error and returns nil/nil/err so the caller can return
@@ -144,6 +168,10 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 	// initialised, so a typoed env still surfaces an error at server-
 	// construction time.
 	poolSize, err := loadPoolSize(os.Getenv("ONDATRA_ODATA_POOL_SIZE"))
+	if err != nil {
+		return nil, err
+	}
+	pageSize, err := loadPageSize(os.Getenv("ONDATRA_ODATA_PAGE_SIZE"))
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +266,31 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 		handleCount(w, r, db, entityMap, entityName)
 	})
 
+	// Positional access: /odata/{entity}/{N} where N is a non-negative
+	// integer. Per OData Part 2 §4.10 this is the canonical $index form
+	// (zero-based ordinal in the default key ordering). Matches AFTER
+	// /$count above; mux dispatches the literal "$count" first.
+	mux.HandleFunc("GET /odata/{entity}/{ordinal}", func(w http.ResponseWriter, r *http.Request) {
+		if !validateFormat(w, r) {
+			return
+		}
+		entityName := r.PathValue("entity")
+		ordinal := r.PathValue("ordinal")
+		n, err := strconv.Atoi(ordinal)
+		if err != nil || n < 0 {
+			// Not a valid ordinal — treat as 404 since /Entity/<garbage>
+			// doesn't match any defined OData segment.
+			writeError(w, 404, "NotFound", fmt.Sprintf("path segment %q is not a valid ordinal under /odata/%s/", ordinal, entityName))
+			return
+		}
+		db, release, ok := acquireDB(r.Context(), sess, w)
+		if !ok {
+			return
+		}
+		defer release()
+		handleEntityByOrdinal(w, r, db, entityMap, entityName, n, baseURL)
+	})
+
 	// Entity collection: /odata/{entity}
 	mux.HandleFunc("GET /odata/{entity}", func(w http.ResponseWriter, r *http.Request) {
 		if !validateFormat(w, r) {
@@ -250,6 +303,14 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 		defer release()
 
 		entityName := r.PathValue("entity")
+
+		// $crossjoin: /odata/$crossjoin(EntitySet1,EntitySet2,...). Routed
+		// before the (key) check below — `$crossjoin(A,B)` also has parens
+		// and would otherwise be misrouted to handleSingleEntity.
+		if strings.HasPrefix(entityName, "$crossjoin(") && strings.HasSuffix(entityName, ")") {
+			handleCrossJoin(w, r, db, entityMap, entityName, baseURL)
+			return
+		}
 
 		// Single entity by key: /odata/entity(key)
 		if strings.Contains(entityName, "(") {
@@ -273,6 +334,40 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 			return
 		}
 
+		// $skiptoken: server-driven paging. If present, decode and use the
+		// verified offset (overrides $skip). Status-code split per Part 1
+		// §11.4: 410 Gone for tokens whose underlying snapshot is no
+		// longer addressable (expired) or whose query shape no longer
+		// matches what the client originally issued (filter-changed).
+		// 400 Bad Request for tampered, malformed, or wrong-entity tokens
+		// — those are client errors, not "resource gone".
+		queryParams := r.URL.Query()
+		var skipTokenOffset int64
+		if st := queryParams.Get("$skiptoken"); st != "" {
+			tok, err := decodeSkipToken(st, deltaKeyset, deltaMaxAge)
+			if err != nil {
+				if errors.Is(err, errSkipTokenExpired) {
+					writeError(w, 410, "SkipTokenExpired", err.Error())
+					return
+				}
+				writeError(w, 400, "SkipTokenInvalid", err.Error())
+				return
+			}
+			if tok.Entity != entity.ODataName {
+				writeError(w, 400, "SkipTokenInvalid",
+					fmt.Sprintf("token was issued for entity %q, not %q", tok.Entity, entity.ODataName))
+				return
+			}
+			if skipTokenFilterHash(queryParams) != tok.FilterHash {
+				writeError(w, 410, "SkipTokenFilterChanged",
+					"query options have changed since this nextLink was issued; re-issue the original query")
+				return
+			}
+			skipTokenOffset = tok.Offset
+			// Strip $skiptoken so BuildQuery doesn't see it.
+			queryParams.Del("$skiptoken")
+		}
+
 		// Capture a single DuckLake snapshot at the start of the request
 		// and pin every base-table reference to it. This makes data,
 		// $count, $expand, and @odata.deltaLink all read from the same
@@ -285,8 +380,50 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 			snapshot, _ = db.GetCurrentSnapshot()
 		}
 
+		// Server-side page-size enforcement. Compute effective LIMIT/OFFSET:
+		//   - serverLimit = min(clientTop, pageSize); pageSize cap applies
+		//     when client didn't set $top or set it above the cap
+		//   - clientCapApplied tracks whether we honored a smaller client
+		//     $top; we never emit @odata.nextLink in that case
+		// The query fetches serverLimit+1 rows so we can detect "more
+		// available" without a separate COUNT(*).
+		//
+		// Validate $top / $skip up front. We override these before
+		// BuildQuery sees them, so we have to reject malformed values
+		// here — otherwise BuildQuery's own parse-and-reject path is
+		// bypassed and bad input silently becomes 0 / pageSize.
+		clientTop := -1
+		if t := queryParams.Get("$top"); t != "" {
+			n, err := strconv.Atoi(t)
+			if err != nil || n < 0 {
+				writeError(w, 400, "BadRequest", fmt.Sprintf("invalid $top: %q (must be a non-negative integer)", t))
+				return
+			}
+			clientTop = n
+		}
+		clientSkip := 0
+		if s := queryParams.Get("$skip"); s != "" {
+			n, err := strconv.Atoi(s)
+			if err != nil || n < 0 {
+				writeError(w, 400, "BadRequest", fmt.Sprintf("invalid $skip: %q (must be a non-negative integer)", s))
+				return
+			}
+			clientSkip = n
+		}
+		serverLimit := pageSize
+		clientCapApplied := false
+		if clientTop >= 0 && clientTop <= pageSize {
+			serverLimit = clientTop
+			clientCapApplied = true
+		}
+		// Effective offset = $skip + skiptoken offset. The token's offset
+		// already accounts for previous pages; client $skip on a follow-up
+		// would shift it further.
+		effectiveOffset := skipTokenOffset + int64(clientSkip)
+		queryParams.Set("$top", strconv.Itoa(serverLimit+1))
+		queryParams.Set("$skip", strconv.FormatInt(effectiveOffset, 10))
+
 		// If $expand is active, ensure FK columns are in the query
-		queryParams := r.URL.Query()
 		expandFKsToHide := map[string]bool{}
 		if expand := queryParams.Get("$expand"); expand != "" && queryParams.Get("$select") != "" {
 			// Parse $select into a set of column names
@@ -326,6 +463,13 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 				writeError(w, 500, "InternalError", errMsg)
 			}
 			return
+		}
+
+		// We fetched serverLimit+1 rows to detect "more available". Trim
+		// to serverLimit and remember whether more existed.
+		hasMore := len(rows) > serverLimit
+		if hasMore {
+			rows = rows[:serverLimit]
 		}
 
 		// Check if $count=true
@@ -478,9 +622,32 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 		// "client thinks they've seen up to N+1 but data was at N" skew
 		// we'd have if we re-read the snapshot here. Skipped when query
 		// has incompatible options or no delta key is configured.
+		//
+		// deltaLink is suppressed for paginated responses: a deltaLink
+		// describes "everything from snapshot N onward" while a nextLink
+		// describes "the rest of this current page chain" — emitting both
+		// invites confusion about which the client should poll.
 		var deltaLink string
-		if deltaKeyset != nil && snapshot > 0 {
-			deltaLink = emitDeltaLink(baseURL, entity, queryParams, snapshot, deltaKeyset)
+		if deltaKeyset != nil && snapshot > 0 && !hasMore && skipTokenOffset == 0 {
+			// Use the original request params (without the $top/$skip
+			// overrides we applied for paging) so the deltaLink's
+			// filter_hash matches what the client originally sent.
+			deltaLink = emitDeltaLink(baseURL, entity, r.URL.Query(), snapshot, deltaKeyset)
+		}
+
+		// Build the next link for server-driven paging. Emit only when we
+		// hit the server's pageSize cap (not the client's $top), and when
+		// a signing keyset is configured. Re-uses the existing keyset.
+		var nextLink string
+		if hasMore && !clientCapApplied && deltaKeyset != nil {
+			// Use original params (not the $top/$skip override) so the
+			// emitted nextLink carries forward the user's actual options.
+			origParams := r.URL.Query()
+			origParams.Del("$top")
+			origParams.Del("$skip")
+			origParams.Del("$skiptoken")
+			nextLink = emitNextLink(baseURL, entity, origParams,
+				effectiveOffset+int64(serverLimit), deltaKeyset)
 		}
 
 		data, err := FormatResponse(baseURL, entityName, rows, count, entity)
@@ -489,9 +656,12 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 			return
 		}
 
-		// Splice @odata.deltaLink into the JSON before the trailing '}'.
-		// Cheaper than rebuilding the whole response struct, and avoids
-		// changing FormatResponse's signature (which is exported).
+		// Splice @odata.deltaLink and @odata.nextLink into the JSON before
+		// the trailing '}'. Cheaper than rebuilding the whole response
+		// struct, and avoids changing FormatResponse's signature.
+		if nextLink != "" {
+			data = appendODataAnnotation(data, "@odata.nextLink", nextLink)
+		}
 		if deltaLink != "" {
 			data = appendODataAnnotation(data, "@odata.deltaLink", deltaLink)
 		}
@@ -543,10 +713,16 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 	return odataVersion(mux), nil
 }
 
-// odataVersion wraps a handler to set the OData-Version header on all responses.
+// odataVersion wraps a handler to set the OData-Version header on all
+// responses. We advertise 4.01 because the implementation emits v4.01-only
+// features (`$compute`, `$apply`, JSON `$batch`, `@removed`, `$index`,
+// `$crossjoin`); claiming only 4.0 while emitting v4.01 confuses strict
+// clients. Long-form annotations (`@odata.context` etc.) remain valid in
+// v4.01 per JSON Format §4.5 and match what Microsoft Graph / SAP Gateway
+// emit, so we keep them.
 func odataVersion(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("OData-Version", "4.0")
+		w.Header().Set("OData-Version", "4.01")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -597,16 +773,24 @@ func stripBaseURL(idURL, baseURL string) string {
 
 // validateFormat enforces the $format query option. The OData spec lets
 // clients select the response format via either the Accept header or the
-// $format param. We only serve JSON, so anything other than $format=json
-// is rejected with 406. Returns true if the request is acceptable; false
-// (after writing the error) if it should be aborted.
+// $format param. We only serve JSON, so anything other than json (with
+// any optional metadata-level parameter) is rejected with 406.
+//
+// The spec accepts forms like `application/json;odata.metadata=minimal`
+// — we strip the parameter via mime.ParseMediaType before comparing.
+// Bare `json` is also conformant (Part 2 §5.1.5).
 func validateFormat(w http.ResponseWriter, r *http.Request) bool {
 	format := r.URL.Query().Get("$format")
-	if format == "" || format == "json" || format == "application/json" {
+	if format == "" || format == "json" {
+		return true
+	}
+	// Strip parameters (`;odata.metadata=...`, `;charset=...`).
+	mediaType, _, err := mime.ParseMediaType(format)
+	if err == nil && mediaType == "application/json" {
 		return true
 	}
 	writeError(w, 406, "NotAcceptable",
-		fmt.Sprintf("$format=%q is not supported; only json", format))
+		fmt.Sprintf("$format=%q is not supported; only json (or application/json with optional metadata-level parameter)", format))
 	return false
 }
 
@@ -660,12 +844,20 @@ func handleCount(w http.ResponseWriter, r *http.Request, db *requestDB, entityMa
 	w.Write([]byte(val))
 }
 
-// batchRequest is a single request in a JSON batch.
+// batchRequest is a single request in a JSON batch (OData v4.01).
+//
+// AtomicityGroup and DependsOn are spec fields per JSON Format §19.1.4-5.
+// We reject AtomicityGroup explicitly because it requires write-side
+// transactional semantics (and we are read-only). DependsOn is a no-op
+// for read-only batches — sub-requests don't share state — so we accept
+// the field but don't reorder.
 type batchRequest struct {
-	ID     string            `json:"id"`
-	Method string            `json:"method"`
-	URL    string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
+	ID              string            `json:"id"`
+	Method          string            `json:"method"`
+	URL             string            `json:"url"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	AtomicityGroup  string            `json:"atomicityGroup,omitempty"`
+	DependsOn       []string          `json:"dependsOn,omitempty"`
 }
 
 // batchResponse is a single response in a JSON batch.
@@ -695,6 +887,19 @@ func handleBatch(w http.ResponseWriter, r *http.Request, handler http.Handler) {
 	// Execute each request
 	responses := make([]batchResponse, len(batch.Requests))
 	for i, req := range batch.Requests {
+		// AtomicityGroup requires transactional rollback across writes
+		// (JSON Format §19.1.4). We're read-only so atomicity is
+		// meaningless — reject with 501 to flag the mismatch rather than
+		// silently process as if the group didn't exist.
+		if req.AtomicityGroup != "" {
+			responses[i] = batchResponse{
+				ID:     req.ID,
+				Status: 501,
+				Body:   json.RawMessage(`{"error":{"code":"NotImplemented","message":"atomicityGroup is not supported on this read-only server"}}`),
+			}
+			continue
+		}
+
 		// Build internal HTTP request
 		innerURL := req.URL
 		if !strings.HasPrefix(innerURL, "/") {
@@ -712,6 +917,12 @@ func handleBatch(w http.ResponseWriter, r *http.Request, handler http.Handler) {
 		// Copy query params from URL
 		if u, err := url.Parse(innerURL); err == nil {
 			innerReq.URL = u
+		}
+		// Copy per-request headers (Accept, Prefer, etc.) onto the
+		// inner request so handlers see what the client asked for.
+		// JSON Format §19.1.3 — these MUST be honored.
+		for k, v := range req.Headers {
+			innerReq.Header.Set(k, v)
 		}
 
 		// Capture response
@@ -793,6 +1004,10 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, db *requestDB, e
 		snapshot, _ = db.GetCurrentSnapshot()
 	}
 
+	// Per-key access only; positional access uses /Entity/N (handled
+	// by handleEntityByOrdinal). The earlier `Entity($index=N)` parens
+	// form was non-spec — Part 2 §4.10 is path-segment ordinal — and
+	// has been replaced before v0.28.0 ships.
 	sql, err := BuildSingleEntityQuery(entity, keyValue, snapshot)
 	if err != nil {
 		writeError(w, 400, "BadRequest", err.Error())
@@ -815,6 +1030,168 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, db *requestDB, e
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
+	w.Write(data)
+}
+
+// handleEntityByOrdinal serves /odata/{entity}/{N} — positional access
+// in the default key ordering. Sugar over `ORDER BY key LIMIT 1 OFFSET N`
+// with snapshot pinning. Returns 404 if N is past the last row.
+func handleEntityByOrdinal(w http.ResponseWriter, r *http.Request, db *requestDB, entityMap map[string]EntitySchema, entityName string, ordinal int, baseURL string) {
+	entity, ok := entityMap[entityName]
+	if !ok {
+		writeError(w, 404, "NotFound", fmt.Sprintf("Entity set '%s' not found", entityName))
+		return
+	}
+	if entity.KeyColumn == "" {
+		writeError(w, 400, "BadRequest", fmt.Sprintf("Entity '%s' has no key column; positional access requires @expose <key>", entityName))
+		return
+	}
+
+	var snapshot int64
+	if err := db.RefreshSnapshot(); err == nil {
+		snapshot, _ = db.GetCurrentSnapshot()
+	}
+
+	sql := fmt.Sprintf("SELECT * FROM %s ORDER BY %s LIMIT 1 OFFSET %d",
+		qualifiedTableSQL(entity.Schema, entity.Table, snapshot),
+		quoteIdent(entity.KeyColumn), ordinal)
+
+	rows, err := db.QueryRowsAny(sql)
+	if err != nil {
+		writeError(w, 500, "InternalError", err.Error())
+		return
+	}
+	if len(rows) == 0 {
+		writeError(w, 404, "NotFound", fmt.Sprintf("ordinal %d is past the end of %s", ordinal, entityName))
+		return
+	}
+
+	data, err := FormatSingleEntityResponse(baseURL, entityName, rows[0], entity)
+	if err != nil {
+		writeError(w, 500, "InternalError", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
+	w.Write(data)
+}
+
+// handleCrossJoin serves /odata/$crossjoin(A,B,...). Generates a SQL
+// CROSS JOIN, pins it to the request snapshot, and returns rows nested
+// per source entity. The whole reason for this endpoint is that
+// `@expose` only marks tables available — it doesn't define joins; this
+// route lets clients (BI tools) do their own joins via $filter without
+// requiring the operator to predefine a JOIN-containing model.
+func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, entityMap map[string]EntitySchema, raw, baseURL string) {
+	// Parse "$crossjoin(A,B,C)" → ["A","B","C"].
+	inner := strings.TrimSuffix(strings.TrimPrefix(raw, "$crossjoin("), ")")
+	if inner == "" {
+		writeError(w, 400, "BadRequest", "$crossjoin requires entity-set names")
+		return
+	}
+	names := strings.Split(inner, ",")
+	entities := make([]EntitySchema, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			writeError(w, 400, "BadRequest", "$crossjoin: empty entity-set name")
+			return
+		}
+		e, ok := entityMap[n]
+		if !ok {
+			writeError(w, 404, "NotFound", fmt.Sprintf("Entity set '%s' not found", n))
+			return
+		}
+		entities = append(entities, e)
+	}
+	if len(entities) < 2 {
+		writeError(w, 400, "BadRequest", "$crossjoin requires at least 2 entity sets")
+		return
+	}
+
+	// Snapshot pin — same as collection handler.
+	var snapshot int64
+	if err := db.RefreshSnapshot(); err == nil {
+		snapshot, _ = db.GetCurrentSnapshot()
+	}
+
+	params := r.URL.Query()
+	sql, err := BuildCrossJoinQuery(entities, params, snapshot)
+	if err != nil {
+		writeError(w, 400, "BadRequest", err.Error())
+		return
+	}
+
+	rows, err := db.QueryRowsAny(sql)
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "does not exist") ||
+			strings.Contains(errMsg, "Binder Error") || strings.Contains(errMsg, "Conversion Error") ||
+			strings.Contains(errMsg, "Parser Error") {
+			writeError(w, 400, "BadRequest", errMsg)
+		} else {
+			writeError(w, 500, "InternalError", errMsg)
+		}
+		return
+	}
+
+	// Nest rows by entity. Columns are aliased "<EntitySet>__<col>" by
+	// BuildCrossJoinQuery; split on "__" to demux. Column names cannot
+	// contain "__" in OData (entity names use single underscores).
+	colTypes := make(map[string]map[string]string, len(entities))
+	for _, e := range entities {
+		ct := make(map[string]string, len(e.Columns))
+		for _, c := range e.Columns {
+			ct[c.Name] = strings.ToUpper(c.Type)
+		}
+		colTypes[e.ODataName] = ct
+	}
+	value := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		nested := make(map[string]any, len(entities))
+		for _, e := range entities {
+			sub := make(map[string]any)
+			prefix := e.ODataName + "__"
+			for k, v := range row {
+				if strings.HasPrefix(k, prefix) {
+					colName := k[len(prefix):]
+					sub[colName] = toODataValue(v, colTypes[e.ODataName][colName])
+				}
+			}
+			nested[e.ODataName] = sub
+		}
+		value = append(value, nested)
+	}
+
+	resp := map[string]any{
+		"@odata.context": fmt.Sprintf("%s/odata/$metadata#Collection(Edm.ComplexType)", baseURL),
+		"value":          value,
+	}
+	if r.URL.Query().Get("$count") == "true" {
+		// COUNT(*) over the same FROM/WHERE — strip $top/$skip from a
+		// copy of params so it counts the full filtered cross product.
+		countParams := make(url.Values)
+		for k, v := range params {
+			if k != "$top" && k != "$skip" {
+				countParams[k] = v
+			}
+		}
+		baseSQL, err := BuildCrossJoinQuery(entities, countParams, snapshot)
+		if err == nil {
+			countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", baseSQL)
+			if val, err := db.QueryValue(countSQL); err == nil {
+				var c int
+				fmt.Sscanf(val, "%d", &c)
+				resp["@odata.count"] = c
+			}
+		}
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		writeError(w, 500, "InternalError", err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
 	w.Write(data)
 }

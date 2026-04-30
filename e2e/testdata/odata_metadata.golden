@@ -1,5 +1,5 @@
 edmx_root: ok
-version_4.0: ok
+version_4.01: ok
 namespace: ok
 entity_mart_customers: ok
 entity_mart_revenue: ok
@@ -18,4 +18,4 @@ edm_string: ok
 entity_container: ok
 entity_set_revenue: ok
 content-type: application/xml
-odata-version: 4.0
+odata-version: 4.01

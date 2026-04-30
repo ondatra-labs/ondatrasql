@@ -8,4 +8,4 @@ entity_by_key: 200
 error_code: NotFound
 error_has_message: true
 error_content_type: application/json;odata.metadata=minimal
-error_odata_version: 4.0
+error_odata_version: 4.01

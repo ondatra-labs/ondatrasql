@@ -438,6 +438,103 @@ func BuildSingleEntityQuery(entity EntitySchema, keyValue string, snapshot int64
 		fromClause, quoteIdent(entity.KeyColumn), whereValue), nil
 }
 
+// BuildCrossJoinQuery generates SQL for a $crossjoin path. Aliases each
+// entity table to its OData entity-set name so $filter can reference
+// columns via `<entity>/<col>`. Each output column is aliased
+// `<entity>__<col>` so the row decoder can split them back into nested
+// objects per entity.
+//
+// Supported in v0.28.0:
+//   - $filter with qualified refs (`A/x eq B/y`) and bare refs (only when
+//     unambiguous — duplicate column names across entities require qualification)
+//   - $top / $skip (paging support is added by the handler via skiptoken)
+//   - $count (handled separately by the caller)
+//
+// Not supported in v0.28.0:
+//   - $select, $orderby, $expand, $compute, $apply, $search
+//
+// Reasoning: $crossjoin's main use case is server-side join on key, which
+// $filter alone covers. The other options can be added when a real consumer
+// needs them.
+func BuildCrossJoinQuery(entities []EntitySchema, params url.Values, snapshot int64) (string, error) {
+	if len(entities) < 2 {
+		return "", fmt.Errorf("$crossjoin requires at least 2 entity sets, got %d", len(entities))
+	}
+
+	// FROM A AS "A", B AS "B" — comma-separated cross product.
+	fromParts := make([]string, len(entities))
+	selectParts := make([]string, 0, 32)
+	validCols := make(map[string]bool)
+	seenAlias := make(map[string]bool, len(entities))
+	for i, e := range entities {
+		if seenAlias[e.ODataName] {
+			return "", fmt.Errorf("$crossjoin: duplicate entity %q", e.ODataName)
+		}
+		seenAlias[e.ODataName] = true
+		// Wrap in subquery so the AT (VERSION => N) clause stays attached
+		// to the inner reference; DuckDB rejects `tbl AT (VERSION => N) AS alias`
+		// directly with a syntax error.
+		fromParts[i] = fmt.Sprintf("(SELECT * FROM %s) AS %s",
+			qualifiedTableSQL(e.Schema, e.Table, snapshot),
+			quoteIdent(e.ODataName))
+		// Output columns: "A"."col" AS "A__col" — double-underscore as
+		// the separator since column names can contain single
+		// underscores (and OData entity names don't allow `__`).
+		for _, c := range e.Columns {
+			selectParts = append(selectParts, fmt.Sprintf("%s.%s AS %s",
+				quoteIdent(e.ODataName), quoteIdent(c.Name),
+				quoteIdent(e.ODataName+"__"+c.Name)))
+			validCols[e.ODataName+"/"+c.Name] = true
+		}
+	}
+
+	whereClause := ""
+	if filter := params.Get("$filter"); filter != "" {
+		ctx := context.Background()
+		filterQuery, err := godata.ParseFilterString(ctx, filter)
+		if err != nil {
+			return "", fmt.Errorf("invalid $filter: %w", err)
+		}
+		sqlExpr, err := filterNodeToSQL(filterQuery.Tree, validCols)
+		if err != nil {
+			return "", err
+		}
+		whereClause = " WHERE " + sqlExpr
+	}
+
+	// $top / $skip — caller (handler) overrides these with the
+	// effective server limit; we just pass them through.
+	limitClause := ""
+	if top := params.Get("$top"); top != "" {
+		topQuery, err := godata.ParseTopString(context.Background(), top)
+		if err != nil {
+			return "", fmt.Errorf("invalid $top: %w", err)
+		}
+		limitClause = fmt.Sprintf(" LIMIT %d", int(*topQuery))
+	}
+	offsetClause := ""
+	if skip := params.Get("$skip"); skip != "" {
+		skipQuery, err := godata.ParseSkipString(context.Background(), skip)
+		if err != nil {
+			return "", fmt.Errorf("invalid $skip: %w", err)
+		}
+		offsetClause = fmt.Sprintf(" OFFSET %d", int(*skipQuery))
+	}
+
+	// Reject options we don't support yet so users get a clear error
+	// instead of silent no-op.
+	for _, p := range []string{"$select", "$orderby", "$expand", "$compute", "$apply", "$search"} {
+		if params.Get(p) != "" {
+			return "", fmt.Errorf("%s is not supported on $crossjoin in this release", p)
+		}
+	}
+
+	return fmt.Sprintf("SELECT %s FROM %s%s%s%s",
+		strings.Join(selectParts, ", "),
+		strings.Join(fromParts, ", "),
+		whereClause, limitClause, offsetClause), nil
+}
+
 // filterNodeToSQL recursively translates a godata filter parse tree to SQL.
 func filterNodeToSQL(node *godata.ParseNode, validCols map[string]bool) (string, error) {
 	if node == nil || node.Token == nil {
@@ -582,6 +679,30 @@ func filterNodeToSQL(node *godata.ParseNode, validCols map[string]bool) (string,
 		return "NULL", nil
 
 	case godata.ExpressionTokenLiteral, godata.ExpressionTokenNav:
+		// Path expression `<entity>/<column>` — used by $crossjoin to
+		// disambiguate which side of the cross product a column refers
+		// to. godata represents these as a Nav node with Value="/" and
+		// two child tokens. The validCols map carries the qualified key
+		// `entity/col` in $crossjoin mode and bare column names in
+		// single-entity mode; both modes route through the same code.
+		if node.Token.Value == "/" && len(node.Children) == 2 &&
+			node.Children[0].Token != nil && node.Children[1].Token != nil {
+			// Reject deep navigation (3+ segments, e.g. `A/B/col`) up
+			// front so users get a meaningful error instead of seeing
+			// "unknown qualified column: /col" — the inner Nav comes
+			// through as a child whose Token.Value is itself "/".
+			if node.Children[0].Token.Value == "/" || node.Children[1].Token.Value == "/" {
+				return "", fmt.Errorf("deep navigation paths (more than 2 segments) are not supported in $filter")
+			}
+			entityName := node.Children[0].Token.Value
+			colName := node.Children[1].Token.Value
+			qualified := entityName + "/" + colName
+			if !validCols[qualified] {
+				return "", fmt.Errorf("unknown qualified column in $filter: %s", qualified)
+			}
+			return quoteIdent(entityName) + "." + quoteIdent(colName), nil
+		}
+		// Single-segment column ref.
 		name := node.Token.Value
 		if !validCols[name] {
 			return "", fmt.Errorf("unknown column in $filter: %s", name)

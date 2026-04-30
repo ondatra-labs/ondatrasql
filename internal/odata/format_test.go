@@ -24,8 +24,18 @@ func TestValidateFormat(t *testing.T) {
 		{"missing param defaults to json", "", true, 200},
 		{"json explicitly", "$format=json", true, 200},
 		{"application/json explicitly", "$format=application/json", true, 200},
+		// Spec Part 2 §5.1.5 — `$format` accepts the full content-type
+		// form including parameters. Real clients URL-encode the `;`
+		// separator (raw `;` in a query string is dropped by Go's URL
+		// parser since 1.17). Power BI, Excel, and most OData clients
+		// send the percent-encoded form for metadata levels.
+		{"with metadata=minimal (encoded)", "$format=application/json%3Bodata.metadata%3Dminimal", true, 200},
+		{"with metadata=full (encoded)", "$format=application/json%3Bodata.metadata%3Dfull", true, 200},
+		{"with metadata=none (encoded)", "$format=application/json%3Bodata.metadata%3Dnone", true, 200},
+		{"with charset (encoded)", "$format=application/json%3Bcharset%3Dutf-8", true, 200},
 		{"xml rejected", "$format=xml", false, 406},
 		{"atom rejected", "$format=atom", false, 406},
+		{"xml with metadata-level rejected (encoded)", "$format=application/xml%3Bodata.metadata%3Dminimal", false, 406},
 		{"unknown rejected", "$format=garbage", false, 406},
 	}
 

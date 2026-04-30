@@ -268,7 +268,10 @@ type entitySet struct {
 // GenerateMetadata produces CSDL XML for all exposed entities.
 func GenerateMetadata(schemas []EntitySchema) ([]byte, error) {
 	doc := edmx{
-		Version:   "4.0",
+		// CSDL/EDMX version matches the OData protocol version we
+		// advertise via the OData-Version response header. v4.01 because
+		// the implementation includes v4.01-only features.
+		Version:   "4.01",
 		XmlnsEdmx: "http://docs.oasis-open.org/odata/ns/edmx",
 		DataServices: dataServices{
 			Schema: schemaElement{
