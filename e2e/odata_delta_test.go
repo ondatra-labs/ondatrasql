@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/odata"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
@@ -53,7 +54,10 @@ SELECT * FROM (VALUES
 		t.Fatalf("DiscoverSchemas: %v", err)
 	}
 
-	handler := odata.NewServer(p.Sess, schemas, "http://testhost")
+	handler, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	srv := newTestServer(t, handler)
 	t.Cleanup(func() { srv.Close() })
 
@@ -343,6 +347,175 @@ func TestODataDelta_RespectsSelectProjection(t *testing.T) {
 	}
 	if _, hasID := row["id"]; !hasID {
 		t.Errorf("delta row missing id (row: %v)", row)
+	}
+}
+
+// TestODataDelta_MaxAgeReturnsExpired pins the end-to-end max-age path:
+// boot a server with ONDATRA_ODATA_DELTA_MAX_AGE=1ms, issue a deltaLink,
+// wait, and verify the next call returns 410 DeltaLinkExpired (not
+// DeltaLinkInvalid). Catches regressions where the env wiring or HTTP
+// classification breaks even though the unit-level decode works.
+func TestODataDelta_MaxAgeReturnsExpired(t *testing.T) {
+	t.Setenv("ONDATRA_ODATA_DELTA_KEY",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	t.Setenv("ONDATRA_ODATA_DELTA_MAX_AGE", "1ms")
+	srvURL, _ := odataDeltaSetup(t)
+
+	resp := odataGet(t, srvURL+"/odata/mart_widgets")
+	var body map[string]any
+	json.Unmarshal([]byte(resp), &body)
+	deltaLink, _ := body["@odata.deltaLink"].(string)
+	if deltaLink == "" {
+		t.Fatal("setup: expected @odata.deltaLink on initial response")
+	}
+	deltaURL := rewriteToTestServer(deltaLink, srvURL)
+
+	// Wait past the configured max-age.
+	time.Sleep(50 * time.Millisecond)
+
+	httpResp, err := http.Get(deltaURL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != 410 {
+		t.Errorf("expected 410 on expired token, got %d", httpResp.StatusCode)
+	}
+	bodyBytes, _ := io.ReadAll(httpResp.Body)
+	if !strings.Contains(string(bodyBytes), "DeltaLinkExpired") {
+		t.Errorf("expected DeltaLinkExpired error code, got body: %s", bodyBytes)
+	}
+}
+
+// TestODataDelta_KidRotationE2E pins the rotation contract through HTTP:
+// 1. Server boots with keyset (k1 only) and issues a deltaLink.
+// 2. We mint a new server with keyset (k2,k1) — same project, fresh
+//    handler — and verify the old k1-signed deltaLink still works.
+// This catches regressions where a server restart with a rotated env
+// silently invalidates outstanding tokens.
+//
+// Built without odataDeltaSetup because that helper overwrites
+// ONDATRA_ODATA_DELTA_KEY with its own value, defeating the rotation we
+// want to exercise.
+func TestODataDelta_KidRotationE2E(t *testing.T) {
+	const k1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const k2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	p := testutil.NewProject(t)
+	p.AddModel("mart/widgets.sql", `-- @kind: table
+-- @expose id
+SELECT * FROM (VALUES (1, 'A'), (2, 'B')) AS t(id, name)
+`)
+	runModel(t, p, "mart/widgets.sql")
+	schemas, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "mart.widgets", KeyColumn: "id"},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverSchemas: %v", err)
+	}
+
+	// Step 1: server with k1 only, capture a deltaLink.
+	t.Setenv("ONDATRA_ODATA_DELTA_KEY", "k1:"+k1)
+	handler1, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer (k1): %v", err)
+	}
+	srv1 := newTestServer(t, handler1)
+	t.Cleanup(func() { srv1.Close() })
+
+	resp := odataGet(t, srv1.URL+"/odata/mart_widgets")
+	var body map[string]any
+	json.Unmarshal([]byte(resp), &body)
+	deltaLink, _ := body["@odata.deltaLink"].(string)
+	if deltaLink == "" {
+		t.Fatal("setup: expected @odata.deltaLink on initial response")
+	}
+
+	// Step 2: rotate. Build a fresh handler on the same project with
+	// keyset (k2,k1). New tokens sign with k2; old tokens (signed under
+	// k1) must still verify.
+	//
+	// CRITICAL: each NewServer call re-reads the env, so the order is
+	// (set k1) -> NewServer -> (set k2,k1) -> NewServer.
+	t.Setenv("ONDATRA_ODATA_DELTA_KEY", "k2:"+k2+",k1:"+k1)
+	handler2, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer (rotated): %v", err)
+	}
+	srv2 := newTestServer(t, handler2)
+	t.Cleanup(func() { srv2.Close() })
+
+	// Replay the original deltaLink against the rotated server.
+	rotatedURL := strings.Replace(deltaLink, "http://testhost", srv2.URL, 1)
+	httpResp, err := http.Get(rotatedURL)
+	if err != nil {
+		t.Fatalf("get rotated: %v", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		t.Errorf("k1 token should verify under rotated keyset; got %d body=%s",
+			httpResp.StatusCode, bodyBytes)
+	}
+}
+
+// TestODataDelta_MaxAgeBadEnvFailsClosed pins that an unparseable
+// ONDATRA_ODATA_DELTA_MAX_AGE refuses to construct the server rather
+// than silently disabling expiry. Operators who typoed the env are
+// asking for security; running without it is a regression.
+func TestODataDelta_MaxAgeBadEnvFailsClosed(t *testing.T) {
+	t.Setenv("ONDATRA_ODATA_DELTA_KEY",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	t.Setenv("ONDATRA_ODATA_DELTA_MAX_AGE", "garbage")
+
+	p := testutil.NewProject(t)
+	p.AddModel("mart/widgets.sql", `-- @kind: table
+-- @expose id
+SELECT * FROM (VALUES (1, 'A')) AS t(id, name)
+`)
+	runModel(t, p, "mart/widgets.sql")
+
+	schemas, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "mart.widgets", KeyColumn: "id"},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverSchemas: %v", err)
+	}
+	_, err = odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err == nil {
+		t.Fatal("NewServer should refuse to start with unparseable MAX_AGE; got nil error")
+	}
+	if !strings.Contains(err.Error(), "ONDATRA_ODATA_DELTA_MAX_AGE") {
+		t.Errorf("error should mention the env var, got: %v", err)
+	}
+}
+
+// TestODataServer_PoolSizeBadEnvFailsClosed pins that an unparseable
+// ONDATRA_ODATA_POOL_SIZE refuses to construct the server, mirroring
+// the MAX_AGE fail-closed contract. Catches regressions where the env
+// is silently ignored.
+func TestODataServer_PoolSizeBadEnvFailsClosed(t *testing.T) {
+	t.Setenv("ONDATRA_ODATA_POOL_SIZE", "garbage")
+
+	p := testutil.NewProject(t)
+	p.AddModel("mart/widgets.sql", `-- @kind: table
+-- @expose id
+SELECT * FROM (VALUES (1, 'A')) AS t(id, name)
+`)
+	runModel(t, p, "mart/widgets.sql")
+
+	schemas, err := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "mart.widgets", KeyColumn: "id"},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverSchemas: %v", err)
+	}
+	_, err = odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err == nil {
+		t.Fatal("NewServer should refuse to start with unparseable POOL_SIZE; got nil error")
+	}
+	if !strings.Contains(err.Error(), "ONDATRA_ODATA_POOL_SIZE") {
+		t.Errorf("error should mention env var, got: %v", err)
 	}
 }
 

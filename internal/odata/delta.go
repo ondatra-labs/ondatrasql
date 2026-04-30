@@ -6,14 +6,14 @@ package odata
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
-	"sync"
-
-	duckdb "github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"time"
 )
 
 // Query options that prevent the runtime from emitting an @odata.deltaLink
@@ -43,8 +43,8 @@ func hasDeltaIncompatibleParams(params url.Values) bool {
 // query has incompatible options, the entity has no key column, or the
 // signing key is missing — i.e. whenever delta tracking is unavailable
 // for this response.
-func emitDeltaLink(baseURL string, entity EntitySchema, params url.Values, snapshot int64, key []byte) string {
-	if len(key) == 0 {
+func emitDeltaLink(baseURL string, entity EntitySchema, params url.Values, snapshot int64, ks *Keyset) string {
+	if ks == nil || ks.Sign == nil || len(ks.Sign.Key) == 0 {
 		return ""
 	}
 	if entity.KeyColumn == "" {
@@ -58,7 +58,7 @@ func emitDeltaLink(baseURL string, entity EntitySchema, params url.Values, snaps
 		Entity:     entity.ODataName,
 		FilterHash: filterHash(params),
 	}
-	encoded, err := encodeDeltaToken(tok, key)
+	encoded, err := encodeDeltaToken(tok, ks)
 	if err != nil {
 		return ""
 	}
@@ -95,16 +95,25 @@ func emitDeltaLink(baseURL string, entity EntitySchema, params url.Values, snaps
 func handleDelta(
 	w http.ResponseWriter,
 	r *http.Request,
-	sess *duckdb.Session,
+	db *requestDB,
 	entity EntitySchema,
 	tokenStr string,
-	deltaKey []byte,
+	keyset *Keyset,
+	maxAge time.Duration,
 	baseURL string,
-	deltaMu *sync.Mutex,
 ) {
-	// 1. Decode + verify HMAC
-	tok, err := decodeDeltaToken(tokenStr, deltaKey)
+	// 1. Decode + verify HMAC + max-age
+	tok, err := decodeDeltaToken(tokenStr, keyset, maxAge)
 	if err != nil {
+		// Distinguish expiry from other invalid-token reasons so the
+		// client can react appropriately. Both still return 410 Gone but
+		// the OData error code differs. Sentinel match (errDeltaTokenExpired)
+		// rather than substring so error wording can change without
+		// breaking this branch.
+		if errors.Is(err, errDeltaTokenExpired) {
+			writeError(w, 410, "DeltaLinkExpired", err.Error())
+			return
+		}
 		writeError(w, 410, "DeltaLinkInvalid", err.Error())
 		return
 	}
@@ -132,11 +141,7 @@ func handleDelta(
 	}
 
 	// 2. Resolve current snapshot.
-	if err := sess.RefreshSnapshot(); err != nil {
-		writeError(w, 500, "InternalError", fmt.Sprintf("refresh snapshot: %v", err))
-		return
-	}
-	current, err := sess.GetCurrentSnapshot()
+	current, err := db.GetCurrentSnapshot()
 	if err != nil {
 		writeError(w, 500, "InternalError", fmt.Sprintf("read snapshot: %v", err))
 		return
@@ -147,7 +152,7 @@ func handleDelta(
 	// This is the common case for clients polling for changes — they
 	// just get an empty `value` and a fresh link.
 	if current <= tok.Snapshot {
-		writeDeltaResponse(w, baseURL, entity, nil, deltaKey, current, params)
+		writeDeltaResponse(w, baseURL, entity, nil, keyset, current, params)
 		return
 	}
 
@@ -155,25 +160,19 @@ func handleDelta(
 	//
 	// table_changes() takes a bare table name and resolves it through
 	// search_path; we set search_path to the entity's schema for the
-	// duration of the call and reset afterwards. The pattern matches
-	// what the sink delta path does in execute/sink_delta.go.
-	//
-	// The mutex serialises the SET+SELECT+RESET sequence across
-	// concurrent OData requests sharing this server's session — without
-	// it, two delta handlers could race and execute their SELECT against
-	// the wrong search_path (cross-schema data leak in the worst case).
-	// table_changes() does not accept a qualified `schema.table` name
-	// (verified empirically), so dropping the SET isn't an option.
-	deltaMu.Lock()
-	changes, err := runTableChanges(sess, entity, tok.Snapshot+1, current)
-	deltaMu.Unlock()
+	// duration of the call. Each request has its own pool conn, so the
+	// SET search_path mutation is per-conn — no mutex, no cross-handler
+	// bleed possible. table_changes() does not accept a qualified
+	// `schema.table` name (verified empirically), so dropping the SET
+	// isn't an option.
+	changes, err := runTableChanges(db, entity, tok.Snapshot+1, current)
 	if err != nil {
 		writeError(w, 500, "InternalError", fmt.Sprintf("table_changes: %v", err))
 		return
 	}
 
 	// 5. Format response with @removed for deletes.
-	writeDeltaResponse(w, baseURL, entity, changes, deltaKey, current, params)
+	writeDeltaResponse(w, baseURL, entity, changes, keyset, current, params)
 }
 
 // runTableChanges queries DuckLake's table_changes() function for the
@@ -181,27 +180,33 @@ func handleDelta(
 // their full column set plus a `change_type` column. update_preimage rows
 // are filtered out at the SQL level — the client only cares about
 // post-state for inserts/updates and the key columns for deletes.
-func runTableChanges(sess *duckdb.Session, entity EntitySchema, fromSnap, toSnap int64) ([]map[string]any, error) {
+func runTableChanges(db *requestDB, entity EntitySchema, fromSnap, toSnap int64) ([]map[string]any, error) {
 	// Set search_path so table_changes() can resolve the bare table name.
 	// Catalog alias must come first so DuckLake's table_changes() can find
 	// the table; the rest of the path preserves the default behavior for
-	// any nested macro calls.
-	originalPath := sess.DefaultSearchPath()
-	if err := sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
-		escapeSQL(sess.CatalogAlias()), escapeSQL(entity.Schema), escapeSQL(originalPath))); err != nil {
+	// any nested macro calls. The conn is request-scoped from the read
+	// pool, so this mutation doesn't bleed into other handlers.
+	originalPath := db.DefaultSearchPath()
+	if err := db.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
+		escapeSQL(db.CatalogAlias()), escapeSQL(entity.Schema), escapeSQL(originalPath))); err != nil {
 		return nil, fmt.Errorf("set search_path: %w", err)
 	}
 	defer func() {
-		// Best-effort reset; a failure here only affects subsequent queries
-		// on this session, which is acceptable in the request-scoped
-		// HTTP handler context.
-		_ = sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(originalPath)))
+		// Best-effort reset. If reset fails the conn returns to the pool
+		// with a mutated search_path. Collection-path queries use fully
+		// qualified `lake.schema.table AT (VERSION => N)` so they're
+		// insulated; further delta requests issue their own SET first
+		// and overwrite the stale value. Practical blast radius is zero.
+		// Log so operators see drift if it ever appears in the wild.
+		if err := db.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(originalPath))); err != nil {
+			fmt.Fprintf(os.Stderr, "OData: failed to reset search_path on delta conn (%v); future queries on this conn use the delta search_path until next overwrite\n", err)
+		}
 	}()
 
 	sql := fmt.Sprintf(
 		"SELECT * FROM table_changes('%s', %d, %d) WHERE change_type IN ('insert', 'update_postimage', 'delete')",
 		escapeSQL(entity.Table), fromSnap, toSnap)
-	return sess.QueryRowsAny(sql)
+	return db.QueryRowsAny(sql)
 }
 
 // writeDeltaResponse formats an OData delta response. Inserts/updates
@@ -216,7 +221,7 @@ func writeDeltaResponse(
 	baseURL string,
 	entity EntitySchema,
 	changes []map[string]any,
-	deltaKey []byte,
+	keyset *Keyset,
 	currentSnapshot int64,
 	params url.Values,
 ) {
@@ -291,7 +296,7 @@ func writeDeltaResponse(
 	}
 	// Append fresh deltaLink so the client can keep polling. Use the
 	// CURRENT snapshot — next call will report changes since this point.
-	if link := emitDeltaLink(baseURL, entity, params, currentSnapshot, deltaKey); link != "" {
+	if link := emitDeltaLink(baseURL, entity, params, currentSnapshot, keyset); link != "" {
 		resp["@odata.deltaLink"] = link
 	}
 
@@ -304,30 +309,54 @@ func writeDeltaResponse(
 	w.Write(data)
 }
 
-// loadDeltaKey returns the HMAC signing key for delta links.
-//   - If ONDATRA_ODATA_DELTA_KEY is set in env, parse it (hex-encoded).
-//   - Otherwise generate a per-process random key and log that
-//     deltaLinks won't survive restart.
+// loadDeltaKeyset parses ONDATRA_ODATA_DELTA_KEY into a Keyset.
 //
-// The first form is the production setup; the second is acceptable for
-// development and single-shot test runs.
-func loadDeltaKey(envValue string, log func(format string, args ...any)) ([]byte, error) {
+//   - If env is set, parse via parseKeyset (single hex or comma-separated
+//     `kid:hex` pairs — the first entry signs new tokens, all entries are
+//     accepted during verify so operators can rotate keys without
+//     invalidating outstanding deltaLinks).
+//   - Otherwise generate a per-process random key with empty kid and log
+//     that deltaLinks won't survive restart.
+func loadDeltaKeyset(envValue string, log func(format string, args ...any)) (*Keyset, error) {
 	if envValue != "" {
-		key, err := parseDeltaKey(envValue)
+		ks, err := parseKeyset(envValue)
 		if err != nil {
 			return nil, fmt.Errorf("ONDATRA_ODATA_DELTA_KEY: %w", err)
 		}
-		return key, nil
+		return ks, nil
 	}
-	hex, err := generateDeltaKey()
+	hexKey, err := generateDeltaKey()
 	if err != nil {
 		return nil, err
 	}
 	if log != nil {
 		log("OData: no ONDATRA_ODATA_DELTA_KEY set; generated ephemeral delta-link key (existing @odata.deltaLink URLs will be invalidated on next restart)")
 	}
-	key, _ := parseDeltaKey(hex)
-	return key, nil
+	ks, err := parseKeyset(hexKey)
+	if err != nil {
+		// Should never happen — generateDeltaKey produces 32 hex bytes.
+		return nil, fmt.Errorf("parse ephemeral delta key: %w", err)
+	}
+	return ks, nil
+}
+
+// loadDeltaMaxAge parses ONDATRA_ODATA_DELTA_MAX_AGE as a Go duration
+// (e.g. "168h" for 7 days). Returns 0 if unset (no expiry check).
+// Returns an error if the value is set but unparsable — operators should
+// see a clear failure rather than a silently-disabled check.
+func loadDeltaMaxAge(envValue string) (time.Duration, error) {
+	envValue = strings.TrimSpace(envValue)
+	if envValue == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(envValue)
+	if err != nil {
+		return 0, fmt.Errorf("ONDATRA_ODATA_DELTA_MAX_AGE %q: %w (use Go duration format like 168h)", envValue, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("ONDATRA_ODATA_DELTA_MAX_AGE must be positive, got %s", d)
+	}
+	return d, nil
 }
 
 // escapeSQL is a local copy used by runTableChanges to avoid pulling in

@@ -66,7 +66,10 @@ SELECT 1 AS secret_id, 'hidden' AS data
 		t.Fatalf("DiscoverSchemas: %v", err)
 	}
 
-	handler := odata.NewServer(p.Sess, schemas, "http://testhost")
+	handler, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	srv := newTestServer(t, handler)
 	t.Cleanup(func() { srv.Close() })
 
@@ -767,7 +770,10 @@ SELECT * FROM (VALUES (101, 1, 'X'), (102, 1, 'Y'), (103, 2, 'Z')) AS t(child_id
 
 	odata.DiscoverNavigationProperties(schemas)
 
-	handler := odata.NewServer(p.Sess, schemas, "http://testhost")
+	handler, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	srv := newTestServer(t, handler)
 	t.Cleanup(func() { srv.Close() })
 

@@ -3029,7 +3029,10 @@ SELECT * FROM (VALUES
 	}
 
 	// Start OData server
-	handler := odata.NewServer(p.Sess, schemas, "http://localhost")
+	handler, err := odata.NewServer(p.Sess, schemas, "http://localhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	srv := newTestServer(t, handler)
 	defer srv.Close()
 

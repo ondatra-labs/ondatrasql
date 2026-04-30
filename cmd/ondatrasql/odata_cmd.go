@@ -66,8 +66,13 @@ func runOData(ctx context.Context, cfg *config.Config, port string) error {
 	addr := "127.0.0.1:" + port
 	baseURL := "http://" + addr
 
-	// Create server
-	handler := odata.NewServer(sess, schemas, baseURL)
+	// Create server. Returns an error only when ONDATRA_ODATA_DELTA_MAX_AGE
+	// is set to an unparseable value — fail-closed so a typo can't silently
+	// disable token expiry.
+	handler, err := odata.NewServer(sess, schemas, baseURL)
+	if err != nil {
+		return fmt.Errorf("create odata server: %w", err)
+	}
 	httpSrv := &http.Server{Addr: addr, Handler: handler}
 
 	// Output

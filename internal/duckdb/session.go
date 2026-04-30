@@ -51,6 +51,12 @@ type Session struct {
 	// files) before tearing down. This requires knowing the absolute data
 	// path so we can resolve the relative paths the catalog stores.
 	sandboxDataPath string // absolute prod/sandbox shared data path
+
+	// readPool is a fixed-size pool of read-only conns initialized after the
+	// catalog is attached. Used by OData (and any other parallel read path) so
+	// concurrent requests don't serialise on the writer's per-statement mutex.
+	// nil if InitReadPool was never called.
+	readPool *ReadPool
 }
 
 // NewSession creates a new embedded DuckDB session.
@@ -628,6 +634,13 @@ func (s *Session) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	// Drain the read pool before tearing down the writer's conn — pool conns
+	// share s.db and would block s.db.Close otherwise.
+	if s.readPool != nil {
+		_ = s.readPool.Close()
+		s.readPool = nil
+	}
 
 	// Capture sandbox-only parquet files BEFORE detaching/dropping anything,
 	// while the duckdb session and both catalogs are still attached.

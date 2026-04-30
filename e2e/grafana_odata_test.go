@@ -56,7 +56,10 @@ SELECT * FROM (VALUES
 	odataPort := listener.Addr().(*net.TCPAddr).Port
 
 	hostIP := "host.docker.internal"
-	handler := odata.NewServer(p.Sess, schemas, fmt.Sprintf("http://%s:%d", hostIP, odataPort))
+	handler, err := odata.NewServer(p.Sess, schemas, fmt.Sprintf("http://%s:%d", hostIP, odataPort))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	odataSrv := &http.Server{Handler: handler}
 	go odataSrv.Serve(listener)
 	t.Cleanup(func() { odataSrv.Close() })

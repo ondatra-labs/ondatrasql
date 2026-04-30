@@ -146,11 +146,12 @@ If any of these are missing, the response is normal but the link is omitted.
 
 `$select` and `$orderby` are allowed on the original query and ride along in the deltaLink URL. `$select` is applied to the delta rows (same projection as the original response). `$orderby` is preserved for token validation only — delta rows come back in change order, not the original sort order.
 
-**Token format.** The `$deltatoken` is opaque to the client — it carries the snapshot id, the entity name, and a hash of the original query options, all signed with HMAC-SHA256. The client never inspects or constructs it.
+**Token format.** The `$deltatoken` is opaque to the client — it carries the snapshot id, the entity name, the issued-at timestamp, the signing key id, and a hash of the original query options, all signed with HMAC-SHA256. The client never inspects or constructs it.
 
 **Failure modes.** A `$deltatoken` request returns:
 
-- `410 Gone DeltaLinkInvalid` — token signature is wrong (tampered, or signed by a different server / different key)
+- `410 Gone DeltaLinkInvalid` — token signature is wrong (tampered, signed by a different server / different key, or signed by a key that has since been removed from the keyset)
+- `410 Gone DeltaLinkExpired` — token age exceeds `ONDATRA_ODATA_DELTA_MAX_AGE` (only emitted when max-age is configured)
 - `410 Gone DeltaLinkFilterChanged` — query options have changed since the link was issued; the client must re-issue the original query
 - `400 Bad Request` — the delta request itself uses `$filter`, `$apply`, `$compute`, `$search`, or `$expand`
 
@@ -166,6 +167,37 @@ openssl rand -hex 32
 export ONDATRA_ODATA_DELTA_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ondatrasql odata 8090
 ```
+
+**Key rotation.** `ONDATRA_ODATA_DELTA_KEY` accepts a comma-separated list of `kid:hex` pairs for zero-downtime rotation. The first entry signs new tokens; every entry is accepted during verification. To rotate without invalidating outstanding deltaLinks:
+
+```bash
+# Phase 1: deploy with both keys, new key first
+export ONDATRA_ODATA_DELTA_KEY=v2:fedcba9876543210...,v1:0123456789abcdef...
+
+# Phase 2: after max-age elapses (or all clients have re-issued),
+# drop the old key
+export ONDATRA_ODATA_DELTA_KEY=v2:fedcba9876543210...
+```
+
+Bare hex without a kid (the legacy v0.26.0 form) is accepted as a single entry with empty kid. Mixing forms in the list is allowed.
+
+**Token expiry.** Set `ONDATRA_ODATA_DELTA_MAX_AGE` to a Go duration string to reject tokens older than the configured window. The check is opt-in — when unset, tokens are valid as long as the underlying DuckLake snapshot is still retained.
+
+```bash
+export ONDATRA_ODATA_DELTA_MAX_AGE=168h    # 7 days
+export ONDATRA_ODATA_DELTA_MAX_AGE=24h
+export ONDATRA_ODATA_DELTA_MAX_AGE=30m
+```
+
+The duration uses Go's syntax — `h`/`m`/`s` are supported, `d` is not. An unparseable value refuses to start the server (fail-closed: a typoed env shouldn't silently disable the security knob you configured).
+
+**Connection pool.** OData requests are served from a fixed-size read-only connection pool, so concurrent BI clients don't serialise on the writer's mutex. Default size is `min(GOMAXPROCS, 8)`. Override with `ONDATRA_ODATA_POOL_SIZE`:
+
+```bash
+export ONDATRA_ODATA_POOL_SIZE=4
+```
+
+The DuckLake catalog is ATTACHed once at the DuckDB-instance level by the pipeline (so all conns on the same process see it). Each pool conn additionally runs `LOAD ducklake` + `USE <catalog>` + `SET search_path` at startup so it resolves table names the same way the writer does. The writer's connection is unaffected — the pipeline runner keeps its dedicated conn.
 
 **Backed by DuckLake.** The runtime wraps DuckLake's `table_changes(table, from_snapshot, to_snapshot)` — the delta is the literal CDC diff between the snapshot the client last saw and the current one.
 

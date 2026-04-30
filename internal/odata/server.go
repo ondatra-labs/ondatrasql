@@ -6,19 +6,132 @@ package odata
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 )
 
+// requestDB bundles a single read-pool conn with the writer session for
+// the duration of one OData request. Created at handler entry, released
+// when the handler returns. Mirrors the `*duckdb.Session` method names the
+// OData code calls so the call sites don't change shape.
+//
+// All Query / Exec methods route to the bound pool conn; accessor methods
+// (CatalogAlias, DefaultSearchPath) pass through to the session because
+// those are session-level config, not per-conn state.
+type requestDB struct {
+	ctx  context.Context
+	conn *sql.Conn
+	sess *duckdb.Session
+}
+
+func (r *requestDB) QueryRowsAny(sqlStr string) ([]map[string]any, error) {
+	return duckdb.QueryRowsAnyOnConn(r.ctx, r.conn, sqlStr)
+}
+
+func (r *requestDB) QueryValue(sqlStr string) (string, error) {
+	return duckdb.QueryValueOnConn(r.ctx, r.conn, sqlStr)
+}
+
+func (r *requestDB) QueryRowsMap(sqlStr string) ([]map[string]string, error) {
+	return duckdb.QueryRowsMapOnConn(r.ctx, r.conn, sqlStr)
+}
+
+func (r *requestDB) Exec(sqlStr string) error {
+	return duckdb.ExecOnConn(r.ctx, r.conn, sqlStr)
+}
+
+// RefreshSnapshot is a no-op on the pool path. The writer session uses a
+// `curr_snapshot` session variable that lives on its own conn; pool conns
+// don't share it. GetCurrentSnapshot reads `current_snapshot()` directly.
+func (r *requestDB) RefreshSnapshot() error { return nil }
+
+func (r *requestDB) GetCurrentSnapshot() (int64, error) {
+	return duckdb.CurrentSnapshotOnConn(r.ctx, r.conn)
+}
+
+func (r *requestDB) DefaultSearchPath() string { return r.sess.DefaultSearchPath() }
+func (r *requestDB) CatalogAlias() string      { return r.sess.CatalogAlias() }
+
+// defaultPoolSize is min(GOMAXPROCS, 8). The 8 cap exists so 64-vCPU CI
+// runners don't auto-spawn 64 DuckDB conns; operators that want more can
+// set ONDATRA_ODATA_POOL_SIZE explicitly.
+func defaultPoolSize() int {
+	n := runtime.GOMAXPROCS(0)
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// loadPoolSize resolves the OData read-pool size from
+// ONDATRA_ODATA_POOL_SIZE: the env value if set (parsed as a positive
+// integer), or defaultPoolSize() if unset. Returns an error when the env
+// is set but unparseable or non-positive — operators get a clear failure
+// rather than a silent fallback (mirrors loadDeltaMaxAge fail-closed).
+func loadPoolSize(envValue string) (int, error) {
+	envValue = strings.TrimSpace(envValue)
+	if envValue == "" {
+		return defaultPoolSize(), nil
+	}
+	n, err := strconv.Atoi(envValue)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("ONDATRA_ODATA_POOL_SIZE=%q: must be a positive integer", envValue)
+	}
+	return n, nil
+}
+
+// acquireDB checks out a read conn for the request. Returns a release fn
+// that the handler must call (typically `defer release()`). On failure
+// writes a 503 error and returns nil/nil/err so the caller can return
+// early.
+func acquireDB(ctx context.Context, sess *duckdb.Session, w http.ResponseWriter) (*requestDB, func(), bool) {
+	pool := sess.ReadPool()
+	if pool == nil {
+		writeError(w, 500, "InternalError", "OData read pool not initialised")
+		return nil, nil, false
+	}
+	c, err := pool.Acquire(ctx)
+	if err != nil {
+		// Context cancelled (client disconnected) → no point writing a body
+		// the client won't read. Pool closed → 503 because we cannot serve.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, nil, false
+		}
+		writeError(w, 503, "ServiceUnavailable", fmt.Sprintf("acquire read conn: %v", err))
+		return nil, nil, false
+	}
+	db := &requestDB{ctx: ctx, conn: c, sess: sess}
+	release := func() { pool.Release(c) }
+	return db, release, true
+}
+
 // NewServer creates an HTTP handler for OData endpoints.
-func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) http.Handler {
+//
+// If the session has no read pool yet, NewServer initializes one with a
+// default size of min(GOMAXPROCS, 8). Operators that want to override the
+// size should call sess.InitReadPool(N) themselves before calling
+// NewServer — see cmd/ondatrasql/odata_cmd.go for the env-driven config.
+//
+// Returns an error only when ONDATRA_ODATA_DELTA_MAX_AGE is set to an
+// unparseable value: that's an explicit operator request for token
+// expiry, and silently disabling it would deny the security guarantee
+// they configured. Other failures (delta-key parse, read-pool init)
+// degrade gracefully — server starts, deltaLinks may be omitted, etc.
+func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (http.Handler, error) {
 	// Normalize once at the boundary so every helper that builds URLs by
 	// concatenating `baseURL + "/odata/..."` produces the same canonical
 	// form. Without this, an operator-configured trailing slash leaks into
@@ -26,35 +139,63 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 	// (which trims) refuses to dereference them.
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
+	// Resolve pool size from env (fail-closed on bad value, mirrors
+	// MAX_AGE handling). Always read the env even if a pool is already
+	// initialised, so a typoed env still surfaces an error at server-
+	// construction time.
+	poolSize, err := loadPoolSize(os.Getenv("ONDATRA_ODATA_POOL_SIZE"))
+	if err != nil {
+		return nil, err
+	}
+	if sess.ReadPool() == nil {
+		if initErr := sess.InitReadPool(poolSize); initErr != nil {
+			// Fail soft on session-level errors (e.g. catalog not
+			// initialised in a test that skipped InitWithCatalog) — log
+			// and return a handler that 500s every request rather than
+			// crashing at boot.
+			fmt.Fprintf(os.Stderr, "OData: failed to initialise read pool (%v); every request will return 500\n", initErr)
+		}
+	}
+
 	entityMap := make(map[string]EntitySchema, len(schemas))
 	for _, s := range schemas {
 		entityMap[s.ODataName] = s
 	}
 
-	// Delta link signing key. Persistent if ONDATRA_ODATA_DELTA_KEY is
+	// Delta link signing keyset. Persistent if ONDATRA_ODATA_DELTA_KEY is
 	// set; per-process random otherwise (with a startup log line so the
-	// operator knows existing deltaLinks won't survive a restart).
-	deltaKey, deltaKeyErr := loadDeltaKey(os.Getenv("ONDATRA_ODATA_DELTA_KEY"), func(f string, a ...any) {
+	// operator knows existing deltaLinks won't survive a restart). The
+	// env supports comma-separated `kid:hex` pairs for zero-downtime
+	// rotation — see parseKeyset.
+	deltaKeyset, deltaKeyErr := loadDeltaKeyset(os.Getenv("ONDATRA_ODATA_DELTA_KEY"), func(f string, a ...any) {
 		fmt.Fprintf(os.Stderr, f+"\n", a...)
 	})
 	if deltaKeyErr != nil {
 		// Fail soft: server starts, deltaLinks just won't be emitted.
 		// The error is reported to stderr.
 		fmt.Fprintf(os.Stderr, "OData: failed to initialise delta key (%v); @odata.deltaLink will be omitted\n", deltaKeyErr)
-		deltaKey = nil
+		deltaKeyset = nil
 	}
 
-	// Delta-handler serializer. The delta path mutates the session-wide
-	// `search_path` to make DuckLake's `table_changes()` resolve a bare
-	// table name — see runTableChanges in delta.go. table_changes() does
-	// NOT accept a qualified name (verified: errors with "Table with name
-	// schema.table does not exist"), so we cannot drop the SET. The
-	// session's per-statement mutex doesn't span the SET+SELECT+RESET
-	// sequence, so two concurrent delta handlers could clobber each
-	// other's search_path mid-query (cross-schema data leak in the worst
-	// case). This mutex serialises only the delta path; normal collection
-	// queries are unaffected and remain concurrent.
-	var deltaMu sync.Mutex
+	// Optional max-age: tokens older than this are rejected as expired.
+	// Unset = no expiry check (default). Configurable expiry guards against
+	// long-lived deltaLinks pinning ancient snapshots and producing huge
+	// table_changes() result sets.
+	//
+	// Fail closed on parse errors: if the operator typed
+	// ONDATRA_ODATA_DELTA_MAX_AGE=garbage they wanted expiry; silently
+	// running with no expiry is a security regression.
+	deltaMaxAge, maxAgeErr := loadDeltaMaxAge(os.Getenv("ONDATRA_ODATA_DELTA_MAX_AGE"))
+	if maxAgeErr != nil {
+		return nil, maxAgeErr
+	}
+
+	// v0.27.0: the previous `deltaMu` mutex is gone. Each request now gets
+	// its own conn from the read pool, so the delta handler's
+	// `SET search_path = 'lake.<schema>,...'` mutation is per-conn — no
+	// cross-handler bleed possible. The pool itself enforces a hard
+	// concurrency cap (size = ONDATRA_ODATA_POOL_SIZE) so the writer's conn
+	// stays untouched by readers.
 
 	mux := http.NewServeMux()
 
@@ -88,8 +229,13 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		if !validateFormat(w, r) {
 			return
 		}
+		db, release, ok := acquireDB(r.Context(), sess, w)
+		if !ok {
+			return
+		}
+		defer release()
 		entityName := r.PathValue("entity")
-		handleCount(w, r, sess, entityMap, entityName)
+		handleCount(w, r, db, entityMap, entityName)
 	})
 
 	// Entity collection: /odata/{entity}
@@ -97,16 +243,22 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		if !validateFormat(w, r) {
 			return
 		}
+		db, release, ok := acquireDB(r.Context(), sess, w)
+		if !ok {
+			return
+		}
+		defer release()
+
 		entityName := r.PathValue("entity")
 
 		// Single entity by key: /odata/entity(key)
 		if strings.Contains(entityName, "(") {
-			handleSingleEntity(w, r, sess, entityMap, entityName, baseURL)
+			handleSingleEntity(w, r, db, entityMap, entityName, baseURL)
 			return
 		}
 
-		entity, ok := entityMap[entityName]
-		if !ok {
+		entity, eok := entityMap[entityName]
+		if !eok {
 			writeError(w, 404, "NotFound", fmt.Sprintf("Entity set '%s' not found", entityName))
 			return
 		}
@@ -114,9 +266,10 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		// $deltatoken: serve a delta-format response from DuckLake's
 		// table_changes() between the snapshot pinned in the token and
 		// the current snapshot. Routed before any normal-query handling.
-		// Serialised via deltaMu — see comment on the mutex declaration.
+		// Each request has its own conn (search_path mutation is per-conn),
+		// so no mutex is needed here.
 		if dt := r.URL.Query().Get("$deltatoken"); dt != "" {
-			handleDelta(w, r, sess, entity, dt, deltaKey, baseURL, &deltaMu)
+			handleDelta(w, r, db, entity, dt, deltaKeyset, deltaMaxAge, baseURL)
 			return
 		}
 
@@ -128,8 +281,8 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		// the response is still correct, just potentially showing skew
 		// under heavy concurrent writes.
 		var snapshot int64
-		if err := sess.RefreshSnapshot(); err == nil {
-			snapshot, _ = sess.GetCurrentSnapshot()
+		if err := db.RefreshSnapshot(); err == nil {
+			snapshot, _ = db.GetCurrentSnapshot()
 		}
 
 		// If $expand is active, ensure FK columns are in the query
@@ -161,7 +314,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 			return
 		}
 
-		rows, err := sess.QueryRowsAny(sql)
+		rows, err := db.QueryRowsAny(sql)
 		if err != nil {
 			// Classify DuckDB errors: column/type/syntax errors are client errors
 			errMsg := err.Error()
@@ -189,7 +342,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 				countSQL, err := BuildQuery(entity, applyCountParams, snapshot)
 				if err == nil {
 					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", countSQL)
-					if val, err := sess.QueryValue(countSQL); err == nil {
+					if val, err := db.QueryValue(countSQL); err == nil {
 						var c int
 						fmt.Sscanf(val, "%d", &c)
 						count = &c
@@ -206,7 +359,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 				}
 				if countSQL, err := BuildQuery(entity, countParams, snapshot); err == nil {
 					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", countSQL)
-					if val, err := sess.QueryValue(countSQL); err == nil {
+					if val, err := db.QueryValue(countSQL); err == nil {
 						var c int
 						fmt.Sscanf(val, "%d", &c)
 						count = &c
@@ -215,7 +368,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 			} else {
 				countSQL, err := BuildCountQuery(entity, queryParams, snapshot)
 				if err == nil {
-					if val, err := sess.QueryValue(countSQL); err == nil {
+					if val, err := db.QueryValue(countSQL); err == nil {
 						var c int
 						fmt.Sscanf(val, "%d", &c)
 						count = &c
@@ -283,7 +436,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 						qualifiedTableSQL(targetEntity.Schema, targetEntity.Table, snapshot),
 						quoteIdent(nav.TargetColumn), filterVal)
 
-					relRows, err := sess.QueryRowsAny(relSQL)
+					relRows, err := db.QueryRowsAny(relSQL)
 					if err != nil {
 						rows[i][expName] = []map[string]any{}
 						continue
@@ -326,8 +479,8 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		// we'd have if we re-read the snapshot here. Skipped when query
 		// has incompatible options or no delta key is configured.
 		var deltaLink string
-		if deltaKey != nil && snapshot > 0 {
-			deltaLink = emitDeltaLink(baseURL, entity, queryParams, snapshot, deltaKey)
+		if deltaKeyset != nil && snapshot > 0 {
+			deltaLink = emitDeltaLink(baseURL, entity, queryParams, snapshot, deltaKeyset)
 		}
 
 		data, err := FormatResponse(baseURL, entityName, rows, count, entity)
@@ -374,7 +527,12 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 				fmt.Sprintf("$id %q does not address a single entity (missing key)", idURL))
 			return
 		}
-		handleSingleEntity(w, r, sess, entityMap, entityPath, baseURL)
+		db, release, ok := acquireDB(r.Context(), sess, w)
+		if !ok {
+			return
+		}
+		defer release()
+		handleSingleEntity(w, r, db, entityMap, entityPath, baseURL)
 	})
 
 	// $batch — JSON batch format (OData v4.01)
@@ -382,7 +540,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		handleBatch(w, r, mux)
 	})
 
-	return odataVersion(mux)
+	return odataVersion(mux), nil
 }
 
 // odataVersion wraps a handler to set the OData-Version header on all responses.
@@ -452,7 +610,7 @@ func validateFormat(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func handleCount(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, entityMap map[string]EntitySchema, entityName string) {
+func handleCount(w http.ResponseWriter, r *http.Request, db *requestDB, entityMap map[string]EntitySchema, entityName string) {
 	entity, ok := entityMap[entityName]
 	if !ok {
 		writeError(w, 404, "NotFound", fmt.Sprintf("Entity set '%s' not found", entityName))
@@ -462,8 +620,8 @@ func handleCount(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, e
 	// Pin to a snapshot so $count is consistent if the same client also
 	// queried the data — both reads see the same DuckLake version.
 	var snapshot int64
-	if err := sess.RefreshSnapshot(); err == nil {
-		snapshot, _ = sess.GetCurrentSnapshot()
+	if err := db.RefreshSnapshot(); err == nil {
+		snapshot, _ = db.GetCurrentSnapshot()
 	}
 
 	params := r.URL.Query()
@@ -492,7 +650,7 @@ func handleCount(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, e
 		}
 	}
 
-	val, err := sess.QueryValue(countSQL)
+	val, err := db.QueryValue(countSQL)
 	if err != nil {
 		writeError(w, 500, "InternalError", err.Error())
 		return
@@ -605,7 +763,7 @@ func (r *responseRecorder) Header() http.Header         { return r.headers }
 func (r *responseRecorder) WriteHeader(status int)       { r.status = status }
 func (r *responseRecorder) Write(b []byte) (int, error)  { return r.body.Write(b) }
 
-func handleSingleEntity(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, entityMap map[string]EntitySchema, raw, baseURL string) {
+func handleSingleEntity(w http.ResponseWriter, r *http.Request, db *requestDB, entityMap map[string]EntitySchema, raw, baseURL string) {
 	// Parse "entityName(keyValue)"
 	idx := strings.Index(raw, "(")
 	if idx < 0 || !strings.HasSuffix(raw, ")") {
@@ -631,8 +789,8 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, sess *duckdb.Ses
 	// dereferencing produces identical reads to the original
 	// `value`-array entries).
 	var snapshot int64
-	if err := sess.RefreshSnapshot(); err == nil {
-		snapshot, _ = sess.GetCurrentSnapshot()
+	if err := db.RefreshSnapshot(); err == nil {
+		snapshot, _ = db.GetCurrentSnapshot()
 	}
 
 	sql, err := BuildSingleEntityQuery(entity, keyValue, snapshot)
@@ -641,7 +799,7 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, sess *duckdb.Ses
 		return
 	}
 
-	rows, err := sess.QueryRowsAny(sql)
+	rows, err := db.QueryRowsAny(sql)
 	if err != nil {
 		writeError(w, 500, "InternalError", err.Error())
 		return
