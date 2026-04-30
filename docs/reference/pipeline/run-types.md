@@ -11,7 +11,7 @@ weight: 8
 |---|---|---|
 | `skip` | Hash unchanged, no dep changes | All |
 | `backfill` | Hash changed, first run, config changed | All except events |
-| `incremental` | Hash unchanged, source data may have changed | append, merge, scd2, tracked, partition |
+| `incremental` | Hash unchanged, source data may have changed | append, merge, scd2, tracked |
 | `full` | Upstream dep changed, dep metadata missing/invalid, destructive schema evolution | table |
 | `flush` | Events buffered in Badger | events |
 

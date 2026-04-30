@@ -3,6 +3,7 @@ date: "2026-04-20"
 description: 'Complete reference for the push() function contract: internal fields, change types, return values, and batch modes.'
 draft: false
 title: Push Contract
+weight: 14
 ---
 Your `push()` function receives rows from the runtime and sends them to an external API. SQL controls what gets pushed — Starlark controls how.
 

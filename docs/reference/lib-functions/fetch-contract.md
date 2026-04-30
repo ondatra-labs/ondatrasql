@@ -3,6 +3,7 @@ date: "2026-04-20"
 description: 'Complete reference for the fetch() function contract: page object, return format, pagination, incremental state, and available modules.'
 draft: false
 title: Fetch Contract
+weight: 12
 ---
 Your `fetch()` function is called once per page by the runtime. It receives pagination context and returns rows. Starlark handles I/O — SQL handles transformation.
 

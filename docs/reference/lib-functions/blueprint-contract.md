@@ -1,8 +1,9 @@
 ---
+date: "2026-04-28"
 description: Stable API surface, dynamic behavior, and empty-run guarantees for lib functions.
 draft: false
 title: Blueprint Contract
-date: "2026-04-28"
+weight: 16
 ---
 
 ## Stable API surface

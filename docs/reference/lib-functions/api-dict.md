@@ -3,6 +3,7 @@ date: "2026-04-20"
 description: API dict reference for lib/ blueprints. Unified configuration for fetch, push, HTTP, auth, and rate limiting.
 draft: false
 title: API Dict
+weight: 10
 ---
 The API dict declares the complete contract for a lib function. One dict per file. All values must be literals — no variables, no concatenation. The runtime parses it as AST without executing code.
 

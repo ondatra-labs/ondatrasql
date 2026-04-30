@@ -1,4 +1,6 @@
 ---
+description: Reference for OndatraSQL lib functions. API dict configuration, fetch and push contracts, blueprint stability rules, and Starlark module APIs.
+draft: false
 title: Lib Functions
 weight: 10
 ---

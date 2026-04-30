@@ -69,7 +69,7 @@ Directives are SQL comments that control materialization, change detection, and 
 |---|---|
 | `@description` | Table comment in DuckLake catalog |
 | `@column` | Column comment + masking tags. See [Mask Sensitive Columns](/guides/mask-sensitive-columns/) |
-| `@expose <column>` | Serve via OData v4. Key column required. See [Serve Data via OData](/guides/serve-data-via-odata/) |
+| `@expose <column>` | Serve via OData v4.01. Key column required. See [Serve Data via OData](/guides/serve-data-via-odata/) |
 | `@extension` | Load a DuckDB extension before execution |
 
 ## Example

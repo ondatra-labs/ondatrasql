@@ -1,6 +1,5 @@
 ---
-date: "2026-04-04T00:00:00+02:00"
-description: Serve pipeline results to Power BI, Excel, Grafana, or any OData-compatible BI tool via OData v4.
+description: Serve pipeline results to Power BI, Excel, Grafana, or any OData-compatible BI tool via OData v4.01.
 draft: false
 title: Serve Data via OData
 weight: 8

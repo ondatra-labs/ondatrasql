@@ -14,7 +14,7 @@ Single binary. All commands listed below.
 | [`sandbox`](#sandbox) | Preview changes before committing |
 | [`schedule`](#schedule) | Install OS-native scheduler |
 | [`events`](#events) | Start event collection endpoint |
-| [`odata`](#odata) | Start OData v4 server |
+| [`odata`](#odata) | Start OData v4.01 server |
 | [`init`](#init) | Create a new project |
 | [`new`](#new) | Create a model file |
 | [`edit`](#edit) | Open file in $EDITOR |

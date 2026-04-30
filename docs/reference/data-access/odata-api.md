@@ -275,13 +275,33 @@ Each row is a flat object with one nested object per source entity-set, keyed by
 
 **Why this exists.** `@expose` marks tables available; it does not predefine joins. Without `$crossjoin`, the only way to deliver joined data is to add a JOIN-containing SQL model and `@expose` it — which fixes the join shape at the operator level. `$crossjoin` lets clients pick the join condition at request time without operator action.
 
-**Supported in `$crossjoin`.**
+**Supported in `$crossjoin`** (full OData v4.01 query-option set):
 
-- `$filter` with qualified refs (`A/col eq B/col`) for the join condition and additional row filters
+- `$filter` with qualified refs (`A/col eq B/col`) for the join condition and additional row filters. Deep navigation paths (`A/Nav/col`, 3+ segments) traverse nav-properties via `EXISTS` subqueries pinned to the request snapshot.
+- `$orderby` with qualified refs (`A/col desc`) and bare `$compute` aliases. Bare entity column names are rejected — they're ambiguous when both entity sets define the same column.
+- `$select` in three forms (per OData v4.01 §5.1.3 + §4.15 + §5.1.3.1):
+  - whole entity (`$select=Customers`) — keeps every column of that entity, drops other entities from the response
+  - qualified column (`$select=Customers/id,Orders/amount`) — keeps just those columns. Mixing forms is allowed; whole-entity wins on conflict.
+  - bare `$compute` alias (`$select=doubled`) — keeps only that row-level scalar. `$select=doubled` alone drops every entity sub-object, leaving rows like `{"doubled": 100}`.
+- `$expand` with bare entity-set names (`$expand=Customers,Orders`) — accepted as a no-op since we always inline. Deep `$expand` (`Customers/Orders`) resolves the nav-property and inlines the targets per row, mirroring the collection handler's per-row sub-query pattern.
+- `$compute` with qualified refs (`A/col mul 2 as doubled`) — emits computed top-level scalars at the row level, alongside the nested entity sub-objects. Aliases must be alphanumeric+underscore and cannot contain the `__` substring (reserved as the cross-join demuxer separator).
+- `$apply` (groupby/aggregate) — forks the response shape from nested-per-entity to flat aggregated rows. Output columns are the groupby cols (kept in `<Entity>__<col>` alias form) and the aggregate aliases. Compatible with `$filter`, `$search`, `$top`, `$skip`, `$count`; incompatible with `$orderby`/`$select`/`$expand`/`$compute` (which depend on the regular row shape).
+- `$search` — ILIKE-OR across every VARCHAR column of every joined entity. Cross-join cardinality means a single-entity match multiplies by rows of the others; narrow further with `$filter`.
 - `$top` / `$skip` for paging
-- `$count=true` for total row count of the filtered cross product
+- `$count=true` for total row count of the filtered cross product (or aggregated group count when combined with `$apply`)
 
-**Not supported in `$crossjoin`.** `$select`, `$orderby`, `$expand`, `$compute`, `$apply`, `$search` return 400 Bad Request. Deep navigation paths (more than 2 segments, e.g. `A/B/col`) are also rejected.
+```bash
+# Cross-join with select, filter, orderby
+curl "http://localhost:8090/odata/\$crossjoin(raw_customers,raw_orders)?\
+\$filter=raw_customers/id%20eq%20raw_orders/customer_id&\
+\$select=raw_customers/name,raw_orders/amount&\
+\$orderby=raw_orders/amount%20desc"
+
+# Cross-join with $apply: sum of orders per customer
+curl "http://localhost:8090/odata/\$crossjoin(raw_customers,raw_orders)?\
+\$filter=raw_customers/id%20eq%20raw_orders/customer_id&\
+\$apply=groupby((raw_customers/id),aggregate(raw_orders/amount%20with%20sum%20as%20total))"
+```
 
 ### Positional access {#positional-access}
 
@@ -373,9 +393,8 @@ Not supported:
 
 - Write operations (POST, PUT, DELETE on entity sets)
 - Complex type functions or actions
-- Deep `$expand` (nested navigation)
-- Deep navigation paths in `$filter` (more than 2 segments)
-- `$crossjoin` with `$select`, `$orderby`, `$expand`, `$compute`, `$apply`, `$search`
+- Deep `$expand` (nested navigation) on collection routes — supported on `$crossjoin`
+- Deep navigation paths in `$filter` (more than 2 segments) on collection routes — supported on `$crossjoin`
 - Multipart `$batch` (only JSON batch is supported)
 - `$format=xml` / Atom serialization
 - `Prefer: respond-async`

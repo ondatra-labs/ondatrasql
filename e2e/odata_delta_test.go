@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -788,6 +790,610 @@ SELECT id::BIGINT AS id FROM (VALUES (1)) AS t(id)
 	if httpResp.StatusCode != 404 {
 		t.Errorf("status = %d, want 404", httpResp.StatusCode)
 	}
+}
+
+// TestODataCrossJoin_SelectWholeEntity pins the §4.15 form where the
+// client picks entire entity sets to include in the response. Entities
+// not in $select are dropped from the nested object.
+func TestODataCrossJoin_SelectWholeEntity(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$select")+"="+url.QueryEscape("raw_orders"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) == 0 {
+		t.Fatalf("expected matched rows, got none (body: %s)", body)
+	}
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		if _, has := row["raw_customers"]; has {
+			t.Errorf("$select=raw_orders should drop raw_customers from nested object: %v", row)
+		}
+		if _, has := row["raw_orders"]; !has {
+			t.Errorf("$select=raw_orders should keep raw_orders: %v", row)
+		}
+	}
+}
+
+// TestODataCrossJoin_SelectQualifiedColumns pins the §5.1.3 form
+// where the client picks specific columns from each entity.
+func TestODataCrossJoin_SelectQualifiedColumns(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$select")+"="+url.QueryEscape("raw_customers/name,raw_orders/amount"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) == 0 {
+		t.Fatalf("expected matched rows, got none (body: %s)", body)
+	}
+	row, _ := values[0].(map[string]any)
+	cust, _ := row["raw_customers"].(map[string]any)
+	ord, _ := row["raw_orders"].(map[string]any)
+	if _, has := cust["id"]; has {
+		t.Errorf("raw_customers should not include id (not in $select): %v", cust)
+	}
+	if _, has := cust["name"]; !has {
+		t.Errorf("raw_customers should include name: %v", cust)
+	}
+	if _, has := ord["amount"]; !has {
+		t.Errorf("raw_orders should include amount: %v", ord)
+	}
+	if _, has := ord["customer_id"]; has {
+		t.Errorf("raw_orders should not include customer_id (not in $select): %v", ord)
+	}
+}
+
+// TestODataCrossJoin_OrderByQualified pins §4.15's explicit allowance
+// of $orderby with qualified refs.
+func TestODataCrossJoin_OrderByQualified(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$orderby")+"="+url.QueryEscape("raw_orders/amount desc"))
+	var resp map[string]any
+	json.Unmarshal([]byte(body), &resp)
+	values, _ := resp["value"].([]any)
+	if len(values) < 2 {
+		t.Fatalf("need at least 2 matched rows to verify ordering, got %d (body: %s)", len(values), body)
+	}
+	prevAmount := math.Inf(1)
+	for i, v := range values {
+		row, _ := v.(map[string]any)
+		ord, _ := row["raw_orders"].(map[string]any)
+		amount, _ := ord["amount"].(float64)
+		if amount > prevAmount {
+			t.Errorf("row %d amount=%v out of DESC order (prev=%v)", i, amount, prevAmount)
+		}
+		prevAmount = amount
+	}
+}
+
+// TestODataCrossJoin_RejectsBareOrderBy pins that bare column names in
+// $orderby (e.g. "id desc") are rejected on $crossjoin — they're
+// ambiguous when both entity sets define the same column.
+func TestODataCrossJoin_RejectsBareOrderBy(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	httpResp, err := http.Get(srv.URL + "/odata/$crossjoin(raw_customers,raw_orders)?$orderby=id")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", httpResp.StatusCode)
+	}
+	body, _ := io.ReadAll(httpResp.Body)
+	if !strings.Contains(string(body), "qualified refs") {
+		t.Errorf("expected error to mention 'qualified refs', got: %s", body)
+	}
+}
+
+// TestODataCrossJoin_BareExpandIsNoOp pins that $expand with the joined
+// entity-set names is accepted as a no-op (they're already inlined).
+// Bare-form: response unchanged. Unknown / 3+ segment paths: 400.
+func TestODataCrossJoin_BareExpandIsNoOp(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	// Bare expand of joined entities: accepted, response unchanged.
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$expand")+"="+url.QueryEscape("raw_customers,raw_orders"))
+	var resp map[string]any
+	json.Unmarshal([]byte(body), &resp)
+	if values, _ := resp["value"].([]any); len(values) == 0 {
+		t.Errorf("bare $expand should not break the response (body: %s)", body)
+	}
+
+	// Unknown entity in expand: rejected.
+	httpResp, err := http.Get(srv.URL + "/odata/$crossjoin(raw_customers,raw_orders)?$expand=nope")
+	if err != nil {
+		t.Fatalf("get unknown expand: %v", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != 400 {
+		t.Errorf("unknown $expand status = %d, want 400", httpResp.StatusCode)
+	}
+
+	// 3+ segment path: rejected.
+	httpResp2, err := http.Get(srv.URL + "/odata/$crossjoin(raw_customers,raw_orders)?" +
+		url.QueryEscape("$expand") + "=" + url.QueryEscape("raw_customers/raw_orders/something"))
+	if err != nil {
+		t.Fatalf("get 3-segment expand: %v", err)
+	}
+	defer httpResp2.Body.Close()
+	if httpResp2.StatusCode != 400 {
+		t.Errorf("3+ segment $expand status = %d, want 400", httpResp2.StatusCode)
+	}
+}
+
+// TestODataCrossJoin_DeepFilterPath pins 3-segment paths in $filter
+// (`Customers/Orders/amount gt 100`) — they translate to EXISTS
+// subqueries via the FK nav-property infrastructure. Common pattern:
+// filter the cross-join by some property of a related entity.
+func TestODataCrossJoin_DeepFilterPath(t *testing.T) {
+	p := testutil.NewProject(t)
+	p.AddModel("raw/customers.sql", `-- @kind: table
+-- @expose customer_id
+SELECT customer_id::BIGINT AS customer_id, name::VARCHAR AS name FROM (VALUES
+    (1, 'Alice'), (2, 'Bob'), (3, 'Carol')
+) AS t(customer_id, name)
+`)
+	p.AddModel("raw/orders.sql", `-- @kind: table
+-- @expose order_id
+SELECT order_id::BIGINT AS order_id, customer_id::BIGINT AS customer_id, amount::BIGINT AS amount FROM (VALUES
+    (101, 1, 500), (102, 1, 30), (103, 2, 75), (104, 3, 10)
+) AS t(order_id, customer_id, amount)
+`)
+	p.AddModel("raw/products.sql", `-- @kind: table
+-- @expose product_id
+SELECT product_id::BIGINT AS product_id, name::VARCHAR AS name FROM (VALUES
+    (901, 'Widget'), (902, 'Gizmo')
+) AS t(product_id, name)
+`)
+	runModel(t, p, "raw/customers.sql")
+	runModel(t, p, "raw/orders.sql")
+	runModel(t, p, "raw/products.sql")
+	schemas, _ := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "raw.customers", KeyColumn: "customer_id"},
+		{Target: "raw.orders", KeyColumn: "order_id"},
+		{Target: "raw.products", KeyColumn: "product_id"},
+	})
+	odata.DiscoverNavigationProperties(schemas)
+	handler, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := newTestServer(t, handler)
+	t.Cleanup(func() { srv.Close() })
+
+	// Cross-join customers × products, filter by customers having an
+	// order with amount > 100. Only Alice (order 101 amount=500)
+	// qualifies. 1 customer × 2 products = 2 rows.
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_products)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/raw_orders/amount gt 100"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) != 2 {
+		t.Fatalf("Expected 2 rows (Alice × 2 products), got %d (body: %s)", len(values), body)
+	}
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		cust, _ := row["raw_customers"].(map[string]any)
+		if name, _ := cust["name"].(string); name != "Alice" {
+			t.Errorf("expected only Alice in matches, got %v", cust)
+		}
+	}
+}
+
+// TestODataCrossJoin_DeepExpand pins deep nav-property expansion in
+// $crossjoin context. The cross-join joins customers × products (no FK
+// relation). $expand=raw_customers/raw_orders inlines each customer's
+// orders inside its sub-object via the FK nav-property — so a row
+// becomes {raw_customers: {customer_id, name, raw_orders: [...]}, raw_products: {...}}.
+//
+// Nav-discovery requires the FK column to be named identically to the
+// target's PK (PK→FK pattern in DiscoverNavigationProperties). So the
+// fixture uses customer_id for the customers PK and the orders FK.
+func TestODataCrossJoin_DeepExpand(t *testing.T) {
+	p := testutil.NewProject(t)
+	p.AddModel("raw/customers.sql", `-- @kind: table
+-- @expose customer_id
+SELECT customer_id::BIGINT AS customer_id, name::VARCHAR AS name FROM (VALUES
+    (1, 'Alice'), (2, 'Bob')
+) AS t(customer_id, name)
+`)
+	p.AddModel("raw/orders.sql", `-- @kind: table
+-- @expose order_id
+SELECT order_id::BIGINT AS order_id, customer_id::BIGINT AS customer_id, amount::BIGINT AS amount FROM (VALUES
+    (101, 1, 50), (102, 1, 30), (103, 2, 75)
+) AS t(order_id, customer_id, amount)
+`)
+	p.AddModel("raw/products.sql", `-- @kind: table
+-- @expose product_id
+SELECT product_id::BIGINT AS product_id, name::VARCHAR AS name FROM (VALUES
+    (901, 'Widget')
+) AS t(product_id, name)
+`)
+	runModel(t, p, "raw/customers.sql")
+	runModel(t, p, "raw/orders.sql")
+	runModel(t, p, "raw/products.sql")
+	schemas, _ := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "raw.customers", KeyColumn: "customer_id"},
+		{Target: "raw.orders", KeyColumn: "order_id"},
+		{Target: "raw.products", KeyColumn: "product_id"},
+	})
+	odata.DiscoverNavigationProperties(schemas)
+	handler, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := newTestServer(t, handler)
+	t.Cleanup(func() { srv.Close() })
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_products)?"+
+		url.QueryEscape("$expand")+"="+url.QueryEscape("raw_customers/raw_orders"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) != 2 {
+		t.Fatalf("2 customers × 1 product = 2 rows, got %d (body: %s)", len(values), body)
+	}
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		cust, _ := row["raw_customers"].(map[string]any)
+		ords, ok := cust["raw_orders"].([]any)
+		if !ok {
+			t.Errorf("expected raw_orders array inside raw_customers, got: %v", cust)
+			continue
+		}
+		custID, _ := cust["customer_id"].(float64)
+		expectedCount := map[float64]int{1: 2, 2: 1}[custID]
+		if len(ords) != expectedCount {
+			t.Errorf("customer %v has %d orders inlined, want %d", custID, len(ords), expectedCount)
+		}
+	}
+}
+
+// TestODataCrossJoin_Apply pins groupby/aggregate on $crossjoin. Output
+// shape forks from the nested-per-entity model into flat aggregated
+// rows — properties are the groupby columns (kept in `<entity>__<col>`
+// alias form) and the aggregate alias.
+func TestODataCrossJoin_Apply(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	// $filter joins customer→orders, $apply groups by customer id and
+	// sums their amounts. Customer 1 has 2 orders (50+30=80), customer 2
+	// has 1 order (75), customer 3 has none → not present in output.
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$apply")+"="+url.QueryEscape(
+		"groupby((raw_customers/id),aggregate(raw_orders/amount with sum as total))"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) != 2 {
+		t.Fatalf("expected 2 groups (customers 1 and 2), got %d (body: %s)", len(values), body)
+	}
+	got := make(map[float64]float64, 2)
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		// Flat shape: NO nested raw_customers/raw_orders objects.
+		if _, nested := row["raw_customers"]; nested {
+			t.Errorf("$apply output must be flat, got nested entity: %v", row)
+		}
+		id, _ := row["raw_customers__id"].(float64)
+		total, _ := row["total"].(float64)
+		got[id] = total
+	}
+	if got[1] != 80 {
+		t.Errorf("customer 1 total = %v, want 80", got[1])
+	}
+	if got[2] != 75 {
+		t.Errorf("customer 2 total = %v, want 75", got[2])
+	}
+}
+
+// TestODataCrossJoin_ApplyWithCount pins $count alongside $apply —
+// counts the number of aggregated groups, not the underlying cross-
+// product row count.
+func TestODataCrossJoin_ApplyWithCount(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$apply")+"="+url.QueryEscape(
+		"groupby((raw_customers/id),aggregate(raw_orders/amount with sum as total))")+
+		"&"+url.QueryEscape("$count")+"=true")
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	count, ok := resp["@odata.count"].(float64)
+	if !ok {
+		t.Fatalf("@odata.count missing or wrong type (body: %s)", body)
+	}
+	if count != 2 {
+		t.Errorf("@odata.count = %v, want 2", count)
+	}
+}
+
+// TestODataCrossJoin_ApplyTopSkipOrdering pins OData semantics for
+// $top + $skip on $apply: $skip applies before $top. With 3 customers
+// (1,2,3) all matched to themselves, groupby(customer/id) yields 3
+// groups. $skip=1&$top=1 should return one group (the second), not
+// the first. Regression for a sequential-wrap bug where two outer
+// SELECTs inverted the order to top-then-skip.
+func TestODataCrossJoin_ApplyTopSkipOrdering(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	// Group by customer, ordered implicitly by id. Without paging
+	// returns 2 groups (customers 1 and 2 have orders; 3 has none).
+	// With $skip=1&$top=1 the response should hold exactly one
+	// group — the second one (customer 2). If $top runs before
+	// $skip, we'd get the first group's offset → empty result or
+	// wrong group.
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$apply")+"="+url.QueryEscape(
+		"groupby((raw_customers/id),aggregate(raw_orders/amount with sum as total))")+
+		"&"+url.QueryEscape("$skip")+"=1&"+url.QueryEscape("$top")+"=1")
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) != 1 {
+		t.Fatalf("expected 1 row after skip=1&top=1, got %d (body: %s)", len(values), body)
+	}
+}
+
+// TestODataCrossJoin_SelectComputeAlias pins that bare $compute aliases
+// are valid 1-segment $select items per OData v4.01 §5.1.3.1, and that
+// $select with only a compute alias drops every entity sub-object from
+// the response (keeping just the computed scalar at row top level).
+func TestODataCrossJoin_SelectComputeAlias(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$compute")+"="+url.QueryEscape("raw_orders/amount mul 2 as doubled")+
+		"&"+url.QueryEscape("$select")+"=doubled")
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) == 0 {
+		t.Fatalf("expected matched rows (body: %s)", body)
+	}
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		if _, hasCust := row["raw_customers"]; hasCust {
+			t.Errorf("$select=doubled should drop raw_customers, got: %v", row)
+		}
+		if _, hasOrders := row["raw_orders"]; hasOrders {
+			t.Errorf("$select=doubled should drop raw_orders, got: %v", row)
+		}
+		if _, hasDoubled := row["doubled"]; !hasDoubled {
+			t.Errorf("$select=doubled should keep the doubled scalar, got: %v", row)
+		}
+	}
+}
+
+// TestODataCrossJoin_RejectsAliasWithDoubleUnderscore pins that
+// $compute aliases containing `__` are rejected up front. The
+// double-underscore separator is reserved for the cross-join
+// demuxer (`<entity>__<col>`); allowing it in user aliases would
+// misroute the scalar into an entity sub-object.
+func TestODataCrossJoin_RejectsAliasWithDoubleUnderscore(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	httpResp, err := http.Get(srv.URL + "/odata/$crossjoin(raw_customers,raw_orders)?" +
+		url.QueryEscape("$compute") + "=" + url.QueryEscape("raw_orders/amount mul 2 as raw_customers__phantom"))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 for `__` in $compute alias", httpResp.StatusCode)
+	}
+}
+
+// TestODataCrossJoin_ApplyRejectsIncompatibleOptions pins that options
+// whose semantics depend on the regular row shape ($orderby/$select/
+// $expand/$compute) return 400 when combined with $apply, since the
+// flat aggregated output has different columns.
+func TestODataCrossJoin_ApplyRejectsIncompatibleOptions(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	for _, opt := range []string{"$orderby", "$select", "$expand", "$compute"} {
+		t.Run(opt, func(t *testing.T) {
+			u := srv.URL + "/odata/$crossjoin(raw_customers,raw_orders)?" +
+				url.QueryEscape("$apply") + "=" + url.QueryEscape(
+				"groupby((raw_customers/id),aggregate(raw_orders/amount with sum as total))") +
+				"&" + url.QueryEscape(opt) + "=" + url.QueryEscape("raw_customers/id")
+			httpResp, err := http.Get(u)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			defer httpResp.Body.Close()
+			if httpResp.StatusCode != 400 {
+				t.Errorf("%s + $apply status = %d, want 400", opt, httpResp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestODataCrossJoin_Compute pins computed top-level scalars on the
+// cross product. Computed cols can reference qualified refs from any
+// joined entity (`raw_orders/amount mul 2 as doubled`); they surface
+// at the row level, not nested under any entity sub-object.
+func TestODataCrossJoin_Compute(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$compute")+"="+url.QueryEscape("raw_orders/amount mul 2 as doubled"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) == 0 {
+		t.Fatalf("expected matched rows (body: %s)", body)
+	}
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		ord, _ := row["raw_orders"].(map[string]any)
+		amount, _ := ord["amount"].(float64)
+		doubled, hasDoubled := row["doubled"].(float64)
+		if !hasDoubled {
+			t.Errorf("computed scalar 'doubled' missing at row level: %v", row)
+			continue
+		}
+		if doubled != amount*2 {
+			t.Errorf("doubled = %v, want %v (amount * 2)", doubled, amount*2)
+		}
+	}
+}
+
+// TestODataCrossJoin_ComputeReferencedByOrderBy pins that bare $compute
+// aliases are accepted in $orderby on $crossjoin. Bare entity columns
+// remain rejected (ambiguous across the join), but compute outputs are
+// row-level scalars with a single owner.
+func TestODataCrossJoin_ComputeReferencedByOrderBy(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id")+
+		"&"+url.QueryEscape("$compute")+"="+url.QueryEscape("raw_orders/amount mul 2 as doubled")+
+		"&"+url.QueryEscape("$orderby")+"="+url.QueryEscape("doubled desc"))
+	var resp map[string]any
+	json.Unmarshal([]byte(body), &resp)
+	values, _ := resp["value"].([]any)
+	if len(values) < 2 {
+		t.Fatalf("need at least 2 rows to verify ordering, got %d (body: %s)", len(values), body)
+	}
+	prev := math.Inf(1)
+	for i, v := range values {
+		row, _ := v.(map[string]any)
+		doubled, _ := row["doubled"].(float64)
+		if doubled > prev {
+			t.Errorf("row %d doubled=%v out of DESC order (prev=%v)", i, doubled, prev)
+		}
+		prev = doubled
+	}
+}
+
+// TestODataCrossJoin_Search pins ILIKE-OR across all VARCHAR columns of
+// every joined entity. Cross-join cardinality means a match in one
+// entity multiplies by rows of the other — clients narrow further with
+// $filter when they want a join condition on top of a search.
+func TestODataCrossJoin_Search(t *testing.T) {
+	p := buildCrossJoinFixture(t)
+	srv := newCrossJoinServer(t, p)
+
+	// Search for "Alice" — only customer id=1 matches; cross-product
+	// with all 4 orders gives 4 rows (no $filter narrowing).
+	body := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$search")+"="+url.QueryEscape("Alice"))
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, body)
+	}
+	values, _ := resp["value"].([]any)
+	if len(values) != 4 {
+		t.Errorf("Search 'Alice' should match 1 customer × 4 orders = 4 rows, got %d (body: %s)",
+			len(values), body)
+	}
+	for _, v := range values {
+		row, _ := v.(map[string]any)
+		cust, _ := row["raw_customers"].(map[string]any)
+		if name, _ := cust["name"].(string); name != "Alice" {
+			t.Errorf("expected only Alice in matches, got %v", cust)
+		}
+	}
+
+	// Combined with $filter: search + join condition. Should yield
+	// only Alice's actual orders (id 101 and 103, customer_id=1).
+	bodyJoin := odataGet(t, srv.URL+"/odata/$crossjoin(raw_customers,raw_orders)?"+
+		url.QueryEscape("$search")+"="+url.QueryEscape("Alice")+"&"+
+		url.QueryEscape("$filter")+"="+url.QueryEscape("raw_customers/id eq raw_orders/customer_id"))
+	var respJoin map[string]any
+	json.Unmarshal([]byte(bodyJoin), &respJoin)
+	valuesJoin, _ := respJoin["value"].([]any)
+	if len(valuesJoin) != 2 {
+		t.Errorf("Search 'Alice' + join condition should yield Alice's 2 orders, got %d",
+			len(valuesJoin))
+	}
+}
+
+// buildCrossJoinFixture creates a project with two exposed tables that
+// have a customer→orders relationship (for join testing).
+func buildCrossJoinFixture(t *testing.T) *testutil.Project {
+	t.Helper()
+	p := testutil.NewProject(t)
+	p.AddModel("raw/customers.sql", `-- @kind: table
+-- @expose id
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM (VALUES
+    (1, 'Alice'), (2, 'Bob'), (3, 'Carol')
+) AS t(id, name)
+`)
+	p.AddModel("raw/orders.sql", `-- @kind: table
+-- @expose id
+SELECT id::BIGINT AS id, customer_id::BIGINT AS customer_id, amount::BIGINT AS amount FROM (VALUES
+    (101, 1, 50), (102, 2, 75), (103, 1, 30), (104, 99, 999)
+) AS t(id, customer_id, amount)
+`)
+	runModel(t, p, "raw/customers.sql")
+	runModel(t, p, "raw/orders.sql")
+	return p
+}
+
+func newCrossJoinServer(t *testing.T, p *testutil.Project) *httptest.Server {
+	t.Helper()
+	schemas, _ := odata.DiscoverSchemas(p.Sess, []odata.ExposeTarget{
+		{Target: "raw.customers", KeyColumn: "id"},
+		{Target: "raw.orders", KeyColumn: "id"},
+	})
+	handler, err := odata.NewServer(p.Sess, schemas, "http://testhost")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := newTestServer(t, handler)
+	t.Cleanup(func() { srv.Close() })
+	return srv
 }
 
 // TestODataCrossJoin_RejectsTooFewEntities pins that a single-entity

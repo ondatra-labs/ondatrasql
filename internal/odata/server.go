@@ -1116,7 +1116,16 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 	}
 
 	params := r.URL.Query()
-	sql, err := BuildCrossJoinQuery(entities, params, snapshot)
+
+	// $apply forks the response shape: nested-per-entity → flat
+	// aggregated rows. Route before BuildCrossJoinQuery so the demuxer
+	// below isn't reached.
+	if params.Get("$apply") != "" {
+		handleCrossJoinApply(w, db, entities, entityMap, params, snapshot, baseURL)
+		return
+	}
+
+	sql, selection, err := BuildCrossJoinQuery(entities, entityMap, params, snapshot)
 	if err != nil {
 		writeError(w, 400, "BadRequest", err.Error())
 		return
@@ -1138,6 +1147,9 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 	// Nest rows by entity. Columns are aliased "<EntitySet>__<col>" by
 	// BuildCrossJoinQuery; split on "__" to demux. Column names cannot
 	// contain "__" in OData (entity names use single underscores).
+	//
+	// $select pruning: skip entities the client didn't ask for, and
+	// drop columns the client didn't ask for within an entity.
 	colTypes := make(map[string]map[string]string, len(entities))
 	for _, e := range entities {
 		ct := make(map[string]string, len(e.Columns))
@@ -1146,21 +1158,151 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 		}
 		colTypes[e.ODataName] = ct
 	}
+	// Pre-compute the set of entity-prefix matches so anything without
+	// a prefix is identified as a row-level $compute scalar.
+	entityPrefixes := make(map[string]string, len(entities))
+	for _, e := range entities {
+		entityPrefixes[e.ODataName] = e.ODataName + "__"
+	}
 	value := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		nested := make(map[string]any, len(entities))
+		// Pass 1: nested entity sub-objects.
 		for _, e := range entities {
+			if !selection.IncludeEntity(e.ODataName) {
+				continue
+			}
 			sub := make(map[string]any)
-			prefix := e.ODataName + "__"
+			prefix := entityPrefixes[e.ODataName]
 			for k, v := range row {
-				if strings.HasPrefix(k, prefix) {
-					colName := k[len(prefix):]
-					sub[colName] = toODataValue(v, colTypes[e.ODataName][colName])
+				if !strings.HasPrefix(k, prefix) {
+					continue
 				}
+				colName := k[len(prefix):]
+				if !selection.IncludeColumn(e.ODataName, colName) {
+					continue
+				}
+				sub[colName] = toODataValue(v, colTypes[e.ODataName][colName])
 			}
 			nested[e.ODataName] = sub
 		}
+		// Pass 2: $compute top-level scalars (any column whose name
+		// doesn't carry an "<entity>__" prefix). Skip the "_empty"
+		// placeholder used when $select pruned everything.
+		for k, v := range row {
+			if k == "_empty" {
+				continue
+			}
+			belongsToEntity := false
+			for _, prefix := range entityPrefixes {
+				if strings.HasPrefix(k, prefix) {
+					belongsToEntity = true
+					break
+				}
+			}
+			if !belongsToEntity {
+				nested[k] = toODataValue(v, "")
+			}
+		}
 		value = append(value, nested)
+	}
+
+	// Deep $expand: for each cross-join row, resolve nav-properties on
+	// the joined entities and inline the targets into the source sub-
+	// object. Bare-form entries (`Customers`) are a no-op since we
+	// already inline. Per-row sub-query mirrors the collection
+	// handler's $expand pattern; pinned to the same snapshot.
+	if expand := r.URL.Query().Get("$expand"); expand != "" {
+		for _, raw := range strings.Split(expand, ",") {
+			name := strings.TrimSpace(raw)
+			slashIdx := strings.Index(name, "/")
+			if slashIdx < 0 {
+				continue // bare form: no-op (already inlined)
+			}
+			entityAlias := name[:slashIdx]
+			navName := name[slashIdx+1:]
+			var sourceEntity *EntitySchema
+			for i := range entities {
+				if entities[i].ODataName == entityAlias {
+					sourceEntity = &entities[i]
+					break
+				}
+			}
+			if sourceEntity == nil {
+				continue // already validated by BuildCrossJoinQuery
+			}
+			var nav *NavigationProperty
+			for i := range sourceEntity.NavProperties {
+				if sourceEntity.NavProperties[i].Name == navName {
+					nav = &sourceEntity.NavProperties[i]
+					break
+				}
+			}
+			if nav == nil {
+				continue // already validated
+			}
+			targetEntity, ok := entityMap[nav.TargetEntity]
+			if !ok {
+				writeError(w, 500, "InternalError", fmt.Sprintf("nav target %s not found", nav.TargetEntity))
+				return
+			}
+			targetColTypes := make(map[string]string, len(targetEntity.Columns))
+			for _, c := range targetEntity.Columns {
+				targetColTypes[c.Name] = strings.ToUpper(c.Type)
+			}
+			for i := range value {
+				sub, _ := value[i][entityAlias].(map[string]any)
+				if sub == nil {
+					continue
+				}
+				keyVal := sub[nav.SourceColumn]
+				if keyVal == nil {
+					if nav.IsCollection {
+						sub[navName] = []map[string]any{}
+					} else {
+						sub[navName] = nil
+					}
+					continue
+				}
+				var filterVal string
+				switch v := keyVal.(type) {
+				case string:
+					filterVal = "'" + strings.ReplaceAll(v, "'", "''") + "'"
+				case int, int64, int32, float64, float32:
+					filterVal = fmt.Sprintf("%v", v)
+				case bool:
+					filterVal = fmt.Sprintf("%t", v)
+				default:
+					filterVal = "'" + strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''") + "'"
+				}
+				relSQL := fmt.Sprintf("SELECT * FROM %s WHERE %s = %s",
+					qualifiedTableSQL(targetEntity.Schema, targetEntity.Table, snapshot),
+					quoteIdent(nav.TargetColumn), filterVal)
+				relRows, err := db.QueryRowsAny(relSQL)
+				if err != nil {
+					if nav.IsCollection {
+						sub[navName] = []map[string]any{}
+					} else {
+						sub[navName] = nil
+					}
+					continue
+				}
+				for ri, relRow := range relRows {
+					converted := make(map[string]any, len(relRow))
+					for k, v := range relRow {
+						converted[k] = convertODataValue(v, targetColTypes[k])
+					}
+					relRows[ri] = converted
+				}
+				if nav.IsCollection {
+					sub[navName] = relRows
+				} else if len(relRows) > 0 {
+					sub[navName] = relRows[0]
+				} else {
+					sub[navName] = nil
+				}
+			}
+		}
 	}
 
 	resp := map[string]any{
@@ -1176,7 +1318,7 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 				countParams[k] = v
 			}
 		}
-		baseSQL, err := BuildCrossJoinQuery(entities, countParams, snapshot)
+		baseSQL, _, err := BuildCrossJoinQuery(entities, entityMap, countParams, snapshot)
 		if err == nil {
 			countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", baseSQL)
 			if val, err := db.QueryValue(countSQL); err == nil {
@@ -1184,6 +1326,100 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 				fmt.Sscanf(val, "%d", &c)
 				resp["@odata.count"] = c
 			}
+		}
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		writeError(w, 500, "InternalError", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
+	w.Write(data)
+}
+
+// handleCrossJoinApply serves $crossjoin with $apply (groupby/aggregate).
+// Output shape is flat aggregated rows, not the nested-per-entity model
+// the regular cross-join handler emits — so we bypass the demuxer
+// entirely. Supports $filter, $search, $top, $skip, $count alongside
+// $apply; rejects $orderby/$select/$expand/$compute since those interact
+// with output column shape that depends on the apply expression.
+func handleCrossJoinApply(w http.ResponseWriter, db *requestDB, entities []EntitySchema, entityMap map[string]EntitySchema, params url.Values, snapshot int64, baseURL string) {
+	for _, k := range []string{"$orderby", "$select", "$expand", "$compute"} {
+		if params.Get(k) != "" {
+			writeError(w, 400, "BadRequest", fmt.Sprintf("%s is not supported with $apply on $crossjoin", k))
+			return
+		}
+	}
+
+	sql, _, err := BuildCrossJoinApplyQuery(entities, entityMap, params, snapshot)
+	if err != nil {
+		writeError(w, 400, "BadRequest", err.Error())
+		return
+	}
+
+	// $top / $skip wrap the apply result in a single LIMIT/OFFSET pass.
+	// Per OData spec, skip applies before top — combining both into one
+	// wrap (`LIMIT N OFFSET M`) gets the right semantic; two sequential
+	// wraps would invert the order (top of skip, not skip then top).
+	// strconv.Atoi (not Sscanf) so trailing garbage like "5abc" is
+	// rejected — matches the strictness of godata.ParseTopString used
+	// in the non-apply cross-join path.
+	finalSQL := sql
+	var limitClause, offsetClause string
+	if top := params.Get("$top"); top != "" {
+		n, err := strconv.Atoi(top)
+		if err != nil || n < 0 {
+			writeError(w, 400, "BadRequest", "invalid $top value")
+			return
+		}
+		limitClause = fmt.Sprintf(" LIMIT %d", n)
+	}
+	if skip := params.Get("$skip"); skip != "" {
+		n, err := strconv.Atoi(skip)
+		if err != nil || n < 0 {
+			writeError(w, 400, "BadRequest", "invalid $skip value")
+			return
+		}
+		offsetClause = fmt.Sprintf(" OFFSET %d", n)
+	}
+	if limitClause != "" || offsetClause != "" {
+		finalSQL = fmt.Sprintf("SELECT * FROM (%s) AS _t%s%s", finalSQL, limitClause, offsetClause)
+	}
+
+	rows, err := db.QueryRowsAny(finalSQL)
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "does not exist") ||
+			strings.Contains(errMsg, "Binder Error") || strings.Contains(errMsg, "Conversion Error") ||
+			strings.Contains(errMsg, "Parser Error") {
+			writeError(w, 400, "BadRequest", errMsg)
+		} else {
+			writeError(w, 500, "InternalError", errMsg)
+		}
+		return
+	}
+
+	value := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		flat := make(map[string]any, len(row))
+		for k, v := range row {
+			flat[k] = toODataValue(v, "")
+		}
+		value = append(value, flat)
+	}
+
+	resp := map[string]any{
+		"@odata.context": fmt.Sprintf("%s/odata/$metadata#Collection(Edm.ComplexType)", baseURL),
+		"value":          value,
+	}
+
+	if params.Get("$count") == "true" {
+		countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", sql)
+		if val, err := db.QueryValue(countSQL); err == nil {
+			var c int
+			fmt.Sscanf(val, "%d", &c)
+			resp["@odata.count"] = c
 		}
 	}
 

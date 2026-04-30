@@ -438,101 +438,814 @@ func BuildSingleEntityQuery(entity EntitySchema, keyValue string, snapshot int64
 		fromClause, quoteIdent(entity.KeyColumn), whereValue), nil
 }
 
+// CrossJoinSelection captures which entity sets — and which columns
+// within each — the client asked for via $select. It's returned by
+// BuildCrossJoinQuery so the handler can prune nested objects in the
+// response without re-parsing $select. Nil = no $select restriction
+// (include every entity / every column / every compute alias).
+type CrossJoinSelection struct {
+	// Entities is the set of joined entity-set names the client kept.
+	// nil → all joined entities are included.
+	Entities map[string]bool
+	// Cols[entity] is the set of columns kept within that entity.
+	// nil for an entity → all columns of that entity (whole-entity
+	// select form: `$select=Customers`).
+	Cols map[string]map[string]bool
+	// ComputeAliases is the set of $compute aliases the client kept.
+	// nil → no $select set → include every compute alias.
+	// Empty (non-nil) → $select set with no compute aliases listed →
+	// drop every compute alias from the response.
+	ComputeAliases map[string]bool
+}
+
+// IncludeEntity reports whether this entity-set should appear in the
+// nested response. Empty Entities map → no restriction → include all.
+func (s *CrossJoinSelection) IncludeEntity(name string) bool {
+	if s == nil || s.Entities == nil {
+		return true
+	}
+	return s.Entities[name]
+}
+
+// IncludeColumn reports whether this column of this entity should
+// appear. Empty Cols[entity] → no per-column restriction → include all.
+func (s *CrossJoinSelection) IncludeColumn(entity, col string) bool {
+	if s == nil || s.Cols == nil {
+		return true
+	}
+	cs := s.Cols[entity]
+	if cs == nil {
+		return true
+	}
+	return cs[col]
+}
+
+// IncludeComputeAlias reports whether this $compute alias should appear
+// at the row top level. Nil ComputeAliases → no $select restriction →
+// include every alias.
+func (s *CrossJoinSelection) IncludeComputeAlias(name string) bool {
+	if s == nil || s.ComputeAliases == nil {
+		return true
+	}
+	return s.ComputeAliases[name]
+}
+
 // BuildCrossJoinQuery generates SQL for a $crossjoin path. Aliases each
-// entity table to its OData entity-set name so $filter can reference
-// columns via `<entity>/<col>`. Each output column is aliased
+// entity table to its OData entity-set name so $filter / $orderby can
+// reference columns via `<entity>/<col>`. Each output column is aliased
 // `<entity>__<col>` so the row decoder can split them back into nested
 // objects per entity.
 //
-// Supported in v0.28.0:
-//   - $filter with qualified refs (`A/x eq B/y`) and bare refs (only when
-//     unambiguous — duplicate column names across entities require qualification)
+// Supports the full OData v4.01 query-option set:
+//   - $filter with qualified refs (`A/x eq B/y`) and 3-segment
+//     navigation paths (`A/Nav/x`) translated to EXISTS subqueries
+//   - $orderby with qualified refs and bare $compute aliases
+//   - $select: whole entity (`Customers`) or qualified subset
+//     (`Customers/id,Customers/name`). Returns a CrossJoinSelection
+//     so the handler can drop pruned entities from the nested response.
+//   - $expand: bare form (`Customers,Orders`) is a no-op since we
+//     already inline; deep form (`Customers/Orders`) is validated here
+//     and the per-row sub-query runs in handleCrossJoin.
+//   - $compute: top-level computed scalars referencing qualified refs
+//   - $search: ILIKE-OR across every VARCHAR column of every entity
 //   - $top / $skip (paging support is added by the handler via skiptoken)
 //   - $count (handled separately by the caller)
 //
-// Not supported in v0.28.0:
-//   - $select, $orderby, $expand, $compute, $apply, $search
-//
-// Reasoning: $crossjoin's main use case is server-side join on key, which
-// $filter alone covers. The other options can be added when a real consumer
-// needs them.
-func BuildCrossJoinQuery(entities []EntitySchema, params url.Values, snapshot int64) (string, error) {
+// $apply (groupby/aggregate) is NOT handled here — its response shape
+// forks from nested-per-entity to flat aggregated rows, so the handler
+// routes those requests to BuildCrossJoinApplyQuery instead. Calling
+// this function with $apply set returns an error.
+func BuildCrossJoinQuery(entities []EntitySchema, entityMap map[string]EntitySchema, params url.Values, snapshot int64) (string, *CrossJoinSelection, error) {
 	if len(entities) < 2 {
-		return "", fmt.Errorf("$crossjoin requires at least 2 entity sets, got %d", len(entities))
+		return "", nil, fmt.Errorf("$crossjoin requires at least 2 entity sets, got %d", len(entities))
 	}
+	ctx := context.Background()
 
-	// FROM A AS "A", B AS "B" — comma-separated cross product.
-	fromParts := make([]string, len(entities))
-	selectParts := make([]string, 0, 32)
+	// validCols: every (entity/col) is a valid reference target for
+	// $filter and $orderby — those operate on the cross-product BEFORE
+	// $select's projection trims columns. (SQL evaluates WHERE/ORDER BY
+	// over the full row, then projects.)
 	validCols := make(map[string]bool)
 	seenAlias := make(map[string]bool, len(entities))
-	for i, e := range entities {
+	for _, e := range entities {
 		if seenAlias[e.ODataName] {
-			return "", fmt.Errorf("$crossjoin: duplicate entity %q", e.ODataName)
+			return "", nil, fmt.Errorf("$crossjoin: duplicate entity %q", e.ODataName)
 		}
 		seenAlias[e.ODataName] = true
-		// Wrap in subquery so the AT (VERSION => N) clause stays attached
-		// to the inner reference; DuckDB rejects `tbl AT (VERSION => N) AS alias`
-		// directly with a syntax error.
-		fromParts[i] = fmt.Sprintf("(SELECT * FROM %s) AS %s",
-			qualifiedTableSQL(e.Schema, e.Table, snapshot),
-			quoteIdent(e.ODataName))
-		// Output columns: "A"."col" AS "A__col" — double-underscore as
-		// the separator since column names can contain single
-		// underscores (and OData entity names don't allow `__`).
 		for _, c := range e.Columns {
-			selectParts = append(selectParts, fmt.Sprintf("%s.%s AS %s",
-				quoteIdent(e.ODataName), quoteIdent(c.Name),
-				quoteIdent(e.ODataName+"__"+c.Name)))
 			validCols[e.ODataName+"/"+c.Name] = true
 		}
 	}
 
+	// $compute — parsed first so its aliases are available to
+	// $select / $filter / $orderby. Computed scalars surface at the
+	// top level of each row (not nested under any entity), since they
+	// don't belong to a single entity-set.
+	var computeExtras []string
+	computeAliases := make(map[string]bool)
+	computeSQL := make(map[string]string) // alias → "expr AS alias"
+	if compute := params.Get("$compute"); compute != "" {
+		parts := splitComputeExpressions(compute)
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			asIdx := strings.LastIndex(strings.ToLower(part), " as ")
+			if asIdx < 0 {
+				return "", nil, fmt.Errorf("invalid $compute: missing 'as alias' in %q", part)
+			}
+			expr := strings.TrimSpace(part[:asIdx])
+			alias := strings.TrimSpace(part[asIdx+4:])
+			if err := validateComputeAlias(alias); err != nil {
+				return "", nil, fmt.Errorf("invalid $compute alias: %w", err)
+			}
+			sqlExpr, err := parseComputeExpr(expr, validCols)
+			if err != nil {
+				return "", nil, fmt.Errorf("invalid $compute expression %q: %w", expr, err)
+			}
+			if validCols[alias] {
+				return "", nil, fmt.Errorf("$compute alias %q conflicts with existing column", alias)
+			}
+			// Top-level computed col: aliased without any entity prefix
+			// so the demuxer in handleCrossJoin sees it as a row-level
+			// scalar rather than belonging to an entity sub-object.
+			selectFrag := fmt.Sprintf("%s AS %s", sqlExpr, quoteIdent(alias))
+			computeExtras = append(computeExtras, selectFrag)
+			computeSQL[alias] = selectFrag
+			validCols[alias] = true
+			computeAliases[alias] = true
+		}
+	}
+
+	// $select parsing → CrossJoinSelection. Three valid forms per
+	// §5.1.3 + §4.15 + §5.1.3.1: whole entity (`Customers`), qualified
+	// col (`Customers/id`), or bare $compute alias.
+	var selection *CrossJoinSelection
+	if selStr := params.Get("$select"); selStr != "" {
+		sel, err := parseCrossJoinSelect(ctx, selStr, seenAlias, validCols, computeAliases)
+		if err != nil {
+			return "", nil, err
+		}
+		selection = sel
+		// Filter the SELECT-list compute fragments to those the client
+		// asked for. When $select is unset, ComputeAliases is nil and
+		// every alias passes through unchanged.
+		filtered := make([]string, 0, len(computeExtras))
+		for alias, frag := range computeSQL {
+			if selection.IncludeComputeAlias(alias) {
+				filtered = append(filtered, frag)
+			}
+		}
+		// Stable order: walk computeExtras (parse order) and keep the
+		// fragments still in `filtered` (map iteration above is
+		// undefined-order; we want deterministic SQL).
+		stable := make([]string, 0, len(filtered))
+		keep := make(map[string]bool, len(filtered))
+		for _, f := range filtered {
+			keep[f] = true
+		}
+		for _, f := range computeExtras {
+			if keep[f] {
+				stable = append(stable, f)
+			}
+		}
+		computeExtras = stable
+	}
+
+	// $expand validation:
+	//   - bare form (`Customers,Orders`): §4.15 explicitly allows; we
+	//     already inline so the SQL is a no-op
+	//   - deep form (`Customers/Orders`): expand a nav-property of one
+	//     joined entity. The SQL is still unchanged — the post-query
+	//     handler walks each row, resolves the nav-property's FK, and
+	//     inlines the related entity into the source sub-object
+	//   - 3+ segments: rejected (no spec support, no clear semantics)
+	//
+	// We do the validation here (not in the handler) so an invalid
+	// $expand fails before the SQL even runs.
+	if expand := params.Get("$expand"); expand != "" {
+		entityByAlias := make(map[string]*EntitySchema, len(entities))
+		for i := range entities {
+			entityByAlias[entities[i].ODataName] = &entities[i]
+		}
+		for _, raw := range strings.Split(expand, ",") {
+			name := strings.TrimSpace(raw)
+			if name == "" {
+				return "", nil, fmt.Errorf("invalid $expand: empty segment")
+			}
+			segs := strings.SplitN(name, "/", 3)
+			if len(segs) > 2 {
+				return "", nil, fmt.Errorf("$expand: paths with more than 2 segments (%q) are not supported on $crossjoin", name)
+			}
+			ent, ok := entityByAlias[segs[0]]
+			if !ok {
+				return "", nil, fmt.Errorf("$expand: %q is not one of the joined entity sets", segs[0])
+			}
+			if len(segs) == 2 {
+				navName := segs[1]
+				found := false
+				for _, nav := range ent.NavProperties {
+					if nav.Name == navName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return "", nil, fmt.Errorf("$expand: %q is not a navigation property of %s", navName, segs[0])
+				}
+			}
+		}
+	}
+
+	// FROM A AS "A", B AS "B" — comma-separated cross product. Subquery
+	// wrap so AT (VERSION => N) stays attached (DuckDB rejects the
+	// flat `tbl AT (VERSION => N) AS alias` form).
+	fromParts := make([]string, len(entities))
+	for i, e := range entities {
+		fromParts[i] = fmt.Sprintf("(SELECT * FROM %s) AS %s",
+			qualifiedTableSQL(e.Schema, e.Table, snapshot),
+			quoteIdent(e.ODataName))
+	}
+
+	// Output columns: filtered by $select if present. "A"."col" AS
+	// "A__col" — double-underscore separator for the demuxer. If
+	// $select excludes an entity entirely, we drop all its columns
+	// here so the SQL doesn't carry unused payload.
+	selectParts := make([]string, 0, 32)
+	for _, e := range entities {
+		if !selection.IncludeEntity(e.ODataName) {
+			continue
+		}
+		for _, c := range e.Columns {
+			if !selection.IncludeColumn(e.ODataName, c.Name) {
+				continue
+			}
+			selectParts = append(selectParts, fmt.Sprintf("%s.%s AS %s",
+				quoteIdent(e.ODataName), quoteIdent(c.Name),
+				quoteIdent(e.ODataName+"__"+c.Name)))
+		}
+	}
+	// Append $compute outputs as top-level columns. They sit alongside
+	// the entity-prefixed aliases; the demuxer treats anything without
+	// an `<entity>__` prefix as row-level (not nested).
+	selectParts = append(selectParts, computeExtras...)
+
+	if len(selectParts) == 0 {
+		// $select pruned everything. Emit `SELECT 1 FROM …` so the row
+		// count is still defined (e.g. for $count). The handler's
+		// nesting loop produces empty `{}` per row — which matches the
+		// spec model of "client asked for nothing".
+		selectParts = append(selectParts, "1 AS _empty")
+	}
+
 	whereClause := ""
 	if filter := params.Get("$filter"); filter != "" {
-		ctx := context.Background()
 		filterQuery, err := godata.ParseFilterString(ctx, filter)
 		if err != nil {
-			return "", fmt.Errorf("invalid $filter: %w", err)
+			return "", nil, fmt.Errorf("invalid $filter: %w", err)
 		}
-		sqlExpr, err := filterNodeToSQL(filterQuery.Tree, validCols)
+		// Use the nav-aware walker so 3-segment paths
+		// (`Customers/Orders/amount gt 100`) can resolve via the
+		// FK nav-property infra and produce EXISTS subqueries.
+		entityByAlias := make(map[string]*EntitySchema, len(entities))
+		for i := range entities {
+			entityByAlias[entities[i].ODataName] = &entities[i]
+		}
+		nctx := &navFilterCtx{
+			validCols:     validCols,
+			entityByAlias: entityByAlias,
+			entityMap:     entityMap,
+			snapshot:      snapshot,
+		}
+		sqlExpr, err := nctx.toSQL(filterQuery.Tree)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		whereClause = " WHERE " + sqlExpr
+	}
+
+	// $search — full-text search across every VARCHAR column of every
+	// joined entity, OR'd. Cross-join cardinality means each match in
+	// either entity multiplies by the unrelated cardinality of the
+	// other; that's the spec semantic ($search applies to the
+	// collection that the query returns, which here IS the cross
+	// product). Clients narrow with $filter to scope the result first.
+	if search := params.Get("$search"); search != "" {
+		searchVal := strings.ReplaceAll(search, "'", "''")
+		searchVal = strings.ReplaceAll(searchVal, "%", "\\%")
+		searchVal = strings.ReplaceAll(searchVal, "_", "\\_")
+		var conds []string
+		for _, e := range entities {
+			for _, c := range e.Columns {
+				if c.EdmType != "Edm.String" {
+					continue
+				}
+				conds = append(conds, fmt.Sprintf("%s.%s ILIKE '%%%s%%'",
+					quoteIdent(e.ODataName), quoteIdent(c.Name), searchVal))
+			}
+		}
+		if len(conds) > 0 {
+			searchSQL := "(" + strings.Join(conds, " OR ") + ")"
+			if whereClause == "" {
+				whereClause = " WHERE " + searchSQL
+			} else {
+				whereClause += " AND " + searchSQL
+			}
+		}
+	}
+
+	orderByClause := ""
+	if orderby := params.Get("$orderby"); orderby != "" {
+		obQuery, err := godata.ParseOrderByString(ctx, orderby)
+		if err != nil {
+			return "", nil, fmt.Errorf("invalid $orderby: %w", err)
+		}
+		parts := make([]string, 0, len(obQuery.OrderByItems))
+		for _, item := range obQuery.OrderByItems {
+			// godata stores qualified refs (`Customers/id`) as the raw
+			// path string in Field.Value with Tree nil; bare names get
+			// a parsed Tree.
+			rawName := item.Field.Value
+			dir := "ASC"
+			if item.Order == godata.DESC {
+				dir = "DESC"
+			}
+			if strings.Contains(rawName, "/") {
+				// Qualified ref — must be 2-segment and resolve.
+				segs := strings.SplitN(rawName, "/", 3)
+				if len(segs) != 2 {
+					return "", nil, fmt.Errorf("$orderby: deep navigation paths (%q) are not supported on $crossjoin", rawName)
+				}
+				if !validCols[rawName] {
+					return "", nil, fmt.Errorf("$orderby: unknown qualified column %s", rawName)
+				}
+				parts = append(parts,
+					quoteIdent(segs[0])+"."+quoteIdent(segs[1])+" "+dir)
+				continue
+			}
+			// Bare name — accepted only if it matches a $compute alias
+			// (top-level computed scalar). Bare ref to an entity column
+			// would be ambiguous when both entity sets define it.
+			if !validCols[rawName] {
+				return "", nil, fmt.Errorf("$orderby on $crossjoin requires qualified refs (e.g. Customers/id) or a $compute alias, got bare column %q", rawName)
+			}
+			parts = append(parts, quoteIdent(rawName)+" "+dir)
+		}
+		orderByClause = " ORDER BY " + strings.Join(parts, ", ")
 	}
 
 	// $top / $skip — caller (handler) overrides these with the
 	// effective server limit; we just pass them through.
 	limitClause := ""
 	if top := params.Get("$top"); top != "" {
-		topQuery, err := godata.ParseTopString(context.Background(), top)
+		topQuery, err := godata.ParseTopString(ctx, top)
 		if err != nil {
-			return "", fmt.Errorf("invalid $top: %w", err)
+			return "", nil, fmt.Errorf("invalid $top: %w", err)
 		}
 		limitClause = fmt.Sprintf(" LIMIT %d", int(*topQuery))
 	}
 	offsetClause := ""
 	if skip := params.Get("$skip"); skip != "" {
-		skipQuery, err := godata.ParseSkipString(context.Background(), skip)
+		skipQuery, err := godata.ParseSkipString(ctx, skip)
 		if err != nil {
-			return "", fmt.Errorf("invalid $skip: %w", err)
+			return "", nil, fmt.Errorf("invalid $skip: %w", err)
 		}
 		offsetClause = fmt.Sprintf(" OFFSET %d", int(*skipQuery))
 	}
 
-	// Reject options we don't support yet so users get a clear error
-	// instead of silent no-op.
-	for _, p := range []string{"$select", "$orderby", "$expand", "$compute", "$apply", "$search"} {
-		if params.Get(p) != "" {
-			return "", fmt.Errorf("%s is not supported on $crossjoin in this release", p)
+	// $apply is not handled here — the handler routes to
+	// BuildCrossJoinApplyQuery, which wraps the result of this function
+	// as a subquery and applies groupby/aggregate on top. It uses a
+	// different response shape (flat aggregated rows, not nested-per-
+	// entity) so it gets its own code path.
+	if params.Get("$apply") != "" {
+		return "", nil, fmt.Errorf("$apply on $crossjoin must be routed to BuildCrossJoinApplyQuery, not BuildCrossJoinQuery")
+	}
+
+	return fmt.Sprintf("SELECT %s FROM %s%s%s%s%s",
+		strings.Join(selectParts, ", "),
+		strings.Join(fromParts, ", "),
+		whereClause, orderByClause, limitClause, offsetClause), selection, nil
+}
+
+// BuildCrossJoinApplyQuery generates SQL for a $crossjoin with $apply
+// (groupby / aggregate). The output shape forks from the nested-per-
+// entity model that BuildCrossJoinQuery returns: $apply produces flat
+// aggregated rows whose properties are the groupby columns and the
+// aggregate aliases.
+//
+// Strategy: build the regular cross-join SQL ($filter/$search applied,
+// no $top/$skip/$orderby/$select/$apply), wrap it as a subquery, and
+// apply groupby/aggregate on top. Qualified refs in the $apply
+// expression (`raw_customers/country`, `raw_orders/amount`) are
+// rewritten to the inner SELECT's column aliases (`raw_customers__country`,
+// `raw_orders__amount`) before parsing — so the existing single-entity
+// $apply parser handles them transparently.
+//
+// Returns the SQL plus the list of output column names (groupby cols
+// keep their aliased form `<entity>__<col>`; aggregate aliases keep
+// the user's chosen alias).
+func BuildCrossJoinApplyQuery(entities []EntitySchema, entityMap map[string]EntitySchema, params url.Values, snapshot int64) (string, []string, error) {
+	apply := params.Get("$apply")
+	if apply == "" {
+		return "", nil, fmt.Errorf("$apply parameter required")
+	}
+
+	// Build the inner cross-join SQL with only options that scope rows.
+	// $filter and $search apply BEFORE the aggregation; $top/$skip
+	// apply AFTER (caller handles those by wrapping a second time).
+	innerParams := url.Values{}
+	for _, k := range []string{"$filter", "$search"} {
+		if v := params.Get(k); v != "" {
+			innerParams.Set(k, v)
+		}
+	}
+	innerSQL, _, err := BuildCrossJoinQuery(entities, entityMap, innerParams, snapshot)
+	if err != nil {
+		return "", nil, fmt.Errorf("inner cross-join: %w", err)
+	}
+
+	// Synthetic entity wrapping the inner SQL. Its "table" IS the
+	// subquery; Schema="" tells buildApplyQuery to treat Table as a
+	// pre-built FROM expression rather than a `<schema>.<table>` name.
+	syntheticCols := make([]ColumnSchema, 0, 32)
+	validCols := make(map[string]bool)
+	for _, e := range entities {
+		for _, c := range e.Columns {
+			alias := e.ODataName + "__" + c.Name
+			syntheticCols = append(syntheticCols, ColumnSchema{
+				Name:    alias,
+				Type:    c.Type,
+				EdmType: c.EdmType,
+			})
+			validCols[alias] = true
+		}
+	}
+	syntheticEntity := EntitySchema{
+		Schema:  "",
+		Table:   "(" + innerSQL + ") AS _src",
+		Columns: syntheticCols,
+	}
+
+	// Rewrite qualified refs `<entity>/<col>` → `<entity>__<col>` in
+	// the $apply string so the existing single-entity parser, which
+	// only knows bare names, sees the alias forms.
+	rewritten := rewriteQualifiedRefs(apply, entities)
+
+	sql, outputCols, err := buildApplyQuery(syntheticEntity, rewritten, validCols, "", snapshot)
+	if err != nil {
+		return "", nil, err
+	}
+	return sql, outputCols, nil
+}
+
+// rewriteQualifiedRefs replaces every `<entity>/<col>` outside string
+// literals with `<entity>__<col>`, but only when `<entity>` is one of
+// the supplied entity-set names. Single-quoted OData literals with `''`
+// escaping are skipped so a value like `'see raw_customers/note'` is
+// preserved verbatim.
+func rewriteQualifiedRefs(s string, entities []EntitySchema) string {
+	names := make(map[string]bool, len(entities))
+	for _, e := range entities {
+		names[e.ODataName] = true
+	}
+	var out strings.Builder
+	out.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		// String literal: copy through verbatim, including '' escapes.
+		if c == '\'' {
+			out.WriteByte(c)
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					out.WriteByte('\'')
+					i++
+					if i < len(s) && s[i] == '\'' {
+						out.WriteByte('\'')
+						i++
+						continue
+					}
+					break
+				}
+				out.WriteByte(s[i])
+				i++
+			}
+			continue
+		}
+		// Identifier start: need word boundary before treating it as an
+		// entity name. If the previous emitted char is also an ident
+		// char, this is part of a longer identifier — copy as-is.
+		if isIdentChar(c) {
+			start := i
+			for i < len(s) && isIdentChar(s[i]) {
+				i++
+			}
+			word := s[start:i]
+			if names[word] && i < len(s) && s[i] == '/' {
+				colStart := i + 1
+				j := colStart
+				for j < len(s) && isIdentChar(s[j]) {
+					j++
+				}
+				if j > colStart {
+					out.WriteString(word)
+					out.WriteString("__")
+					out.WriteString(s[colStart:j])
+					i = j
+					continue
+				}
+			}
+			out.WriteString(word)
+			continue
+		}
+		out.WriteByte(c)
+		i++
+	}
+	return out.String()
+}
+
+// isIdentChar reports whether c is a valid identifier character.
+func isIdentChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') ||
+		c == '_'
+}
+
+// parseCrossJoinSelect parses an OData $select string in $crossjoin
+// context. Three valid forms:
+//   - bare entity-set name (`Customers`) — keeps the whole entity
+//   - qualified column (`Customers/id`) — keeps just that column
+//   - bare $compute alias (`doubled`) — keeps that top-level scalar
+//     (per OData v4.01 §5.1.3.1, computed properties are selectable)
+//
+// Mixing is allowed: `$select=Customers,Orders/amount,doubled` keeps
+// all of Customers, just the amount of Orders, and the doubled compute
+// scalar.
+//
+// If both `Customers` (whole) and `Customers/id` (partial) appear, the
+// whole-entity wins — that's the only intent-preserving merge.
+//
+// Deep paths (3+ segments) and unknown names are rejected with
+// 400-class errors so users see the contract violation up front.
+//
+// computeAliases is the set of $compute alias names (bare, no `/`); a
+// 1-segment item that matches one is recorded as a compute selection
+// rather than rejected as a non-entity name.
+func parseCrossJoinSelect(ctx context.Context, selStr string, joinedEntities map[string]bool, validCols map[string]bool, computeAliases map[string]bool) (*CrossJoinSelection, error) {
+	selQuery, err := godata.ParseSelectString(ctx, selStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid $select: %w", err)
+	}
+
+	// Two-pass: collect whole-entity selects and partial selects
+	// separately, then merge with whole-entity winning on conflict.
+	whole := make(map[string]bool)
+	partial := make(map[string]map[string]bool)
+	computes := make(map[string]bool)
+
+	for _, item := range selQuery.SelectItems {
+		if len(item.Segments) == 0 {
+			return nil, fmt.Errorf("invalid $select: empty segment")
+		}
+		name := item.Segments[0].Value
+		switch len(item.Segments) {
+		case 1:
+			if joinedEntities[name] {
+				whole[name] = true
+				continue
+			}
+			if computeAliases[name] {
+				computes[name] = true
+				continue
+			}
+			return nil, fmt.Errorf("$select: %q is not one of the joined entity sets or a $compute alias", name)
+		case 2:
+			if !joinedEntities[name] {
+				return nil, fmt.Errorf("$select: %q is not one of the joined entity sets", name)
+			}
+			colName := item.Segments[1].Value
+			qualified := name + "/" + colName
+			if !validCols[qualified] {
+				return nil, fmt.Errorf("$select: unknown column %s", qualified)
+			}
+			if partial[name] == nil {
+				partial[name] = make(map[string]bool)
+			}
+			partial[name][colName] = true
+		default:
+			return nil, fmt.Errorf("$select: deep paths (%d segments) are not supported on $crossjoin", len(item.Segments))
 		}
 	}
 
-	return fmt.Sprintf("SELECT %s FROM %s%s%s%s",
-		strings.Join(selectParts, ", "),
-		strings.Join(fromParts, ", "),
-		whereClause, limitClause, offsetClause), nil
+	sel := &CrossJoinSelection{
+		Entities:       make(map[string]bool),
+		Cols:           make(map[string]map[string]bool),
+		ComputeAliases: computes,
+	}
+	for e := range whole {
+		sel.Entities[e] = true
+	}
+	for e, cols := range partial {
+		sel.Entities[e] = true
+		if !whole[e] {
+			// Only carry the per-column restriction when there's no
+			// whole-entity select for this entity. Otherwise the
+			// whole-entity select wins.
+			sel.Cols[e] = cols
+		}
+	}
+	return sel, nil
+}
+
+// navFilterCtx wraps the standard filter walker with awareness of
+// nav-property paths in $crossjoin context. 3-segment paths like
+// `Customers/Orders/amount gt 100` translate to EXISTS subqueries via
+// FK nav-property infrastructure.
+//
+// For nodes that don't involve 3-segment paths the walker delegates to
+// the plain `filterNodeToSQL` — keeping the recursive logic for
+// arithmetic, functions, lambdas, casts, etc. in one place.
+type navFilterCtx struct {
+	validCols     map[string]bool
+	entityByAlias map[string]*EntitySchema   // joined entities only
+	entityMap     map[string]EntitySchema    // ALL exposed entities (nav targets may not be joined)
+	snapshot      int64
+}
+
+// toSQL is the entry point. Recurses through and/or/not nodes; for
+// comparison ops, checks for 3-segment Nav children and emits EXISTS
+// subqueries when found. Otherwise delegates to filterNodeToSQL.
+func (n *navFilterCtx) toSQL(node *godata.ParseNode) (string, error) {
+	if node == nil || node.Token == nil {
+		return "", fmt.Errorf("nil filter node")
+	}
+	if node.Token.Type != godata.ExpressionTokenLogical {
+		return filterNodeToSQL(node, n.validCols)
+	}
+	op := strings.ToLower(node.Token.Value)
+	switch op {
+	case "and", "or":
+		if len(node.Children) != 2 {
+			return "", fmt.Errorf("%s requires 2 operands", op)
+		}
+		left, err := n.toSQL(node.Children[0])
+		if err != nil {
+			return "", err
+		}
+		right, err := n.toSQL(node.Children[1])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("(%s %s %s)", left, strings.ToUpper(op), right), nil
+	case "not":
+		if len(node.Children) != 1 {
+			return "", fmt.Errorf("not requires 1 operand")
+		}
+		child, err := n.toSQL(node.Children[0])
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("NOT (%s)", child), nil
+	}
+	// Comparison op: check for 3-segment Nav children.
+	if isComparisonOp(op) && len(node.Children) == 2 {
+		for idx := 0; idx < 2; idx++ {
+			if isThreeSegmentNav(node.Children[idx]) {
+				return n.buildNavExists(node, idx)
+			}
+		}
+	}
+	return filterNodeToSQL(node, n.validCols)
+}
+
+// isComparisonOp reports whether the op is a binary comparison that
+// can take a nav-path as an operand (eq/ne/gt/ge/lt/le).
+func isComparisonOp(op string) bool {
+	switch op {
+	case "eq", "ne", "gt", "ge", "lt", "le":
+		return true
+	}
+	return false
+}
+
+// isThreeSegmentNav reports whether `node` is a Nav node with two Nav
+// children — i.e. an `A/B/col` path that godata represents as nested
+// Nav nodes (`Nav("/", [Nav("/", [A, B]), col])`).
+func isThreeSegmentNav(node *godata.ParseNode) bool {
+	if node == nil || node.Token == nil {
+		return false
+	}
+	if node.Token.Type != godata.ExpressionTokenNav || node.Token.Value != "/" {
+		return false
+	}
+	if len(node.Children) != 2 {
+		return false
+	}
+	left := node.Children[0]
+	if left == nil || left.Token == nil {
+		return false
+	}
+	return left.Token.Type == godata.ExpressionTokenNav && left.Token.Value == "/"
+}
+
+// buildNavExists translates a comparison-op-with-3-segment-nav-child
+// into an EXISTS subquery. Only handles the common case where one side
+// is the 3-segment path and the other is a simple value (literal or
+// column). Deep-nav-vs-deep-nav is rejected explicitly.
+func (n *navFilterCtx) buildNavExists(opNode *godata.ParseNode, navChildIdx int) (string, error) {
+	op := strings.ToLower(opNode.Token.Value)
+	sqlOp := odataCmpOpToSQL(op)
+	navNode := opNode.Children[navChildIdx]
+	otherChild := opNode.Children[1-navChildIdx]
+
+	// Refuse if the other side is also a 3-segment path. The EXISTS
+	// pattern handles one path traversal cleanly; two would need a
+	// JOIN inside the subquery and is rare enough to defer.
+	if isThreeSegmentNav(otherChild) {
+		return "", fmt.Errorf("$filter: comparing two nav paths (`A/B/x op C/D/y`) is not supported on $crossjoin")
+	}
+
+	// Extract A/B/col segments.
+	innerNav := navNode.Children[0]
+	entityName := innerNav.Children[0].Token.Value
+	navName := innerNav.Children[1].Token.Value
+	colName := navNode.Children[1].Token.Value
+
+	// Validate entity is one of the joined ones.
+	sourceEntity, ok := n.entityByAlias[entityName]
+	if !ok {
+		return "", fmt.Errorf("$filter: %q is not one of the joined entity sets", entityName)
+	}
+	// Find nav-property.
+	var nav *NavigationProperty
+	for i := range sourceEntity.NavProperties {
+		if sourceEntity.NavProperties[i].Name == navName {
+			nav = &sourceEntity.NavProperties[i]
+			break
+		}
+	}
+	if nav == nil {
+		return "", fmt.Errorf("$filter: %q is not a navigation property of %s", navName, entityName)
+	}
+	// Find target entity (need its schema for the EXISTS subquery
+	// SELECT). Looks up in entityMap, not just joined entities, since
+	// nav targets often aren't part of the cross-join itself.
+	target, ok := n.entityMap[nav.TargetEntity]
+	if !ok {
+		return "", fmt.Errorf("$filter: nav target %q is not exposed", nav.TargetEntity)
+	}
+	// Validate col exists on target.
+	colOK := false
+	for _, c := range target.Columns {
+		if c.Name == colName {
+			colOK = true
+			break
+		}
+	}
+	if !colOK {
+		return "", fmt.Errorf("$filter: %q is not a column of %s", colName, target.ODataName)
+	}
+
+	// Translate the other operand. For literals it's straightforward;
+	// for column refs of the source entity we want them outside the
+	// EXISTS to correlate with the cross-join row.
+	otherSQL, err := filterNodeToSQL(otherChild, n.validCols)
+	if err != nil {
+		return "", err
+	}
+
+	// Build EXISTS:
+	//   EXISTS (SELECT 1 FROM <target> WHERE <target>.<targetCol> =
+	//                 "<sourceAlias>"."<sourceCol>"
+	//             AND <target>.<colName> <op> <otherSQL>)
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM %s WHERE %s = %s.%s AND %s %s %s)",
+		qualifiedTableSQL(target.Schema, target.Table, n.snapshot),
+		quoteIdent(nav.TargetColumn),
+		quoteIdent(entityName), quoteIdent(nav.SourceColumn),
+		quoteIdent(colName), sqlOp, otherSQL), nil
+}
+
+// odataCmpOpToSQL maps OData comparison operators to SQL.
+func odataCmpOpToSQL(op string) string {
+	switch op {
+	case "eq":
+		return "="
+	case "ne":
+		return "<>"
+	case "gt":
+		return ">"
+	case "ge":
+		return ">="
+	case "lt":
+		return "<"
+	case "le":
+		return "<="
+	}
+	return op
 }
 
 // filterNodeToSQL recursively translates a godata filter parse tree to SQL.
@@ -1195,17 +1908,15 @@ func parseComputeExpr(expr string, validCols map[string]bool) (string, error) {
 
 	// Single column
 	if len(tokens) == 1 {
-		if !validCols[tokens[0]] {
-			return "", fmt.Errorf("unknown column: %s", tokens[0])
-		}
-		return quoteIdent(tokens[0]), nil
+		return resolveComputeCol(tokens[0], validCols)
 	}
 
-	// col op literal (e.g. "amount mul 2")
+	// col op literal (e.g. "amount mul 2", or "raw_orders/amount mul 2")
 	if len(tokens) == 3 {
 		col, op, lit := tokens[0], strings.ToLower(tokens[1]), tokens[2]
-		if !validCols[col] {
-			return "", fmt.Errorf("unknown column: %s", col)
+		sqlCol, err := resolveComputeCol(col, validCols)
+		if err != nil {
+			return "", err
 		}
 		sqlOp := odataArithToSQL(op)
 		if sqlOp == op {
@@ -1215,10 +1926,28 @@ func parseComputeExpr(expr string, validCols map[string]bool) (string, error) {
 		if _, err := strconv.ParseFloat(lit, 64); err != nil {
 			return "", fmt.Errorf("invalid numeric literal: %s", lit)
 		}
-		return fmt.Sprintf("(%s %s %s)", quoteIdent(col), sqlOp, lit), nil
+		return fmt.Sprintf("(%s %s %s)", sqlCol, sqlOp, lit), nil
 	}
 
 	return "", fmt.Errorf("unsupported expression format (use: col op literal)")
+}
+
+// resolveComputeCol turns a column reference into its SQL form, handling
+// both bare names (`amount`) and qualified $crossjoin paths
+// (`raw_orders/amount`). Qualified detection is `/` in the name; OData
+// column names don't contain `/`, so this is unambiguous.
+func resolveComputeCol(name string, validCols map[string]bool) (string, error) {
+	if !validCols[name] {
+		return "", fmt.Errorf("unknown column: %s", name)
+	}
+	if idx := strings.Index(name, "/"); idx >= 0 {
+		segs := strings.SplitN(name, "/", 3)
+		if len(segs) != 2 {
+			return "", fmt.Errorf("deep navigation paths (%q) are not supported in $compute", name)
+		}
+		return quoteIdent(segs[0]) + "." + quoteIdent(segs[1]), nil
+	}
+	return quoteIdent(name), nil
 }
 
 // splitComputeExpressions splits $compute value on commas, respecting parentheses.
@@ -1246,6 +1975,10 @@ func splitComputeExpressions(s string) []string {
 }
 
 // validateComputeAlias checks that a compute alias is a safe SQL identifier.
+// Rejects the `__` substring because the cross-join demuxer uses it as the
+// entity-prefix separator (`<entity>__<col>`) — an alias containing `__`
+// would be misrouted into an entity sub-object instead of staying at the
+// row top level.
 func validateComputeAlias(alias string) error {
 	if alias == "" {
 		return fmt.Errorf("alias cannot be empty")
@@ -1254,6 +1987,9 @@ func validateComputeAlias(alias string) error {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
 			return fmt.Errorf("invalid alias %q: only letters, numbers, and underscores", alias)
 		}
+	}
+	if strings.Contains(alias, "__") {
+		return fmt.Errorf("invalid alias %q: double underscore is reserved for the $crossjoin demuxer separator", alias)
 	}
 	return nil
 }
