@@ -38,7 +38,7 @@ func FuzzBuildQuery_Filter(f *testing.F) {
 			params.Set("$filter", filter)
 		}
 		// Should not panic
-		BuildQuery(fuzzEntity, params)
+		BuildQuery(fuzzEntity, params, 0)
 	})
 }
 
@@ -56,7 +56,7 @@ func FuzzBuildQuery_Select(f *testing.F) {
 		if sel != "" {
 			params.Set("$select", sel)
 		}
-		BuildQuery(fuzzEntity, params)
+		BuildQuery(fuzzEntity, params, 0)
 	})
 }
 
@@ -72,7 +72,7 @@ func FuzzBuildQuery_OrderBy(f *testing.F) {
 		if orderby != "" {
 			params.Set("$orderby", orderby)
 		}
-		BuildQuery(fuzzEntity, params)
+		BuildQuery(fuzzEntity, params, 0)
 	})
 }
 
@@ -92,7 +92,7 @@ func FuzzBuildQuery_TopSkip(f *testing.F) {
 		if skip != "" {
 			params.Set("$skip", skip)
 		}
-		BuildQuery(fuzzEntity, params)
+		BuildQuery(fuzzEntity, params, 0)
 	})
 }
 

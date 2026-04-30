@@ -1,21 +1,21 @@
 --- top_3 → 3 rows ---
-  [0] order_id=1
-  [1] order_id=2
-  [2] order_id=3
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", order_id=2
+  [2] @odata.id="http://testhost/odata/mart_revenue(3)", order_id=3
 --- top_0 → 0 rows ---
 
 --- top_exceeds → 6 rows ---
-  [0] order_id=1
-  [1] order_id=2
-  [2] order_id=3
-  [3] order_id=4
-  [4] order_id=5
-  [5] order_id=6
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", order_id=2
+  [2] @odata.id="http://testhost/odata/mart_revenue(3)", order_id=3
+  [3] @odata.id="http://testhost/odata/mart_revenue(4)", order_id=4
+  [4] @odata.id="http://testhost/odata/mart_revenue(5)", order_id=5
+  [5] @odata.id="http://testhost/odata/mart_revenue(6)", order_id=6
 --- skip_4 → 2 rows ---
-  [0] order_id=5
-  [1] order_id=6
+  [0] @odata.id="http://testhost/odata/mart_revenue(5)", order_id=5
+  [1] @odata.id="http://testhost/odata/mart_revenue(6)", order_id=6
 --- skip_all → 0 rows ---
 
 --- top2_skip1 → 2 rows ---
-  [0] order_id=2
-  [1] order_id=3
+  [0] @odata.id="http://testhost/odata/mart_revenue(2)", order_id=2
+  [1] @odata.id="http://testhost/odata/mart_revenue(3)", order_id=3

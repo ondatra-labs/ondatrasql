@@ -3,5 +3,5 @@
   [1] amount=250.5, customer="Bob"
   [2] amount=0, customer="Carol"
 --- $select=order_id&$top=2 ---
-  [0] order_id=1
-  [1] order_id=2
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", order_id=2

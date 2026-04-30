@@ -13,6 +13,83 @@ import (
 	"github.com/CiscoM31/godata"
 )
 
+// TestBuildQuery_SnapshotPinning pins the AT VERSION injection that gives
+// every query in one OData request a consistent DuckLake snapshot. Without
+// it, data + $count + $expand could read from different snapshots if the
+// pipeline commits between intermediate queries.
+func TestBuildQuery_SnapshotPinning(t *testing.T) {
+	t.Parallel()
+	entity := EntitySchema{
+		Schema: "mart", Table: "daily_revenue",
+		Columns: []ColumnSchema{
+			{Name: "id", Type: "BIGINT", EdmType: "Edm.Int64"},
+			{Name: "name", Type: "VARCHAR", EdmType: "Edm.String"},
+		},
+	}
+	cases := []struct {
+		name     string
+		snapshot int64
+		wantPin  bool
+	}{
+		{"snapshot 0 means no pinning (test/dev path)", 0, false},
+		{"snapshot 100 → AT VERSION 100", 100, true},
+		{"snapshot 1 → AT VERSION 1", 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sql, err := BuildQuery(entity, url.Values{}, tc.snapshot)
+			if err != nil {
+				t.Fatalf("BuildQuery: %v", err)
+			}
+			hasPin := strings.Contains(sql, fmt.Sprintf("AT (VERSION => %d)", tc.snapshot))
+			if hasPin != tc.wantPin {
+				t.Errorf("snapshot=%d: AT VERSION present = %v, want %v (sql: %q)",
+					tc.snapshot, hasPin, tc.wantPin, sql)
+			}
+			if !strings.Contains(sql, `"mart"."daily_revenue"`) {
+				t.Errorf("FROM clause missing schema/table: %q", sql)
+			}
+		})
+	}
+}
+
+// TestBuildCountQuery_SnapshotPinning mirrors the data-query test for the
+// COUNT path. data + $count must agree on snapshot, otherwise @odata.count
+// can be off from len(value).
+func TestBuildCountQuery_SnapshotPinning(t *testing.T) {
+	t.Parallel()
+	entity := EntitySchema{
+		Schema: "mart", Table: "daily_revenue",
+		Columns: []ColumnSchema{{Name: "id", Type: "BIGINT", EdmType: "Edm.Int64"}},
+	}
+	sql, err := BuildCountQuery(entity, url.Values{}, 42)
+	if err != nil {
+		t.Fatalf("BuildCountQuery: %v", err)
+	}
+	if !strings.Contains(sql, "AT (VERSION => 42)") {
+		t.Errorf("missing AT VERSION clause: %q", sql)
+	}
+}
+
+// TestBuildSingleEntityQuery_SnapshotPinning mirrors the data test for
+// single-entity reads. Pinning here means $entity dereferencing reads the
+// same version as the original collection response.
+func TestBuildSingleEntityQuery_SnapshotPinning(t *testing.T) {
+	t.Parallel()
+	entity := EntitySchema{
+		Schema: "mart", Table: "daily_revenue",
+		KeyColumn: "id",
+		Columns:   []ColumnSchema{{Name: "id", Type: "BIGINT", EdmType: "Edm.Int64"}},
+	}
+	sql, err := BuildSingleEntityQuery(entity, "1", 42)
+	if err != nil {
+		t.Fatalf("BuildSingleEntityQuery: %v", err)
+	}
+	if !strings.Contains(sql, "AT (VERSION => 42)") {
+		t.Errorf("missing AT VERSION clause: %q", sql)
+	}
+}
+
 // --- $search: ILIKE wildcard escaping ---
 
 func TestBuildQuery_Search_WildcardEscaped(t *testing.T) {
@@ -26,7 +103,7 @@ func TestBuildQuery_Search_WildcardEscaped(t *testing.T) {
 	}
 
 	params := url.Values{"$search": {"100%"}}
-	sql, err := BuildQuery(entity, params)
+	sql, err := BuildQuery(entity, params, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -46,7 +123,7 @@ func TestBuildQuery_Search_UnderscoreEscaped(t *testing.T) {
 	}
 
 	params := url.Values{"$search": {"test_value"}}
-	sql, err := BuildQuery(entity, params)
+	sql, err := BuildQuery(entity, params, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -66,7 +143,7 @@ func TestBuildQuery_Search_QuoteEscaped(t *testing.T) {
 	}
 
 	params := url.Values{"$search": {"O'Brien"}}
-	sql, err := BuildQuery(entity, params)
+	sql, err := BuildQuery(entity, params, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -86,7 +163,7 @@ func TestBuildCountQuery_Search_WildcardEscaped(t *testing.T) {
 	}
 
 	params := url.Values{"$search": {"100%"}}
-	sql, err := BuildCountQuery(entity, params)
+	sql, err := BuildCountQuery(entity, params, 0)
 	if err != nil {
 		t.Fatalf("BuildCountQuery: %v", err)
 	}
@@ -112,7 +189,7 @@ func TestBuildQuery_Filter_DateLiteral(t *testing.T) {
 
 	// Normal date filter should produce valid SQL
 	params := url.Values{"$filter": {"created eq 2024-01-15"}}
-	sql, err := BuildQuery(entity, params)
+	sql, err := BuildQuery(entity, params, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -173,7 +250,7 @@ func TestBuildQuery_Filter_RejectsInvalidNumericLiteral(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := url.Values{"$filter": {tt.filter}}
-			_, err := BuildQuery(entity, params)
+			_, err := BuildQuery(entity, params, 0)
 			if err == nil {
 				t.Errorf("expected error for filter %q, got nil", tt.filter)
 			}
@@ -203,7 +280,7 @@ func TestBuildQuery_Filter_AcceptsValidNumericLiteral(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := url.Values{"$filter": {tt.filter}}
-			sql, err := BuildQuery(entity, params)
+			sql, err := BuildQuery(entity, params, 0)
 			if err != nil {
 				t.Errorf("filter %q: unexpected error: %v", tt.filter, err)
 			}
@@ -241,7 +318,7 @@ func TestBuildQuery_Filter_ContainsEscapesWildcards(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := url.Values{"$filter": {tt.filter}}
-			sql, err := BuildQuery(entity, params)
+			sql, err := BuildQuery(entity, params, 0)
 			if err != nil {
 				t.Fatalf("filter %q: %v", tt.filter, err)
 			}

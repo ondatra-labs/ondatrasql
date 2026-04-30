@@ -14,8 +14,33 @@ import (
 	"github.com/CiscoM31/godata"
 )
 
+// qualifiedTableSQL returns the FROM-clause fragment for an entity's
+// underlying table, optionally pinned to a DuckLake snapshot.
+//
+// snapshot == 0 → no pinning; the query reads "current" state. Used by
+// callers that don't need cross-statement consistency (e.g. tests, or
+// older handlers being migrated). snapshot > 0 → injects
+// `AT (VERSION => N)` so every projection in the request reads from the
+// same snapshot, eliminating skew between data, $count, $expand, and
+// @odata.deltaLink within one request.
+//
+// `@expose` is only allowed on materialized SQL models (parser/model.go),
+// and those models are always materialized into the DuckLake catalog. So
+// AT VERSION is always valid against any entity that reaches this layer.
+func qualifiedTableSQL(schema, table string, snapshot int64) string {
+	q := fmt.Sprintf("%s.%s", quoteIdent(schema), quoteIdent(table))
+	if snapshot > 0 {
+		q += fmt.Sprintf(" AT (VERSION => %d)", snapshot)
+	}
+	return q
+}
+
 // BuildQuery translates OData query parameters into a DuckDB SQL query.
-func BuildQuery(entity EntitySchema, params url.Values) (string, error) {
+//
+// snapshot pins every base-table reference to a specific DuckLake version.
+// Pass 0 to disable pinning (for tests; production callers should always
+// pin to ensure intra-request consistency).
+func BuildQuery(entity EntitySchema, params url.Values, snapshot int64) (string, error) {
 	ctx := context.Background()
 	validCols := validColumns(entity)
 
@@ -72,8 +97,9 @@ func BuildQuery(entity EntitySchema, params url.Values) (string, error) {
 	// Compute aliases in $select: since we use subquery, $select just needs the alias name
 	// No filtering needed — subquery exposes all aliases, outer SELECT projects what's needed
 
-	// FROM
-	fromClause := fmt.Sprintf("%s.%s", quoteIdent(entity.Schema), quoteIdent(entity.Table))
+	// FROM — snapshot-pinned when caller provides one (server-handler does;
+	// tests may pass 0 to skip pinning).
+	fromClause := qualifiedTableSQL(entity.Schema, entity.Table, snapshot)
 
 	// WHERE
 	whereClause := ""
@@ -196,15 +222,22 @@ func BuildQuery(entity EntitySchema, params url.Values) (string, error) {
 		var applyCols []string
 		var err error
 		if computeExtra != "" {
-			// Create a virtual entity backed by a compute subquery
-			computeSubquery := fmt.Sprintf("(SELECT *%s FROM %s.%s%s) AS _computed",
-				computeExtra, quoteIdent(entity.Schema), quoteIdent(entity.Table), applyWhere)
+			// Create a virtual entity backed by a compute subquery. The
+			// inner SELECT is snapshot-pinned via qualifiedTableSQL so the
+			// $compute aggregation reads from the same DuckLake version as
+			// data / $count / $expand. The wrapped entity has Schema=""
+			// (signaling pre-built subquery to buildApplyQuery), so the
+			// snapshot arg there is irrelevant.
+			computeSubquery := fmt.Sprintf("(SELECT *%s FROM %s%s) AS _computed",
+				computeExtra,
+				qualifiedTableSQL(entity.Schema, entity.Table, snapshot),
+				applyWhere)
 			computeEntity := entity
 			computeEntity.Schema = ""
 			computeEntity.Table = computeSubquery
-			applySQL, applyCols, err = buildApplyQuery(computeEntity, apply, applyValidCols, "")
+			applySQL, applyCols, err = buildApplyQuery(computeEntity, apply, applyValidCols, "", snapshot)
 		} else {
-			applySQL, applyCols, err = buildApplyQuery(entity, apply, applyValidCols, applyWhere)
+			applySQL, applyCols, err = buildApplyQuery(entity, apply, applyValidCols, applyWhere, snapshot)
 		}
 		if err != nil {
 			return "", fmt.Errorf("invalid $apply: %w", err)
@@ -303,11 +336,15 @@ func BuildQuery(entity EntitySchema, params url.Values) (string, error) {
 
 // BuildCountQuery builds a COUNT(*) query for the entity.
 // Includes both $filter and $search to match the data query.
-func BuildCountQuery(entity EntitySchema, params url.Values) (string, error) {
+//
+// snapshot pins the count to the same DuckLake version the caller used
+// for the data query, so `value` row count and `@odata.count` agree.
+// Pass 0 to skip pinning (tests).
+func BuildCountQuery(entity EntitySchema, params url.Values, snapshot int64) (string, error) {
 	ctx := context.Background()
 	validCols := validColumns(entity)
 
-	fromClause := fmt.Sprintf("%s.%s", quoteIdent(entity.Schema), quoteIdent(entity.Table))
+	fromClause := qualifiedTableSQL(entity.Schema, entity.Table, snapshot)
 
 	whereClause := ""
 	if filter := params.Get("$filter"); filter != "" {
@@ -347,8 +384,13 @@ func BuildCountQuery(entity EntitySchema, params url.Values) (string, error) {
 }
 
 // BuildSingleEntityQuery builds a query to fetch a single entity by key.
-func BuildSingleEntityQuery(entity EntitySchema, keyValue string) (string, error) {
-	fromClause := fmt.Sprintf("%s.%s", quoteIdent(entity.Schema), quoteIdent(entity.Table))
+//
+// snapshot pins to a specific DuckLake version. Single-entity reads are
+// usually independent enough not to require pinning, but threading it
+// through keeps API consistency with the collection handler — a request
+// that ends up calling both gets a consistent view.
+func BuildSingleEntityQuery(entity EntitySchema, keyValue string, snapshot int64) (string, error) {
+	fromClause := qualifiedTableSQL(entity.Schema, entity.Table, snapshot)
 
 	// Determine key column type to decide quoting
 	var keyType string
@@ -791,12 +833,19 @@ func funcToSQL(node *godata.ParseNode, validCols map[string]bool) (string, error
 // Supports: aggregate(col with func as alias), groupby((col1,col2),aggregate(...))
 // buildApplyQuery returns SQL + list of output column names for $orderby validation.
 // whereClause includes any $filter/$search conditions from the caller.
-func buildApplyQuery(entity EntitySchema, apply string, validCols map[string]bool, whereClause string) (string, []string, error) {
+//
+// snapshot pins the underlying base-table read to a DuckLake version so
+// $apply aggregations agree with the rest of the request (data, $count,
+// $expand). Pass 0 to skip pinning. The entity.Schema=="" branch is used
+// when the caller has already wrapped the table in a $compute subquery
+// (whose own FROM is pinned by qualifiedTableSQL at the wrap site), so
+// snapshot is irrelevant there.
+func buildApplyQuery(entity EntitySchema, apply string, validCols map[string]bool, whereClause string, snapshot int64) (string, []string, error) {
 	var fromClause string
 	if entity.Schema == "" {
 		fromClause = entity.Table // already a subquery like "(SELECT ...) AS _computed"
 	} else {
-		fromClause = fmt.Sprintf("%s.%s", quoteIdent(entity.Schema), quoteIdent(entity.Table))
+		fromClause = qualifiedTableSQL(entity.Schema, entity.Table, snapshot)
 	}
 	apply = strings.TrimSpace(apply)
 

@@ -1,11 +1,11 @@
 --- orderby amount asc ---
-  [0] amount=-75.25, customer="Frank", order_id=6
-  [1] amount=0, customer="Carol", order_id=3
-  [2] amount=50, customer="", order_id=5
-  [3] amount=150, customer="Alice", order_id=1
-  [4] amount=250.5, customer="Bob", order_id=2
-  [5] amount=999.99, customer="Dave", order_id=4
+  [0] @odata.id="http://testhost/odata/mart_revenue(6)", amount=-75.25, customer="Frank", order_id=6
+  [1] @odata.id="http://testhost/odata/mart_revenue(3)", amount=0, customer="Carol", order_id=3
+  [2] @odata.id="http://testhost/odata/mart_revenue(5)", amount=50, customer="", order_id=5
+  [3] @odata.id="http://testhost/odata/mart_revenue(1)", amount=150, customer="Alice", order_id=1
+  [4] @odata.id="http://testhost/odata/mart_revenue(2)", amount=250.5, customer="Bob", order_id=2
+  [5] @odata.id="http://testhost/odata/mart_revenue(4)", amount=999.99, customer="Dave", order_id=4
 --- orderby amount desc, top 3 ---
-  [0] amount=999.99, customer="Dave", order_id=4
-  [1] amount=250.5, customer="Bob", order_id=2
-  [2] amount=150, customer="Alice", order_id=1
+  [0] @odata.id="http://testhost/odata/mart_revenue(4)", amount=999.99, customer="Dave", order_id=4
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", amount=250.5, customer="Bob", order_id=2
+  [2] @odata.id="http://testhost/odata/mart_revenue(1)", amount=150, customer="Alice", order_id=1

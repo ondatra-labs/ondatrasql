@@ -10,22 +10,59 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 )
 
 // NewServer creates an HTTP handler for OData endpoints.
 func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) http.Handler {
+	// Normalize once at the boundary so every helper that builds URLs by
+	// concatenating `baseURL + "/odata/..."` produces the same canonical
+	// form. Without this, an operator-configured trailing slash leaks into
+	// emitted @odata.id values (`https://api//odata/...`), and stripBaseURL
+	// (which trims) refuses to dereference them.
+	baseURL = strings.TrimSuffix(baseURL, "/")
+
 	entityMap := make(map[string]EntitySchema, len(schemas))
 	for _, s := range schemas {
 		entityMap[s.ODataName] = s
 	}
 
+	// Delta link signing key. Persistent if ONDATRA_ODATA_DELTA_KEY is
+	// set; per-process random otherwise (with a startup log line so the
+	// operator knows existing deltaLinks won't survive a restart).
+	deltaKey, deltaKeyErr := loadDeltaKey(os.Getenv("ONDATRA_ODATA_DELTA_KEY"), func(f string, a ...any) {
+		fmt.Fprintf(os.Stderr, f+"\n", a...)
+	})
+	if deltaKeyErr != nil {
+		// Fail soft: server starts, deltaLinks just won't be emitted.
+		// The error is reported to stderr.
+		fmt.Fprintf(os.Stderr, "OData: failed to initialise delta key (%v); @odata.deltaLink will be omitted\n", deltaKeyErr)
+		deltaKey = nil
+	}
+
+	// Delta-handler serializer. The delta path mutates the session-wide
+	// `search_path` to make DuckLake's `table_changes()` resolve a bare
+	// table name — see runTableChanges in delta.go. table_changes() does
+	// NOT accept a qualified name (verified: errors with "Table with name
+	// schema.table does not exist"), so we cannot drop the SET. The
+	// session's per-statement mutex doesn't span the SET+SELECT+RESET
+	// sequence, so two concurrent delta handlers could clobber each
+	// other's search_path mid-query (cross-schema data leak in the worst
+	// case). This mutex serialises only the delta path; normal collection
+	// queries are unaffected and remain concurrent.
+	var deltaMu sync.Mutex
+
 	mux := http.NewServeMux()
 
 	// Service document
 	mux.HandleFunc("GET /odata", func(w http.ResponseWriter, r *http.Request) {
+		if !validateFormat(w, r) {
+			return
+		}
 		data, err := FormatServiceDocument(baseURL, schemas)
 		if err != nil {
 			writeError(w, 500, "InternalError", err.Error())
@@ -35,7 +72,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		w.Write(data)
 	})
 
-	// $metadata
+	// $metadata — XML, $format does not apply.
 	mux.HandleFunc("GET /odata/$metadata", func(w http.ResponseWriter, r *http.Request) {
 		data, err := GenerateMetadata(schemas)
 		if err != nil {
@@ -48,12 +85,18 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 
 	// Entity $count: /odata/{entity}/$count
 	mux.HandleFunc("GET /odata/{entity}/$count", func(w http.ResponseWriter, r *http.Request) {
+		if !validateFormat(w, r) {
+			return
+		}
 		entityName := r.PathValue("entity")
 		handleCount(w, r, sess, entityMap, entityName)
 	})
 
 	// Entity collection: /odata/{entity}
 	mux.HandleFunc("GET /odata/{entity}", func(w http.ResponseWriter, r *http.Request) {
+		if !validateFormat(w, r) {
+			return
+		}
 		entityName := r.PathValue("entity")
 
 		// Single entity by key: /odata/entity(key)
@@ -66,6 +109,27 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 		if !ok {
 			writeError(w, 404, "NotFound", fmt.Sprintf("Entity set '%s' not found", entityName))
 			return
+		}
+
+		// $deltatoken: serve a delta-format response from DuckLake's
+		// table_changes() between the snapshot pinned in the token and
+		// the current snapshot. Routed before any normal-query handling.
+		// Serialised via deltaMu — see comment on the mutex declaration.
+		if dt := r.URL.Query().Get("$deltatoken"); dt != "" {
+			handleDelta(w, r, sess, entity, dt, deltaKey, baseURL, &deltaMu)
+			return
+		}
+
+		// Capture a single DuckLake snapshot at the start of the request
+		// and pin every base-table reference to it. This makes data,
+		// $count, $expand, and @odata.deltaLink all read from the same
+		// version — no skew if the pipeline commits between intermediate
+		// queries. Falls back to 0 (no pinning) if the snapshot read fails;
+		// the response is still correct, just potentially showing skew
+		// under heavy concurrent writes.
+		var snapshot int64
+		if err := sess.RefreshSnapshot(); err == nil {
+			snapshot, _ = sess.GetCurrentSnapshot()
 		}
 
 		// If $expand is active, ensure FK columns are in the query
@@ -91,7 +155,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 			}
 		}
 
-		sql, err := BuildQuery(entity, queryParams)
+		sql, err := BuildQuery(entity, queryParams, snapshot)
 		if err != nil {
 			writeError(w, 400, "BadRequest", err.Error())
 			return
@@ -122,7 +186,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 						applyCountParams[k] = v
 					}
 				}
-				countSQL, err := BuildQuery(entity, applyCountParams)
+				countSQL, err := BuildQuery(entity, applyCountParams, snapshot)
 				if err == nil {
 					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", countSQL)
 					if val, err := sess.QueryValue(countSQL); err == nil {
@@ -140,7 +204,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 						countParams[k] = v
 					}
 				}
-				if countSQL, err := BuildQuery(entity, countParams); err == nil {
+				if countSQL, err := BuildQuery(entity, countParams, snapshot); err == nil {
 					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", countSQL)
 					if val, err := sess.QueryValue(countSQL); err == nil {
 						var c int
@@ -149,7 +213,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 					}
 				}
 			} else {
-				countSQL, err := BuildCountQuery(entity, queryParams)
+				countSQL, err := BuildCountQuery(entity, queryParams, snapshot)
 				if err == nil {
 					if val, err := sess.QueryValue(countSQL); err == nil {
 						var c int
@@ -211,8 +275,12 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 						filterVal = "'" + strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''") + "'"
 					}
 
-					relSQL := fmt.Sprintf("SELECT * FROM %s.%s WHERE %s = %s",
-						quoteIdent(targetEntity.Schema), quoteIdent(targetEntity.Table),
+					// Pin the inner SELECT to the same snapshot the parent
+					// query used so $expand rows can't drift from the
+					// parent rows (e.g. seeing a new related row that
+					// wasn't there when the parent was read).
+					relSQL := fmt.Sprintf("SELECT * FROM %s WHERE %s = %s",
+						qualifiedTableSQL(targetEntity.Schema, targetEntity.Table, snapshot),
 						quoteIdent(nav.TargetColumn), filterVal)
 
 					relRows, err := sess.QueryRowsAny(relSQL)
@@ -251,14 +319,62 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) htt
 			}
 		}
 
+		// Build the delta link before serializing. Use the SAME snapshot
+		// we pinned the data query to — that way the deltaLink token's
+		// snapshot matches what the client actually saw, eliminating the
+		// "client thinks they've seen up to N+1 but data was at N" skew
+		// we'd have if we re-read the snapshot here. Skipped when query
+		// has incompatible options or no delta key is configured.
+		var deltaLink string
+		if deltaKey != nil && snapshot > 0 {
+			deltaLink = emitDeltaLink(baseURL, entity, queryParams, snapshot, deltaKey)
+		}
+
 		data, err := FormatResponse(baseURL, entityName, rows, count, entity)
 		if err != nil {
 			writeError(w, 500, "InternalError", err.Error())
 			return
 		}
 
+		// Splice @odata.deltaLink into the JSON before the trailing '}'.
+		// Cheaper than rebuilding the whole response struct, and avoids
+		// changing FormatResponse's signature (which is exported).
+		if deltaLink != "" {
+			data = appendODataAnnotation(data, "@odata.deltaLink", deltaLink)
+		}
+
 		w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
 		w.Write(data)
+	})
+
+	// $entity — dereference a canonical entity-id URL (the @odata.id we emit)
+	// back to the entity. Spec: GET /odata/$entity?$id=<url>.
+	mux.HandleFunc("GET /odata/$entity", func(w http.ResponseWriter, r *http.Request) {
+		if !validateFormat(w, r) {
+			return
+		}
+		idURL := r.URL.Query().Get("$id")
+		if idURL == "" {
+			writeError(w, 400, "BadRequest", "$entity requires $id query parameter")
+			return
+		}
+		// $id may be absolute or relative. We only dereference IDs that
+		// point at our own service — refusing foreign URLs prevents the
+		// server from being used as a redirector for arbitrary HTTP fetches.
+		entityPath := stripBaseURL(idURL, baseURL)
+		if entityPath == "" {
+			writeError(w, 400, "BadRequest",
+				fmt.Sprintf("$id %q is not a valid entity URL on this service", idURL))
+			return
+		}
+		// entityPath is now like "Orders(123)" — same shape handleSingleEntity
+		// already handles for the in-path case GET /odata/Orders(123).
+		if !strings.Contains(entityPath, "(") {
+			writeError(w, 400, "BadRequest",
+				fmt.Sprintf("$id %q does not address a single entity (missing key)", idURL))
+			return
+		}
+		handleSingleEntity(w, r, sess, entityMap, entityPath, baseURL)
 	})
 
 	// $batch — JSON batch format (OData v4.01)
@@ -277,11 +393,77 @@ func odataVersion(next http.Handler) http.Handler {
 	})
 }
 
+// appendODataAnnotation splices a top-level "key": "value" annotation
+// into a JSON object's serialized bytes, just before the closing brace.
+// Used to attach @odata.deltaLink without rebuilding the response struct
+// (which would mean changing FormatResponse's exported signature).
+//
+// Returns the original bytes if the input doesn't end with `}` (defensive
+// against unexpected serialization shapes).
+func appendODataAnnotation(data []byte, key, value string) []byte {
+	if len(data) == 0 || data[len(data)-1] != '}' {
+		return data
+	}
+	encodedValue, _ := json.Marshal(value)
+	prefix := []byte(`,"` + key + `":`)
+	out := make([]byte, 0, len(data)+len(prefix)+len(encodedValue))
+	out = append(out, data[:len(data)-1]...)
+	out = append(out, prefix...)
+	out = append(out, encodedValue...)
+	out = append(out, '}')
+	return out
+}
+
+// stripBaseURL returns the entity-path portion of an entity-id URL if it
+// belongs to this service (matches our baseURL), or "" otherwise. Used by
+// the $entity handler to refuse to dereference foreign URLs and to extract
+// the `Orders(123)` segment from a full canonical URL.
+//
+// Accepts both absolute (`https://api/odata/Orders(123)`) and relative
+// (`Orders(123)`, `/odata/Orders(123)`) forms.
+func stripBaseURL(idURL, baseURL string) string {
+	// Relative form — already an entity path or /odata/-prefixed path.
+	if !strings.Contains(idURL, "://") {
+		path := idURL
+		path = strings.TrimPrefix(path, "/")
+		path = strings.TrimPrefix(path, "odata/")
+		return path
+	}
+	// Absolute form — must match our baseURL.
+	prefix := strings.TrimSuffix(baseURL, "/") + "/odata/"
+	if !strings.HasPrefix(idURL, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(idURL, prefix)
+}
+
+// validateFormat enforces the $format query option. The OData spec lets
+// clients select the response format via either the Accept header or the
+// $format param. We only serve JSON, so anything other than $format=json
+// is rejected with 406. Returns true if the request is acceptable; false
+// (after writing the error) if it should be aborted.
+func validateFormat(w http.ResponseWriter, r *http.Request) bool {
+	format := r.URL.Query().Get("$format")
+	if format == "" || format == "json" || format == "application/json" {
+		return true
+	}
+	writeError(w, 406, "NotAcceptable",
+		fmt.Sprintf("$format=%q is not supported; only json", format))
+	return false
+}
+
 func handleCount(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, entityMap map[string]EntitySchema, entityName string) {
 	entity, ok := entityMap[entityName]
 	if !ok {
 		writeError(w, 404, "NotFound", fmt.Sprintf("Entity set '%s' not found", entityName))
 		return
+	}
+
+	// Pin to a snapshot so $count is consistent if the same client also
+	// queried the data — both reads see the same DuckLake version.
+	var snapshot int64
+	if err := sess.RefreshSnapshot(); err == nil {
+		snapshot, _ = sess.GetCurrentSnapshot()
 	}
 
 	params := r.URL.Query()
@@ -295,7 +477,7 @@ func handleCount(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, e
 				countParams[k] = v
 			}
 		}
-		baseSQL, err := BuildQuery(entity, countParams)
+		baseSQL, err := BuildQuery(entity, countParams, snapshot)
 		if err != nil {
 			writeError(w, 400, "BadRequest", err.Error())
 			return
@@ -303,7 +485,7 @@ func handleCount(w http.ResponseWriter, r *http.Request, sess *duckdb.Session, e
 		countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", baseSQL)
 	} else {
 		var err error
-		countSQL, err = BuildCountQuery(entity, params)
+		countSQL, err = BuildCountQuery(entity, params, snapshot)
 		if err != nil {
 			writeError(w, 400, "BadRequest", err.Error())
 			return
@@ -443,7 +625,17 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, sess *duckdb.Ses
 		return
 	}
 
-	sql, err := BuildSingleEntityQuery(entity, keyValue)
+	// Pin to a snapshot — single-entity reads are usually independent
+	// enough that pinning isn't strictly required, but it keeps the
+	// behaviour consistent with the collection handler ($entity-via-id
+	// dereferencing produces identical reads to the original
+	// `value`-array entries).
+	var snapshot int64
+	if err := sess.RefreshSnapshot(); err == nil {
+		snapshot, _ = sess.GetCurrentSnapshot()
+	}
+
+	sql, err := BuildSingleEntityQuery(entity, keyValue, snapshot)
 	if err != nil {
 		writeError(w, 400, "BadRequest", err.Error())
 		return

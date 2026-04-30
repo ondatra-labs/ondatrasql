@@ -1,40 +1,40 @@
 --- eq_string → 1 rows ---
-  [0] customer="Alice", order_id=1
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", customer="Alice", order_id=1
 --- gt_number → 3 rows ---
-  [0] amount=150, order_id=1
-  [1] amount=250.5, order_id=2
-  [2] amount=999.99, order_id=4
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", amount=150, order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", amount=250.5, order_id=2
+  [2] @odata.id="http://testhost/odata/mart_revenue(4)", amount=999.99, order_id=4
 --- lt_number → 1 rows ---
-  [0] amount=-75.25, order_id=6
+  [0] @odata.id="http://testhost/odata/mart_revenue(6)", amount=-75.25, order_id=6
 --- le_number → 2 rows ---
-  [0] amount=0, order_id=3
-  [1] amount=-75.25, order_id=6
+  [0] @odata.id="http://testhost/odata/mart_revenue(3)", amount=0, order_id=3
+  [1] @odata.id="http://testhost/odata/mart_revenue(6)", amount=-75.25, order_id=6
 --- ne_string → 5 rows ---
-  [0] customer="Bob", order_id=2
-  [1] customer="Carol", order_id=3
-  [2] customer="Dave", order_id=4
-  [3] customer="", order_id=5
-  [4] customer="Frank", order_id=6
+  [0] @odata.id="http://testhost/odata/mart_revenue(2)", customer="Bob", order_id=2
+  [1] @odata.id="http://testhost/odata/mart_revenue(3)", customer="Carol", order_id=3
+  [2] @odata.id="http://testhost/odata/mart_revenue(4)", customer="Dave", order_id=4
+  [3] @odata.id="http://testhost/odata/mart_revenue(5)", customer="", order_id=5
+  [4] @odata.id="http://testhost/odata/mart_revenue(6)", customer="Frank", order_id=6
 --- eq_bool_true → 3 rows ---
-  [0] active=true, order_id=1
-  [1] active=true, order_id=3
-  [2] active=true, order_id=4
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", active=true, order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(3)", active=true, order_id=3
+  [2] @odata.id="http://testhost/odata/mart_revenue(4)", active=true, order_id=4
 --- eq_bool_false → 2 rows ---
-  [0] active=false, order_id=2
-  [1] active=false, order_id=5
+  [0] @odata.id="http://testhost/odata/mart_revenue(2)", active=false, order_id=2
+  [1] @odata.id="http://testhost/odata/mart_revenue(5)", active=false, order_id=5
 --- eq_null → 1 rows ---
-  [0] order_date=null, order_id=4
+  [0] @odata.id="http://testhost/odata/mart_revenue(4)", order_date=null, order_id=4
 --- ne_null → 5 rows ---
-  [0] order_date="2026-01-01", order_id=1
-  [1] order_date="2026-01-02", order_id=2
-  [2] order_date="2026-01-03", order_id=3
-  [3] order_date="2026-01-05", order_id=5
-  [4] order_date="2026-01-06", order_id=6
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", order_date="2026-01-01", order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", order_date="2026-01-02", order_id=2
+  [2] @odata.id="http://testhost/odata/mart_revenue(3)", order_date="2026-01-03", order_id=3
+  [3] @odata.id="http://testhost/odata/mart_revenue(5)", order_date="2026-01-05", order_id=5
+  [4] @odata.id="http://testhost/odata/mart_revenue(6)", order_date="2026-01-06", order_id=6
 --- and → 2 rows ---
-  [0] order_id=1
-  [1] order_id=4
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(4)", order_id=4
 --- or → 2 rows ---
-  [0] customer="Alice", order_id=1
-  [1] customer="Bob", order_id=2
+  [0] @odata.id="http://testhost/odata/mart_revenue(1)", customer="Alice", order_id=1
+  [1] @odata.id="http://testhost/odata/mart_revenue(2)", customer="Bob", order_id=2
 --- no_match → 0 rows ---
 

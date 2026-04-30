@@ -8,11 +8,60 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net/url"
 	"strings"
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
 )
+
+// formatODataID builds the canonical entity-id URL for one row, following
+// OData URL conventions for the key segment:
+//   - integer / numeric keys are bare:    Orders(123)
+//   - everything else is single-quoted:   Orders('foo')
+//     with inner ' escaped as '' (OData), then percent-encoded for URL safety.
+//
+// Returns "" if the schema has no KeyColumn or the row has no value for it
+// (caller should skip emitting @odata.id in those cases).
+func formatODataID(baseURL, entityName string, schema EntitySchema, row map[string]any) string {
+	if schema.KeyColumn == "" {
+		return ""
+	}
+	keyVal, ok := row[schema.KeyColumn]
+	if !ok || keyVal == nil {
+		return ""
+	}
+
+	// Look up the key's EdmType to decide quoting style.
+	var keyEdm string
+	for _, c := range schema.Columns {
+		if c.Name == schema.KeyColumn {
+			keyEdm = c.EdmType
+			break
+		}
+	}
+
+	var keySegment string
+	switch keyEdm {
+	case "Edm.Byte", "Edm.Int16", "Edm.Int32", "Edm.Int64",
+		"Edm.Single", "Edm.Double", "Edm.Decimal":
+		// Numeric — bare. Use %v on whatever native type the driver returned.
+		keySegment = fmt.Sprintf("%v", keyVal)
+	default:
+		// String-like — single-quoted, OData-escape ' → '', URL-encode the rest.
+		// We percent-encode then revert %27 back to literal ' because OData's
+		// quote-escape (`'` → `''`) is wire-syntax, not RFC 3986 URL-encoding.
+		// Real OData clients parse `Orders('O''Brien')` literally; they do not
+		// URL-decode the inner quotes.
+		s := fmt.Sprintf("%v", keyVal)
+		s = strings.ReplaceAll(s, "'", "''")
+		encoded := url.PathEscape(s)
+		encoded = strings.ReplaceAll(encoded, "%27", "'")
+		keySegment = "'" + encoded + "'"
+	}
+
+	return fmt.Sprintf("%s/odata/%s(%s)", baseURL, entityName, keySegment)
+}
 
 // ODataResponse is the OData JSON response format.
 type ODataResponse struct {
@@ -37,9 +86,12 @@ func FormatResponse(baseURL, entity string, rows []map[string]any, count *int, s
 	}
 
 	for i, row := range rows {
-		m := make(map[string]interface{}, len(row))
+		m := make(map[string]interface{}, len(row)+1)
 		for k, v := range row {
 			m[k] = toODataValue(v, colTypes[k])
+		}
+		if id := formatODataID(baseURL, entity, schema, row); id != "" {
+			m["@odata.id"] = id
 		}
 		resp.Value[i] = m
 	}
@@ -135,6 +187,9 @@ func FormatSingleEntityResponse(baseURL, entity string, row map[string]any, sche
 	}
 	for k, v := range row {
 		m[k] = toODataValue(v, colTypes[k])
+	}
+	if id := formatODataID(baseURL, entity, schema, row); id != "" {
+		m["@odata.id"] = id
 	}
 
 	return json.Marshal(m)

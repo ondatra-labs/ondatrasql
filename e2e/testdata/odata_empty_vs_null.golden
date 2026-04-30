@@ -3,4 +3,4 @@
 --- null (Bob) ---
   [0] name="Bob", score=null, tier=null
 --- empty string customer ---
-  [0] customer="", order_id=5
+  [0] @odata.id="http://testhost/odata/mart_revenue(5)", customer="", order_id=5

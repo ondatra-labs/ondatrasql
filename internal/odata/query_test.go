@@ -31,7 +31,7 @@ var testEntity = EntitySchema{
 
 func TestBuildQuery_NoParams(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{})
+	sql, err := BuildQuery(testEntity, url.Values{}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestBuildQuery_NoParams(t *testing.T) {
 
 func TestBuildQuery_Select(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$select": {"name,revenue"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$select": {"name,revenue"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestBuildQuery_Select(t *testing.T) {
 
 func TestBuildQuery_SelectUnknownColumn(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$select": {"nonexistent"}})
+	_, err := BuildQuery(testEntity, url.Values{"$select": {"nonexistent"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column")
 	}
@@ -64,7 +64,7 @@ func TestBuildQuery_SelectUnknownColumn(t *testing.T) {
 
 func TestBuildQuery_FilterEq(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq 'Alice'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq 'Alice'"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestBuildQuery_FilterEq(t *testing.T) {
 
 func TestBuildQuery_FilterGt(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue gt 1000"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue gt 1000"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestBuildQuery_FilterGt(t *testing.T) {
 
 func TestBuildQuery_FilterAnd(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue gt 100 and name eq 'Bob'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue gt 100 and name eq 'Bob'"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestBuildQuery_FilterAnd(t *testing.T) {
 
 func TestBuildQuery_FilterOr(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq 'Alice' or name eq 'Bob'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq 'Alice' or name eq 'Bob'"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuildQuery_FilterOr(t *testing.T) {
 
 func TestBuildQuery_FilterBoolean(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"active eq true"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"active eq true"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBuildQuery_FilterBoolean(t *testing.T) {
 
 func TestBuildQuery_FilterNull(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq null"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq null"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestBuildQuery_FilterNull(t *testing.T) {
 
 func TestBuildQuery_FilterNotNull(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name ne null"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name ne null"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestBuildQuery_FilterNotNull(t *testing.T) {
 
 func TestBuildQuery_FilterUnknownColumn(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$filter": {"fake gt 1"}})
+	_, err := BuildQuery(testEntity, url.Values{"$filter": {"fake gt 1"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column")
 	}
@@ -149,7 +149,7 @@ func TestBuildQuery_FilterUnknownColumn(t *testing.T) {
 
 func TestBuildQuery_FilterSQLInjection(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq 'Alice''; DROP TABLE--'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name eq 'Alice''; DROP TABLE--'"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestBuildQuery_FilterSQLInjection(t *testing.T) {
 
 func TestBuildQuery_OrderByAsc(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$orderby": {"revenue asc"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$orderby": {"revenue asc"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestBuildQuery_OrderByAsc(t *testing.T) {
 
 func TestBuildQuery_OrderByDesc(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$orderby": {"revenue desc"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$orderby": {"revenue desc"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestBuildQuery_OrderByDesc(t *testing.T) {
 
 func TestBuildQuery_OrderByUnknownColumn(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$orderby": {"fake desc"}})
+	_, err := BuildQuery(testEntity, url.Values{"$orderby": {"fake desc"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column")
 	}
@@ -191,7 +191,7 @@ func TestBuildQuery_OrderByUnknownColumn(t *testing.T) {
 
 func TestBuildQuery_Top(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$top": {"10"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$top": {"10"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestBuildQuery_Top(t *testing.T) {
 
 func TestBuildQuery_Skip(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$skip": {"20"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$skip": {"20"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestBuildQuery_Skip(t *testing.T) {
 
 func TestBuildQuery_TopAndSkip(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$top": {"5"}, "$skip": {"10"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$top": {"5"}, "$skip": {"10"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestBuildQuery_Combined(t *testing.T) {
 		"$top":     {"10"},
 		"$skip":    {"5"},
 	}
-	sql, err := BuildQuery(testEntity, params)
+	sql, err := BuildQuery(testEntity, params, 0)
 	if err != nil {
 		t.Fatalf("BuildQuery: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestBuildQuery_Combined(t *testing.T) {
 
 func TestBuildCountQuery(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildCountQuery(testEntity, url.Values{})
+	sql, err := BuildCountQuery(testEntity, url.Values{}, 0)
 	if err != nil {
 		t.Fatalf("BuildCountQuery: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestBuildCountQuery(t *testing.T) {
 
 func TestBuildCountQuery_WithFilter(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildCountQuery(testEntity, url.Values{"$filter": {"revenue gt 100"}})
+	sql, err := BuildCountQuery(testEntity, url.Values{"$filter": {"revenue gt 100"}}, 0)
 	if err != nil {
 		t.Fatalf("BuildCountQuery: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestBuildCountQuery_WithFilter(t *testing.T) {
 
 func TestBuildQuery_InvalidFilter(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$filter": {")))invalid"}})
+	_, err := BuildQuery(testEntity, url.Values{"$filter": {")))invalid"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for invalid filter")
 	}
@@ -284,7 +284,7 @@ func TestBuildQuery_InvalidFilter(t *testing.T) {
 
 func TestBuildQuery_InvalidTop(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$top": {"abc"}})
+	_, err := BuildQuery(testEntity, url.Values{"$top": {"abc"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for invalid top")
 	}
@@ -645,7 +645,7 @@ func TestQuoteIdent(t *testing.T) {
 
 func TestBuildQuery_FilterIn(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name in ('Alice','Bob')"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name in ('Alice','Bob')"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestBuildQuery_FilterIn(t *testing.T) {
 
 func TestBuildQuery_FilterInSingle(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name in ('Alice')"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"name in ('Alice')"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestBuildQuery_FilterInSingle(t *testing.T) {
 
 func TestBuildQuery_FilterInUnknownCol(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$filter": {"fake in ('x')"}})
+	_, err := BuildQuery(testEntity, url.Values{"$filter": {"fake in ('x')"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column in 'in'")
 	}
@@ -675,7 +675,7 @@ func TestBuildQuery_FilterInUnknownCol(t *testing.T) {
 
 func TestBuildQuery_FilterContains(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(name,'Ali')"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(name,'Ali')"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -686,7 +686,7 @@ func TestBuildQuery_FilterContains(t *testing.T) {
 
 func TestBuildQuery_FilterStartsWith(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"startswith(name,'Ali')"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"startswith(name,'Ali')"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -697,7 +697,7 @@ func TestBuildQuery_FilterStartsWith(t *testing.T) {
 
 func TestBuildQuery_FilterEndsWith(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"endswith(name,'ce')"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"endswith(name,'ce')"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestBuildQuery_FilterEndsWith(t *testing.T) {
 
 func TestBuildQuery_FilterContainsAndEq(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(name,'A') and revenue gt 100"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(name,'A') and revenue gt 100"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -719,7 +719,7 @@ func TestBuildQuery_FilterContainsAndEq(t *testing.T) {
 
 func TestBuildQuery_FilterFuncUnknownCol(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(fake,'x')"}})
+	_, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(fake,'x')"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column in function")
 	}
@@ -727,7 +727,7 @@ func TestBuildQuery_FilterFuncUnknownCol(t *testing.T) {
 
 func TestBuildQuery_FilterUnsupportedFunc(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$filter": {"substringof('x',name)"}})
+	_, err := BuildQuery(testEntity, url.Values{"$filter": {"substringof('x',name)"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unsupported function")
 	}
@@ -737,7 +737,7 @@ func TestBuildQuery_FilterUnsupportedFunc(t *testing.T) {
 
 func TestBuildQuery_FilterToLower(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"tolower(name) eq 'alice'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"tolower(name) eq 'alice'"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -748,7 +748,7 @@ func TestBuildQuery_FilterToLower(t *testing.T) {
 
 func TestBuildQuery_FilterToUpper(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"toupper(name) eq 'ALICE'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"toupper(name) eq 'ALICE'"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestBuildQuery_FilterToUpper(t *testing.T) {
 
 func TestBuildQuery_FilterLength(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"length(name) gt 3"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"length(name) gt 3"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -770,7 +770,7 @@ func TestBuildQuery_FilterLength(t *testing.T) {
 
 func TestBuildQuery_FilterTrim(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"trim(name) eq 'Alice'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"trim(name) eq 'Alice'"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -781,7 +781,7 @@ func TestBuildQuery_FilterTrim(t *testing.T) {
 
 func TestBuildQuery_FilterConcat(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"concat(name,name) eq 'AliceAlice'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"concat(name,name) eq 'AliceAlice'"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -792,7 +792,7 @@ func TestBuildQuery_FilterConcat(t *testing.T) {
 
 func TestBuildQuery_FilterIndexOf(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"indexof(name,'li') eq 1"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"indexof(name,'li') eq 1"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -803,7 +803,7 @@ func TestBuildQuery_FilterIndexOf(t *testing.T) {
 
 func TestBuildQuery_FilterSubstring2(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"substring(name,1) eq 'lice'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"substring(name,1) eq 'lice'"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -814,7 +814,7 @@ func TestBuildQuery_FilterSubstring2(t *testing.T) {
 
 func TestBuildQuery_FilterSubstring3(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"substring(name,1,3) eq 'lic'"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"substring(name,1,3) eq 'lic'"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -825,7 +825,7 @@ func TestBuildQuery_FilterSubstring3(t *testing.T) {
 
 func TestBuildQuery_FilterYear(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"year(order_date) eq 2026"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"year(order_date) eq 2026"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -836,7 +836,7 @@ func TestBuildQuery_FilterYear(t *testing.T) {
 
 func TestBuildQuery_FilterMonth(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"month(order_date) eq 1"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"month(order_date) eq 1"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -847,7 +847,7 @@ func TestBuildQuery_FilterMonth(t *testing.T) {
 
 func TestBuildQuery_FilterRound(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"round(revenue) eq 100"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"round(revenue) eq 100"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -858,7 +858,7 @@ func TestBuildQuery_FilterRound(t *testing.T) {
 
 func TestBuildQuery_FilterFloor(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"floor(revenue) eq 99"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"floor(revenue) eq 99"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -869,7 +869,7 @@ func TestBuildQuery_FilterFloor(t *testing.T) {
 
 func TestBuildQuery_FilterCeiling(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"ceiling(revenue) eq 100"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"ceiling(revenue) eq 100"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -880,7 +880,7 @@ func TestBuildQuery_FilterCeiling(t *testing.T) {
 
 func TestBuildQuery_FilterArithAdd(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue add 10 gt 100"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue add 10 gt 100"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -891,7 +891,7 @@ func TestBuildQuery_FilterArithAdd(t *testing.T) {
 
 func TestBuildQuery_FilterArithSub(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue sub 10 gt 100"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue sub 10 gt 100"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestBuildQuery_FilterArithSub(t *testing.T) {
 
 func TestBuildQuery_FilterArithMul(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue mul 2 gt 100"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue mul 2 gt 100"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -913,7 +913,7 @@ func TestBuildQuery_FilterArithMul(t *testing.T) {
 
 func TestBuildQuery_FilterArithMod(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue mod 10 eq 0"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"revenue mod 10 eq 0"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -924,7 +924,7 @@ func TestBuildQuery_FilterArithMod(t *testing.T) {
 
 func TestBuildQuery_FilterNestedFunc(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(tolower(name),'alice')"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"contains(tolower(name),'alice')"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -935,7 +935,7 @@ func TestBuildQuery_FilterNestedFunc(t *testing.T) {
 
 func TestBuildQuery_FilterNow(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"order_date lt now()"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$filter": {"order_date lt now()"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -952,7 +952,7 @@ func TestBuildSingleEntityQuery_Numeric(t *testing.T) {
 		Schema: "raw", Table: "orders", KeyColumn: "id",
 		Columns: []ColumnSchema{{Name: "id", Type: "INTEGER", EdmType: "Edm.Int32"}, {Name: "name", Type: "VARCHAR", EdmType: "Edm.String"}},
 	}
-	sql, err := BuildSingleEntityQuery(entity, "42")
+	sql, err := BuildSingleEntityQuery(entity, "42", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -967,7 +967,7 @@ func TestBuildSingleEntityQuery_String(t *testing.T) {
 		Schema: "raw", Table: "orders", KeyColumn: "name",
 		Columns: []ColumnSchema{{Name: "name", Type: "VARCHAR", EdmType: "Edm.String"}},
 	}
-	sql, err := BuildSingleEntityQuery(entity, "'Alice'")
+	sql, err := BuildSingleEntityQuery(entity, "'Alice'", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -982,7 +982,7 @@ func TestBuildSingleEntityQuery_InvalidNumeric(t *testing.T) {
 		Schema: "raw", Table: "orders", KeyColumn: "id",
 		Columns: []ColumnSchema{{Name: "id", Type: "INTEGER", EdmType: "Edm.Int32"}},
 	}
-	_, err := BuildSingleEntityQuery(entity, "abc")
+	_, err := BuildSingleEntityQuery(entity, "abc", 0)
 	if err == nil {
 		t.Fatal("expected error for non-numeric key")
 	}
@@ -994,7 +994,7 @@ func TestBuildSingleEntityQuery_SQLInjection(t *testing.T) {
 		Schema: "raw", Table: "orders", KeyColumn: "name",
 		Columns: []ColumnSchema{{Name: "name", Type: "VARCHAR", EdmType: "Edm.String"}},
 	}
-	sql, err := BuildSingleEntityQuery(entity, "'Alice'; DROP TABLE--'")
+	sql, err := BuildSingleEntityQuery(entity, "'Alice'; DROP TABLE--'", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1007,7 +1007,7 @@ func TestBuildSingleEntityQuery_SQLInjection(t *testing.T) {
 
 func TestBuildQuery_Search(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$search": {"alice"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$search": {"alice"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1018,7 +1018,7 @@ func TestBuildQuery_Search(t *testing.T) {
 
 func TestBuildQuery_Apply_Aggregate(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate(revenue with sum as total)"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate(revenue with sum as total)"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1029,7 +1029,7 @@ func TestBuildQuery_Apply_Aggregate(t *testing.T) {
 
 func TestBuildQuery_Apply_GroupBy(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$apply": {"groupby((name),aggregate(revenue with sum as total))"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$apply": {"groupby((name),aggregate(revenue with sum as total))"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1040,7 +1040,7 @@ func TestBuildQuery_Apply_GroupBy(t *testing.T) {
 
 func TestBuildQuery_Apply_Count(t *testing.T) {
 	t.Parallel()
-	sql, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate($count as total)"}})
+	sql, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate($count as total)"}}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1051,7 +1051,7 @@ func TestBuildQuery_Apply_Count(t *testing.T) {
 
 func TestBuildQuery_Apply_InvalidCol(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate(fake with sum as total)"}})
+	_, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate(fake with sum as total)"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column in aggregate")
 	}
@@ -1062,7 +1062,7 @@ func TestBuildQuery_Apply_OrderByAlias(t *testing.T) {
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$apply":   {"aggregate(revenue with sum as total)"},
 		"$orderby": {"total desc"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1076,7 +1076,7 @@ func TestBuildQuery_Apply_OrderByUnknownAlias(t *testing.T) {
 	_, err := BuildQuery(testEntity, url.Values{
 		"$apply":   {"aggregate(revenue with sum as total)"},
 		"$orderby": {"fake desc"},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown alias in $orderby after $apply")
 	}
@@ -1090,7 +1090,7 @@ func TestBuildQuery_Apply_OrderByInvalidDirection(t *testing.T) {
 	_, err := BuildQuery(testEntity, url.Values{
 		"$apply":   {"aggregate(revenue with sum as total)"},
 		"$orderby": {"total sideways"},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatal("expected error for invalid direction after $apply")
 	}
@@ -1098,7 +1098,7 @@ func TestBuildQuery_Apply_OrderByInvalidDirection(t *testing.T) {
 
 func TestBuildQuery_Apply_EmptyAggregate(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate()"}})
+	_, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate()"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for empty aggregate")
 	}
@@ -1106,7 +1106,7 @@ func TestBuildQuery_Apply_EmptyAggregate(t *testing.T) {
 
 func TestBuildQuery_Apply_EmptyGroupBy(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$apply": {"groupby(())"}})
+	_, err := BuildQuery(testEntity, url.Values{"$apply": {"groupby(())"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for empty groupby")
 	}
@@ -1114,7 +1114,7 @@ func TestBuildQuery_Apply_EmptyGroupBy(t *testing.T) {
 
 func TestBuildQuery_Apply_MalformedAggregate(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate("}})
+	_, err := BuildQuery(testEntity, url.Values{"$apply": {"aggregate("}}, 0)
 	if err == nil {
 		t.Fatal("expected error for malformed aggregate")
 	}
@@ -1122,7 +1122,7 @@ func TestBuildQuery_Apply_MalformedAggregate(t *testing.T) {
 
 func TestBuildQuery_Apply_UnknownTransformation(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$apply": {"groupby((name),bogus(revenue))"}})
+	_, err := BuildQuery(testEntity, url.Values{"$apply": {"groupby((name),bogus(revenue))"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown transformation after groupby")
 	}
@@ -1133,7 +1133,7 @@ func TestBuildQuery_Compute_WithSelect(t *testing.T) {
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$compute": {"revenue mul 2 as doubled"},
 		"$select":  {"name,doubled"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1147,7 +1147,7 @@ func TestBuildQuery_Compute_WithOrderBy(t *testing.T) {
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$compute": {"revenue mul 2 as doubled"},
 		"$orderby": {"doubled desc"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1161,7 +1161,7 @@ func TestBuildQuery_Compute_UnknownAlias(t *testing.T) {
 	_, err := BuildQuery(testEntity, url.Values{
 		"$compute": {"revenue mul 2 as doubled"},
 		"$select":  {"fake"},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column in $select")
 	}
@@ -1171,7 +1171,7 @@ func TestBuildQuery_Apply_AggregateAliasCollision(t *testing.T) {
 	t.Parallel()
 	_, err := BuildQuery(testEntity, url.Values{
 		"$apply": {"groupby((name),aggregate(revenue with sum as name))"},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatal("expected error for aggregate alias colliding with groupby column")
 	}
@@ -1181,7 +1181,7 @@ func TestBuildQuery_Apply_DuplicateAggregateAlias(t *testing.T) {
 	t.Parallel()
 	_, err := BuildQuery(testEntity, url.Values{
 		"$apply": {"aggregate(revenue with sum as total,revenue with avg as total)"},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatal("expected error for duplicate aggregate alias")
 	}
@@ -1193,7 +1193,7 @@ func TestBuildQuery_Compute_FilterAndSelect(t *testing.T) {
 		"$compute": {"revenue mul 2 as doubled"},
 		"$filter":  {"doubled gt 100"},
 		"$select":  {"name"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1210,7 +1210,7 @@ func TestBuildQuery_Compute_MultipleAliases(t *testing.T) {
 	t.Parallel()
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$compute": {"revenue mul 2 as doubled,revenue add 10 as plus_ten"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1224,7 +1224,7 @@ func TestBuildQuery_Compute_FilterOnly(t *testing.T) {
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$compute": {"revenue mul 2 as doubled"},
 		"$filter":  {"doubled gt 500"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1239,7 +1239,7 @@ func TestBuildQuery_Compute_OrderByOnly(t *testing.T) {
 		"$compute": {"revenue mul 2 as doubled"},
 		"$orderby": {"doubled desc"},
 		"$select":  {"name"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1250,7 +1250,7 @@ func TestBuildQuery_Compute_OrderByOnly(t *testing.T) {
 
 func TestBuildQuery_Compute_AliasCollision(t *testing.T) {
 	t.Parallel()
-	_, err := BuildQuery(testEntity, url.Values{"$compute": {"revenue mul 2 as name"}})
+	_, err := BuildQuery(testEntity, url.Values{"$compute": {"revenue mul 2 as name"}}, 0)
 	if err == nil {
 		t.Fatal("expected error for alias colliding with existing column")
 	}
@@ -1264,7 +1264,7 @@ func TestBuildQuery_Apply_WithFilter(t *testing.T) {
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$filter": {"name eq 'Alice'"},
 		"$apply":  {"aggregate(revenue with sum as total)"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1278,7 +1278,7 @@ func TestBuildQuery_Apply_WithSelect(t *testing.T) {
 	sql, err := BuildQuery(testEntity, url.Values{
 		"$apply":  {"aggregate(revenue with sum as total)"},
 		"$select": {"total"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1292,7 +1292,7 @@ func TestBuildQuery_Apply_WithSelectUnknown(t *testing.T) {
 	_, err := BuildQuery(testEntity, url.Values{
 		"$apply":  {"aggregate(revenue with sum as total)"},
 		"$select": {"fake"},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown column in $select after $apply")
 	}
@@ -1304,7 +1304,7 @@ func TestBuildQuery_Apply_WithTopSkip(t *testing.T) {
 		"$apply": {"groupby((name),aggregate(revenue with sum as total))"},
 		"$top":   {"2"},
 		"$skip":  {"1"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1319,7 +1319,7 @@ func TestBuildSingleEntityQuery_EscapedQuote(t *testing.T) {
 		Schema: "raw", Table: "orders", KeyColumn: "name",
 		Columns: []ColumnSchema{{Name: "name", Type: "VARCHAR", EdmType: "Edm.String"}},
 	}
-	sql, err := BuildSingleEntityQuery(entity, "'O''Reilly'")
+	sql, err := BuildSingleEntityQuery(entity, "'O''Reilly'", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1339,7 +1339,7 @@ func TestBuildSingleEntityQuery_Empty(t *testing.T) {
 		Schema: "raw", Table: "orders", KeyColumn: "id",
 		Columns: []ColumnSchema{{Name: "id", Type: "INTEGER", EdmType: "Edm.Int32"}},
 	}
-	_, err := BuildSingleEntityQuery(entity, "")
+	_, err := BuildSingleEntityQuery(entity, "", 0)
 	if err == nil {
 		t.Fatal("expected error for empty key")
 	}
