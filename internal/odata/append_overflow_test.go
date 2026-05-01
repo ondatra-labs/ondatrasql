@@ -62,3 +62,17 @@ func TestAppendODataAnnotation_LargeResponseDropsAnnotation(t *testing.T) {
 		t.Errorf("oversized input should pass through unchanged: got len=%d, want %d", len(out), len(data))
 	}
 }
+
+// TestAppendODataAnnotation_OverlargeOverheadDropsAnnotation pins the second
+// guard: when the key+value annotation overhead exceeds annotationOverheadBudget,
+// the function returns data unchanged. This is the guard that closes
+// CodeQL #6 by ensuring all three operands of the make() capacity addition
+// are bounded.
+func TestAppendODataAnnotation_OverlargeOverheadDropsAnnotation(t *testing.T) {
+	data := []byte("{}")
+	tooLargeValue := strings.Repeat("v", annotationOverheadBudget+1)
+	out := appendODataAnnotation(data, "@odata.deltaLink", tooLargeValue)
+	if len(out) != len(data) {
+		t.Errorf("oversized annotation overhead should pass through unchanged: got len=%d, want %d", len(out), len(data))
+	}
+}

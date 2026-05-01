@@ -738,7 +738,10 @@ func odataVersion(next http.Handler) http.Handler {
 // response is far above any reasonable response — if we ever see one it's
 // a symptom of a different problem and dropping the deltaLink annotation
 // is the right failure mode.
-const maxAnnotatedResponseSize = 1 << 30 // 1 GiB
+const (
+	maxAnnotatedResponseSize = 1 << 30 // 1 GiB — caps the response payload
+	annotationOverheadBudget = 1 << 16 // 64 KiB — caps key + JSON-encoded value
+)
 
 func appendODataAnnotation(data []byte, key, value string) []byte {
 	if len(data) == 0 || data[len(data)-1] != '}' {
@@ -749,7 +752,12 @@ func appendODataAnnotation(data []byte, key, value string) []byte {
 	}
 	encodedValue, _ := json.Marshal(value)
 	prefix := []byte(`,"` + key + `":`)
-	out := make([]byte, 0, len(data)+len(prefix)+len(encodedValue))
+	if len(prefix)+len(encodedValue) > annotationOverheadBudget {
+		return data
+	}
+	// Capacity = bounded payload + bounded overhead = (literal-bounded sum).
+	// Both addends are checked above, so the int addition can't approach overflow.
+	out := make([]byte, 0, len(data)+annotationOverheadBudget)
 	out = append(out, data[:len(data)-1]...)
 	out = append(out, prefix...)
 	out = append(out, encodedValue...)
