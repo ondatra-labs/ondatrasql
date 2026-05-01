@@ -385,6 +385,33 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				libCalls = append(libCalls, c)
 			}
 		}
+	}
+
+	// @fetch ↔ lib-call relationship rules. Enforced regardless of
+	// whether the lib registry is populated — a model with @fetch but
+	// no lib call is invalid even if the registry is empty (the user
+	// has declared a lib-backed model but provided no lib).
+	if model.Fetch && len(libCalls) == 0 {
+		return nil, fmt.Errorf("%s: @fetch model has no lib calls — add `FROM lib_name(...)` to the SELECT (lib functions live in lib/*.star), or remove @fetch", model.Target)
+	}
+	if !model.Fetch && len(libCalls) > 0 {
+		return nil, fmt.Errorf("%s: model contains lib call %q in FROM but lacks @fetch — add `-- @fetch` to the model header to declare it as a lib-backed fetch model", model.Target, libCalls[0].FuncName)
+	}
+
+	// Strict-schema validator activation is now @fetch-driven (was
+	// lib-call-detection-driven in v0.29 and earlier). The @fetch
+	// directive is the explicit declaration that this model produces
+	// its schema from SQL projections; the validator enforces the
+	// shape. After the relationship rules above, model.Fetch and
+	// len(libCalls) > 0 are equivalent — but the contract is now
+	// declared by the directive, not inferred from the FROM clause.
+	if model.Fetch {
+		if err := validateStrictLibSchema(parsedAST, libCalls); err != nil {
+			return nil, fmt.Errorf("%s: %w", model.Target, err)
+		}
+	}
+
+	if r.libRegistry != nil && !r.libRegistry.Empty() {
 		if len(libCalls) > 0 {
 				// Validate supported_kinds for fetch
 				for _, c := range libCalls {
@@ -400,13 +427,6 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 							return nil, fmt.Errorf("lib %s does not support @kind: %s (supported: %v)", c.FuncName, model.Kind, c.Lib.SupportedKinds)
 						}
 					}
-				}
-
-				// Strict lib schema: every projected column from a
-				// dynamic-column lib must be wrapped in an explicit cast.
-				// SQL is the schema authority for lib-backed models.
-				if err := validateStrictLibSchema(parsedAST, libCalls); err != nil {
-					return nil, fmt.Errorf("%s: %w", model.Target, err)
 				}
 
 				// Mark model as having lib calls so materialize knows
