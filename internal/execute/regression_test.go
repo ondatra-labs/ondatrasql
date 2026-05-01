@@ -586,95 +586,82 @@ func TestExtractTypedSelectColumns_NilAST(t *testing.T) {
 	}
 }
 
+// v0.30.0: normalizeType returns the DuckDB-native canonical type name as
+// a string. Width/precision distinctions (TINYINT vs BIGINT, FLOAT vs
+// DOUBLE, TIMESTAMP_NS vs TIMESTAMPTZ) are preserved — no collapse to
+// "integer" / "float" / "timestamp" + side-channel fields.
 func TestNormalizeType(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		duckdb   string
-		wantType string
+		duckdb string
+		want   string
 	}{
-		{"DECIMAL", "decimal"},
-		{"DECIMAL(18,2)", "decimal"},
-		{"NUMERIC(10,4)", "decimal"},
-		{"DOUBLE", "float"},
-		{"FLOAT", "float"},
-		{"REAL", "float"},
-		{"INTEGER", "integer"},
-		{"BIGINT", "integer"},
-		{"INT8", "integer"},
-		{"INT16", "integer"},
-		{"INT32", "integer"},
-		{"INT64", "integer"},
-		{"INT128", "integer"},
-		{"BOOLEAN", "boolean"},
-		{"LOGICAL", "boolean"},
-		{"JSON", "json"},
-		{"VARCHAR", "string"},
-		{"TEXT", "string"},
-		{"DATE", "date"},
-		{"TIME", "time"},
-		{"TIMESTAMP", "timestamp"},
-		{"TIMESTAMPTZ", "timestamp"},
-		{"TIMESTAMP_NS", "timestamp"},
-		{"UUID", "uuid"},
-		{"BLOB", "blob"},
-		{"LIST", "list"},
-		{"MAP", "map"},
-		{"STRUCT", "struct"},
-		{"BIT", "bit"},
-		{"UNKNOWN_TYPE", "string"},
+		// DECIMAL: precision/scale folded into the type syntax.
+		{"DECIMAL", "DECIMAL(18,3)"},
+		{"DECIMAL(18,2)", "DECIMAL(18,2)"},
+		{"NUMERIC(10,4)", "DECIMAL(10,4)"},
+		// Floats — distinct.
+		{"DOUBLE", "DOUBLE"},
+		{"FLOAT", "FLOAT"},
+		{"REAL", "FLOAT"},
+		// Integer width preserved.
+		{"INTEGER", "INTEGER"},
+		{"BIGINT", "BIGINT"},
+		{"INT8", "BIGINT"},
+		{"INT2", "SMALLINT"},
+		{"INT4", "INTEGER"},
+		{"INT64", "BIGINT"},
+		{"INT128", "HUGEINT"},
+		{"BOOLEAN", "BOOLEAN"},
+		{"LOGICAL", "BOOLEAN"},
+		{"JSON", "JSON"},
+		{"VARCHAR", "VARCHAR"},
+		{"TEXT", "VARCHAR"},
+		{"DATE", "DATE"},
+		{"TIME", "TIME"},
+		// Timestamp variants distinguished.
+		{"TIMESTAMP", "TIMESTAMP"},
+		{"TIMESTAMPTZ", "TIMESTAMPTZ"},
+		{"TIMESTAMP_NS", "TIMESTAMP_NS"},
+		{"TIMESTAMP_MS", "TIMESTAMP_MS"},
+		{"TIMESTAMP_S", "TIMESTAMP_S"},
+		{"UUID", "UUID"},
+		{"BLOB", "BLOB"},
+		// Composite keywords without structure info — return the bare keyword.
+		{"LIST", "LIST"},
+		{"MAP", "MAP"},
+		{"STRUCT", "STRUCT"},
+		{"BIT", "BIT"},
+		// Unknown → VARCHAR fallback.
+		{"UNKNOWN_TYPE", "VARCHAR"},
 	}
 	for _, tt := range tests {
-		result := normalizeType(tt.duckdb)
-		got := result["type"].(string)
-		if got != tt.wantType {
-			t.Errorf("normalizeType(%q) type = %q, want %q", tt.duckdb, got, tt.wantType)
+		got, ok := normalizeType(tt.duckdb).(string)
+		if !ok {
+			t.Errorf("normalizeType(%q) returned non-string %v", tt.duckdb, normalizeType(tt.duckdb))
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("normalizeType(%q) = %q, want %q", tt.duckdb, got, tt.want)
 		}
 	}
 }
 
 func TestNormalizeType_MalformedDecimal(t *testing.T) {
 	t.Parallel()
-	// Should not panic on malformed input
-	result := normalizeType("DECIMAL(18,2")
-	if result["type"] != "decimal" {
-		t.Errorf("malformed DECIMAL: type = %v, want decimal", result["type"])
+	// Should not panic on malformed input — defaults to DECIMAL(18,3).
+	if got := normalizeType("DECIMAL(18,2"); got != "DECIMAL(18,2)" && got != "DECIMAL(18,3)" {
+		// Either accept the parsed precision (18,2 from the open paren) or
+		// fall back to the default. Both are acceptable; what matters is
+		// no panic and the result is a DECIMAL string.
+		if s, ok := got.(string); !ok || !strings.HasPrefix(s, "DECIMAL(") {
+			t.Errorf("malformed DECIMAL: got %v", got)
+		}
 	}
-	result = normalizeType("DECIMAL(")
-	if result["type"] != "decimal" {
-		t.Errorf("DECIMAL(: type = %v, want decimal", result["type"])
-	}
-}
-
-func TestNormalizeType_DecimalPrecision(t *testing.T) {
-	t.Parallel()
-	result := normalizeType("DECIMAL(10,2)")
-	if result["precision"] != "10" || result["scale"] != "2" {
-		t.Errorf("DECIMAL(10,2): got precision=%v scale=%v", result["precision"], result["scale"])
-	}
-
-	// Bare DECIMAL defaults to 18,3
-	result = normalizeType("DECIMAL")
-	if result["precision"] != "18" || result["scale"] != "3" {
-		t.Errorf("DECIMAL: got precision=%v scale=%v", result["precision"], result["scale"])
-	}
-}
-
-func TestNormalizeType_Timestamp(t *testing.T) {
-	t.Parallel()
-	result := normalizeType("TIMESTAMPTZ")
-	if result["tz"] != true {
-		t.Errorf("TIMESTAMPTZ: tz = %v, want true", result["tz"])
-	}
-	if result["precision"] != "us" {
-		t.Errorf("TIMESTAMPTZ: precision = %v, want us", result["precision"])
-	}
-
-	result = normalizeType("TIMESTAMP_NS")
-	if result["tz"] != false {
-		t.Errorf("TIMESTAMP_NS: tz = %v, want false", result["tz"])
-	}
-	if result["precision"] != "ns" {
-		t.Errorf("TIMESTAMP_NS: precision = %v, want ns", result["precision"])
+	if got := normalizeType("DECIMAL("); got != "DECIMAL(18,3)" {
+		if s, ok := got.(string); !ok || !strings.HasPrefix(s, "DECIMAL(") {
+			t.Errorf("DECIMAL(: got %v", got)
+		}
 	}
 }
 

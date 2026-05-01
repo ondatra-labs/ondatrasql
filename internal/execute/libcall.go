@@ -329,14 +329,21 @@ func matchColumns(ast *duckast.AST, lib *libregistry.LibFunc, alias string, sing
 	return cols, nil
 }
 
-// normalizeType maps a DuckDB type name to a normalized type representation.
-// Returns a map with "type" and optional extra fields (precision, scale, tz, etc.).
-func normalizeType(duckdbType string) map[string]any {
+// canonicalDuckType maps a DuckDB type name (and its many aliases) to its
+// canonical DuckDB-native syntax. The canonical name is what surfaces in
+// the column dict's `type` field for primitive types; blueprints can pass
+// it back into DuckDB (json_transform, CAST, etc.) without translation.
+//
+// Information-preserving: integer width (TINYINT/SMALLINT/INTEGER/BIGINT/
+// HUGEINT and unsigned variants), float precision (FLOAT vs DOUBLE), and
+// timestamp variants are kept distinct. The previous design collapsed all
+// of these to "integer" / "float" / "timestamp" + side-channel fields,
+// losing width/precision in the column dict.
+func canonicalDuckType(duckdbType string) string {
 	upper := strings.ToUpper(strings.TrimSpace(duckdbType))
 
-	// DECIMAL(p,s) / NUMERIC(p,s)
+	// DECIMAL(p,s) / NUMERIC(p,s) — DECIMAL is canonical, precision/scale stay in the syntax
 	if strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC") {
-		result := map[string]any{"type": "decimal", "json_schema_type": "number"}
 		if idx := strings.Index(upper, "("); idx >= 0 {
 			endIdx := strings.Index(upper, ")")
 			if endIdx < 0 {
@@ -344,112 +351,109 @@ func normalizeType(duckdbType string) map[string]any {
 			}
 			inner := upper[idx+1 : endIdx]
 			parts := strings.Split(inner, ",")
-			if len(parts) >= 1 {
-				result["precision"] = strings.TrimSpace(parts[0])
+			precision := strings.TrimSpace(parts[0])
+			if precision == "" {
+				return "DECIMAL(18,3)"
 			}
 			if len(parts) >= 2 {
-				result["scale"] = strings.TrimSpace(parts[1])
+				return "DECIMAL(" + precision + "," + strings.TrimSpace(parts[1]) + ")"
 			}
-		} else {
-			result["precision"] = "18"
-			result["scale"] = "3"
+			return "DECIMAL(" + precision + ",0)"
 		}
-		return result
+		// Bare DECIMAL — DuckDB defaults; expose as DECIMAL(18,3) explicitly.
+		return "DECIMAL(18,3)"
 	}
 
-	// Timestamp variants
-	switch upper {
-	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
-		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": true, "precision": "us"}
-	case "TIMESTAMP_NS":
-		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "ns"}
-	case "TIMESTAMP_MS":
-		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "ms"}
-	case "TIMESTAMP_S":
-		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "s"}
-	case "TIMESTAMP", "DATETIME", "TIMESTAMP_US":
-		return map[string]any{"type": "timestamp", "json_schema_type": "string", "tz": false, "precision": "us"}
-	}
-
-	// Simple type mapping
-	simpleMap := map[string]string{
-		// Integers
-		"TINYINT": "integer", "INT1": "integer",
-		"SMALLINT": "integer", "INT2": "integer", "INT16": "integer", "SHORT": "integer",
-		"INTEGER": "integer", "INT": "integer", "INT4": "integer", "INT32": "integer", "SIGNED": "integer",
-		"BIGINT": "integer", "INT8": "integer", "INT64": "integer", "LONG": "integer",
-		"HUGEINT": "integer", "INT128": "integer",
-		"UTINYINT":  "integer", "UINT8": "integer",
-		"USMALLINT": "integer", "UINT16": "integer",
-		"UINTEGER":  "integer", "UINT32": "integer",
-		"UBIGINT":   "integer", "UINT64": "integer",
-		"UHUGEINT":  "integer", "UINT128": "integer",
+	// Aliases → canonical DuckDB syntax. Width/precision distinctions are
+	// preserved (no collapse to "integer" / "float").
+	canonical := map[string]string{
+		// Signed integers
+		"TINYINT": "TINYINT", "INT1": "TINYINT",
+		"SMALLINT": "SMALLINT", "INT2": "SMALLINT", "INT16": "SMALLINT", "SHORT": "SMALLINT",
+		"INTEGER": "INTEGER", "INT": "INTEGER", "INT4": "INTEGER", "INT32": "INTEGER", "SIGNED": "INTEGER",
+		"BIGINT": "BIGINT", "INT8": "BIGINT", "INT64": "BIGINT", "LONG": "BIGINT",
+		"HUGEINT": "HUGEINT", "INT128": "HUGEINT",
+		// Unsigned integers
+		"UTINYINT": "UTINYINT", "UINT8": "UTINYINT",
+		"USMALLINT": "USMALLINT", "UINT16": "USMALLINT",
+		"UINTEGER": "UINTEGER", "UINT32": "UINTEGER",
+		"UBIGINT": "UBIGINT", "UINT64": "UBIGINT",
+		"UHUGEINT": "UHUGEINT", "UINT128": "UHUGEINT",
 		// Floats
-		"FLOAT": "float", "FLOAT4": "float", "REAL": "float",
-		"DOUBLE": "float", "FLOAT8": "float",
+		"FLOAT": "FLOAT", "FLOAT4": "FLOAT", "REAL": "FLOAT",
+		"DOUBLE": "DOUBLE", "FLOAT8": "DOUBLE",
 		// Boolean
-		"BOOLEAN": "boolean", "BOOL": "boolean", "LOGICAL": "boolean",
-		// Temporal
-		"DATE":                "date",
-		"TIME":                "time",
-		"TIMETZ":              "time",
-		"TIME WITH TIME ZONE": "time",
-		"TIME_NS":             "time",
-		"INTERVAL":            "interval",
+		"BOOLEAN": "BOOLEAN", "BOOL": "BOOLEAN", "LOGICAL": "BOOLEAN",
+		// Temporal — variants kept distinct (DuckDB-native names)
+		"DATE":                            "DATE",
+		"TIME":                            "TIME",
+		"TIMETZ":                          "TIMETZ",
+		"TIME WITH TIME ZONE":             "TIMETZ",
+		"TIME_NS":                         "TIME_NS",
+		"TIMESTAMP":                       "TIMESTAMP",
+		"DATETIME":                        "TIMESTAMP",
+		"TIMESTAMP_US":                    "TIMESTAMP",
+		"TIMESTAMPTZ":                     "TIMESTAMPTZ",
+		"TIMESTAMP WITH TIME ZONE":        "TIMESTAMPTZ",
+		"TIMESTAMP_NS":                    "TIMESTAMP_NS",
+		"TIMESTAMP_MS":                    "TIMESTAMP_MS",
+		"TIMESTAMP_S":                     "TIMESTAMP_S",
+		"INTERVAL":                        "INTERVAL",
 		// Text
-		"VARCHAR": "string", "CHAR": "string", "BPCHAR": "string",
-		"TEXT": "string", "STRING": "string", "NVARCHAR": "string",
-		// Structured
-		"JSON": "json",
-		"UUID": "uuid",
-		"BLOB": "blob", "BYTEA": "blob", "BINARY": "blob", "VARBINARY": "blob",
-		"BIT": "bit", "BITSTRING": "bit",
-		// Composite (simple fallback — recursive extraction via normalizeTypeFromAST)
-		"LIST": "list", "ARRAY": "list",
-		"MAP":     "map",
-		"STRUCT":  "struct", "ROW": "struct",
-		"UNION":   "union",
-		"VARIANT": "variant",
-		// Bignum / decimal aliases
-		"BIGNUM": "decimal", "DEC": "decimal",
-		// Integer aliases
-		"INTEGRAL": "integer", "OID": "integer",
-		// Enum
-		"ENUM": "string",
+		"VARCHAR": "VARCHAR", "CHAR": "VARCHAR", "BPCHAR": "VARCHAR",
+		"TEXT": "VARCHAR", "STRING": "VARCHAR", "NVARCHAR": "VARCHAR",
+		// Other primitives
+		"JSON": "JSON",
+		"UUID": "UUID",
+		"BLOB": "BLOB", "BYTEA": "BLOB", "BINARY": "BLOB", "VARBINARY": "BLOB",
+		"BIT": "BIT", "BITSTRING": "BIT",
+		"ENUM": "VARCHAR", // ENUM materialized values are strings
 	}
 
-	if mapped, ok := simpleMap[upper]; ok {
-		return map[string]any{"type": mapped, "json_schema_type": toJSONSchemaType(mapped)}
+	if c, ok := canonical[upper]; ok {
+		return c
 	}
 
-	// Unrecognized — default to string
-	return map[string]any{"type": "string", "json_schema_type": "string"}
+	// Unrecognized → VARCHAR (catch-all primitive in DuckDB).
+	return "VARCHAR"
 }
 
-// toJSONSchemaType maps a normalized type to its JSON Schema equivalent.
-// JSON Schema has: string, number, integer, boolean, array, object, null.
-func toJSONSchemaType(normalized string) string {
-	switch normalized {
-	case "integer":
-		return "integer"
-	case "float", "decimal":
-		return "number"
-	case "boolean":
-		return "boolean"
-	case "json", "list":
-		return "array"
-	case "map", "struct":
-		return "object"
-	default:
-		return "string"
+// normalizeType maps a DuckDB type name to a DuckDB-native type value
+// suitable for a column dict's `type` field. For primitives this is just
+// the canonical type name as a string. Composite types (LIST, STRUCT,
+// MAP, UNION) reach this path only when extracted by name without
+// structure info — return the bare keyword string and let
+// normalizeTypeFromAST handle the structured variant.
+func normalizeType(duckdbType string) any {
+	upper := strings.ToUpper(strings.TrimSpace(duckdbType))
+	switch upper {
+	case "LIST", "ARRAY":
+		return "LIST"
+	case "MAP":
+		return "MAP"
+	case "STRUCT", "ROW":
+		return "STRUCT"
+	case "UNION":
+		return "UNION"
+	case "VARIANT":
+		return "VARIANT"
 	}
+	return canonicalDuckType(duckdbType)
 }
 
-// normalizeTypeFromAST extracts a normalized type from a DuckDB cast_type AST node.
-// Handles composite types recursively: LIST element, STRUCT fields, MAP key/value.
-func normalizeTypeFromAST(castType *duckast.Node) map[string]any {
+// normalizeTypeFromAST extracts a DuckDB-native type from a cast_type AST
+// node. The shape mirrors DuckDB's `json_structure` output:
+//
+//	primitive  → DuckDB-syntax string ("VARCHAR", "BIGINT", "DECIMAL(18,3)", "TIMESTAMPTZ")
+//	LIST       → []any with one element: [<inner type>]
+//	STRUCT     → map[string]any with field name → field type
+//	MAP/UNION  → DuckDB-syntax string (e.g. "MAP(VARCHAR, BIGINT)", "UNION(name VARCHAR, ...)")
+//
+// Composite types nest naturally — LIST of STRUCT becomes
+// `[{"f1": "VARCHAR", "f2": ["BIGINT"]}]`.
+func normalizeTypeFromAST(castType *duckast.Node) any {
 	if castType == nil {
-		return map[string]any{"type": "string", "json_schema_type": "string"}
+		return "VARCHAR"
 	}
 
 	id := castType.String("id")
@@ -457,102 +461,119 @@ func normalizeTypeFromAST(castType *duckast.Node) map[string]any {
 
 	switch id {
 	case "LIST", "ARRAY":
-		result := map[string]any{"type": "list", "json_schema_type": "array"}
 		if typeInfo != nil {
 			childType := typeInfo.Field("child_type")
 			if childType != nil {
-				result["element"] = normalizeTypeFromAST(childType)
+				return []any{normalizeTypeFromAST(childType)}
 			}
 		}
-		return result
+		return []any{"VARCHAR"}
 
 	case "STRUCT":
-		result := map[string]any{"type": "struct", "json_schema_type": "object"}
+		fields := map[string]any{}
 		if typeInfo != nil {
-			childTypes := typeInfo.FieldList("child_types")
-			var fields []any
-			for _, ct := range childTypes {
+			for _, ct := range typeInfo.FieldList("child_types") {
 				fieldName := ct.String("first")
 				fieldType := ct.Field("second")
-				field := normalizeTypeFromAST(fieldType)
-				field["name"] = fieldName
-				fields = append(fields, field)
-			}
-			if len(fields) > 0 {
-				result["fields"] = fields
+				if fieldName != "" {
+					fields[fieldName] = normalizeTypeFromAST(fieldType)
+				}
 			}
 		}
-		return result
+		return fields
 
 	case "MAP":
-		// DuckDB internally represents MAP as LIST(STRUCT(key, value))
-		result := map[string]any{"type": "map", "json_schema_type": "object"}
+		// DuckDB stores MAP as LIST(STRUCT(key, value)). Reconstruct the
+		// MAP(K, V) syntax string from the wrapped struct.
+		key := "VARCHAR"
+		value := "VARCHAR"
 		if typeInfo != nil {
-			childType := typeInfo.Field("child_type")
-			if childType != nil {
-				structInfo := childType.Field("type_info")
-				if structInfo != nil {
-					childTypes := structInfo.FieldList("child_types")
-					for _, ct := range childTypes {
+			if childType := typeInfo.Field("child_type"); childType != nil {
+				if structInfo := childType.Field("type_info"); structInfo != nil {
+					for _, ct := range structInfo.FieldList("child_types") {
 						name := ct.String("first")
 						typeNode := ct.Field("second")
-						if name == "key" {
-							result["key"] = normalizeTypeFromAST(typeNode)
-						} else if name == "value" {
-							result["value"] = normalizeTypeFromAST(typeNode)
+						switch name {
+						case "key":
+							key = duckTypeToString(normalizeTypeFromAST(typeNode))
+						case "value":
+							value = duckTypeToString(normalizeTypeFromAST(typeNode))
 						}
 					}
 				}
 			}
 		}
-		return result
+		return "MAP(" + key + ", " + value + ")"
 
 	case "UNION":
-		result := map[string]any{"type": "union", "json_schema_type": "string"}
+		var members []string
 		if typeInfo != nil {
-			childTypes := typeInfo.FieldList("child_types")
-			var members []any
-			for _, ct := range childTypes {
+			for _, ct := range typeInfo.FieldList("child_types") {
 				memberName := ct.String("first")
 				memberType := ct.Field("second")
-				member := normalizeTypeFromAST(memberType)
-				member["name"] = memberName
-				members = append(members, member)
-			}
-			if len(members) > 0 {
-				result["members"] = members
+				memberStr := duckTypeToString(normalizeTypeFromAST(memberType))
+				if memberName != "" {
+					members = append(members, memberName+" "+memberStr)
+				} else {
+					members = append(members, memberStr)
+				}
 			}
 		}
-		return result
+		return "UNION(" + strings.Join(members, ", ") + ")"
 
 	case "DECIMAL", "NUMERIC":
-		result := map[string]any{"type": "decimal", "json_schema_type": "number"}
+		precision := "18"
+		scale := "3"
 		if typeInfo != nil {
 			if w := typeInfo.String("width"); w != "" {
-				result["precision"] = w
+				precision = w
 			}
 			if s := typeInfo.String("scale"); s != "" {
-				result["scale"] = s
+				scale = s
 			}
 		}
-		if result["precision"] == nil {
-			result["precision"] = "18"
-			result["scale"] = "3"
-		}
-		return result
+		return "DECIMAL(" + precision + "," + scale + ")"
 
 	case "UNBOUND":
-		// User-defined types (JSON, etc.)
+		// User-defined types (JSON, etc.) — name lives in type_info.
 		if typeInfo != nil {
 			if name := typeInfo.String("name"); name != "" {
 				return normalizeType(name)
 			}
 		}
-		return map[string]any{"type": "string", "json_schema_type": "string"}
+		return "VARCHAR"
 
 	default:
 		return normalizeType(id)
 	}
+}
+
+// duckTypeToString flattens a possibly-composite type back to a single
+// DuckDB-syntax string. Used to inline LIST/STRUCT into MAP/UNION's
+// string syntax (which doesn't have a dict/list shape of its own).
+func duckTypeToString(t any) string {
+	switch v := t.(type) {
+	case string:
+		return v
+	case []any:
+		if len(v) == 0 {
+			return "LIST(VARCHAR)"
+		}
+		return "LIST(" + duckTypeToString(v[0]) + ")"
+	case map[string]any:
+		// STRUCT — sort keys for deterministic output.
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, k+" "+duckTypeToString(v[k]))
+		}
+		return "STRUCT(" + strings.Join(parts, ", ") + ")"
+	}
+	return "VARCHAR"
 }
 
 // extractTypedSelectColumns extracts column names and normalized types from the SELECT list.
@@ -575,8 +596,7 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 	var result []any
 	for _, item := range selectList {
 		var name string
-
-		var normalized map[string]any
+		var typeValue any
 
 		if item.Class() == "CAST" {
 			// `SELECT col::TYPE AS alias` — type comes from the cast,
@@ -587,7 +607,7 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 			// can rename columns at projection time without changing
 			// what they fetch.
 			castType := item.Field("cast_type")
-			normalized = normalizeTypeFromAST(castType)
+			typeValue = normalizeTypeFromAST(castType)
 			child := item.Field("child")
 			if child != nil && child.Class() == "COLUMN_REF" {
 				names := child.ColumnNames()
@@ -600,17 +620,19 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 			if len(names) > 0 {
 				name = names[len(names)-1]
 			}
-			normalized = map[string]any{"type": "string"}
+			typeValue = "VARCHAR"
 		} else {
 			if alias := item.Alias(); alias != "" {
 				name = alias
 			}
-			normalized = map[string]any{"type": "string"}
+			typeValue = "VARCHAR"
 		}
 
 		if name != "" {
-			normalized["name"] = name
-			result = append(result, normalized)
+			result = append(result, map[string]any{
+				"name": name,
+				"type": typeValue,
+			})
 		}
 	}
 	return result

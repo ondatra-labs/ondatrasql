@@ -30,19 +30,22 @@ func TestExtractTypedSelectColumns_CastTypes(t *testing.T) {
 		t.Fatalf("got %d columns, want 3", len(cols))
 	}
 
+	// v0.30.0: types are DuckDB-native syntax strings. DECIMAL carries
+	// precision/scale in the type itself; bare COLUMN_REF (no cast) is
+	// VARCHAR (the catch-all).
 	col0 := cols[0].(map[string]any)
-	if col0["name"] != "total" || col0["type"] != "decimal" {
-		t.Errorf("col 0: name=%v type=%v, want total/decimal", col0["name"], col0["type"])
+	if col0["name"] != "total" || col0["type"] != "DECIMAL(18,3)" {
+		t.Errorf("col 0: name=%v type=%v, want total/DECIMAL(18,3)", col0["name"], col0["type"])
 	}
 
 	col1 := cols[1].(map[string]any)
-	if col1["name"] != "qty" || col1["type"] != "integer" {
-		t.Errorf("col 1: name=%v type=%v, want qty/integer", col1["name"], col1["type"])
+	if col1["name"] != "qty" || col1["type"] != "INTEGER" {
+		t.Errorf("col 1: name=%v type=%v, want qty/INTEGER", col1["name"], col1["type"])
 	}
 
 	col2 := cols[2].(map[string]any)
-	if col2["name"] != "name" || col2["type"] != "string" {
-		t.Errorf("col 2: name=%v type=%v, want name/string", col2["name"], col2["type"])
+	if col2["name"] != "name" || col2["type"] != "VARCHAR" {
+		t.Errorf("col 2: name=%v type=%v, want name/VARCHAR", col2["name"], col2["type"])
 	}
 }
 
@@ -99,8 +102,8 @@ func TestExtractTypedSelectColumns_AliasDoesNotOverride(t *testing.T) {
 	if col["name"] != "price" {
 		t.Errorf("name = %v, want price (cast source — alias should NOT override the column dict)", col["name"])
 	}
-	if col["type"] != "float" {
-		t.Errorf("type = %v, want float", col["type"])
+	if col["type"] != "DOUBLE" {
+		t.Errorf("type = %v, want DOUBLE", col["type"])
 	}
 }
 
@@ -115,8 +118,8 @@ func TestExtractTypedSelectColumns_NoCast(t *testing.T) {
 	}
 	for _, c := range cols {
 		col := c.(map[string]any)
-		if col["type"] != "string" {
-			t.Errorf("col %v: type = %v, want string (no cast)", col["name"], col["type"])
+		if col["type"] != "VARCHAR" {
+			t.Errorf("col %v: type = %v, want VARCHAR (no cast → DuckDB-native catch-all)", col["name"], col["type"])
 		}
 	}
 }
