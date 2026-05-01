@@ -719,6 +719,17 @@ func validateStrictLibSchema(ast *duckast.AST, libCalls []LibCall) error {
 		return nil
 	}
 
+	// Top-level FROM-clause and modifier rules — only meaningful at the
+	// statement root. Inner SELECTs (CTEs, subqueries, set-op branches)
+	// are caught by the per-projection walk below.
+	stmts := ast.Statements()
+	if len(stmts) > 0 {
+		root := stmts[0]
+		if err := validateFetchTopLevel(root); err != nil {
+			return err
+		}
+	}
+
 	var validationErr error
 	ast.Walk(func(n *duckast.Node) bool {
 		if validationErr != nil {
@@ -727,7 +738,7 @@ func validateStrictLibSchema(ast *duckast.AST, libCalls []LibCall) error {
 		if !n.IsSelectNode() {
 			return true
 		}
-		if err := validateSelectProjections(n); err != nil {
+		if err := validateSelectProjections(n, true /* fetchMode */); err != nil {
 			validationErr = err
 			return false
 		}
@@ -736,17 +747,112 @@ func validateStrictLibSchema(ast *duckast.AST, libCalls []LibCall) error {
 	return validationErr
 }
 
+// validateFetchTopLevel enforces the @fetch rules that only apply to the
+// root statement: from_table must be a single TABLE_FUNCTION (no JOIN, no
+// regular table, no subquery), no WHERE, no GROUP BY, no DISTINCT, no
+// ORDER BY. Inner CTEs/subqueries are unreachable under these rules
+// because the from_table is constrained to TABLE_FUNCTION.
+func validateFetchTopLevel(root *duckast.Node) error {
+	if root.IsNil() {
+		return nil
+	}
+	if root.IsSetOpNode() {
+		return fmt.Errorf(
+			"@fetch models cannot use UNION/INTERSECT/EXCEPT — a @fetch model is exactly one SELECT against one lib call",
+		)
+	}
+	if !root.IsSelectNode() {
+		return nil
+	}
+
+	// FROM clause: must be exactly one TABLE_FUNCTION.
+	from := root.FromTable()
+	if !from.IsNil() {
+		switch {
+		case from.IsJoin():
+			return fmt.Errorf(
+				"@fetch models must have exactly one lib call in FROM — JOIN is not allowed. Materialize the lib first, then JOIN in a downstream model.",
+			)
+		case from.NodeType() == "BASE_TABLE":
+			return fmt.Errorf(
+				"@fetch models must have exactly one lib call in FROM — `FROM <table>` is not allowed. Lib functions live in lib/*.star and are called as `FROM lib_name(...)`.",
+			)
+		case from.NodeType() == "SUBQUERY":
+			return fmt.Errorf(
+				"@fetch models must have exactly one lib call in FROM — subqueries in FROM are not allowed. Move the subquery to a downstream model.",
+			)
+		case from.NodeType() == "EMPTY":
+			return fmt.Errorf(
+				"@fetch models require a `FROM lib_name(...)` — the SELECT has no FROM clause",
+			)
+		}
+		// TABLE_FUNCTION is the only allowed shape; others fall through
+		// to the per-projection walk which will catch them via cast/alias
+		// checks. We don't enumerate every from-table type here — new
+		// DuckDB shapes should not silently slip through.
+	}
+
+	// WHERE clause — incremental cursor is directive-driven, filtering
+	// belongs in lib args or downstream models.
+	if !root.WhereClause().IsNil() {
+		return fmt.Errorf(
+			"@fetch models cannot use WHERE — incremental cursor is directive-driven (@incremental), filtering belongs in lib args or downstream models",
+		)
+	}
+
+	// GROUP BY — fetch is a passthrough projection of API rows.
+	if len(root.FieldList("group_expressions")) > 0 {
+		return fmt.Errorf(
+			"@fetch models cannot use GROUP BY — push aggregation to a downstream model that reads from this @fetch table",
+		)
+	}
+
+	// DISTINCT and ORDER BY — appear as modifiers on the SELECT_NODE.
+	for _, mod := range root.Modifiers() {
+		switch mod.NodeType() {
+		case "DISTINCT_MODIFIER":
+			return fmt.Errorf(
+				"@fetch models cannot use DISTINCT — push deduplication to a downstream model",
+			)
+		case "ORDER_MODIFIER":
+			return fmt.Errorf(
+				"@fetch models cannot use ORDER BY — ordering belongs in downstream models",
+			)
+		}
+		// LIMIT_MODIFIER is rejected by the cross-cutting
+		// validateNoLimitOffset check that runs before this validator.
+	}
+
+	return nil
+}
+
 // validateSelectProjections applies the strict-schema rules to a single
 // SELECT_NODE's select list. Used by validateStrictLibSchema for every
 // SELECT_NODE in the AST (including those inside CTEs, set-op branches,
 // and subqueries).
-func validateSelectProjections(selectNode *duckast.Node) error {
+//
+// `fetchMode == true` enables the strict-fetch additional rule that the
+// CAST argument must be a bare or qualified COLUMN_REF. This is the
+// invariant that lets blueprints reason about the API shape from the
+// model's projection list — derived expressions, function calls, and
+// arithmetic make the projection ambiguous as a row-key source.
+//
+// `fetchMode == false` is the @push variant: projections still need
+// CAST + alias, but the cast child can be any expression (`CONCAT(a,b)`,
+// `CASE`, arithmetic, function call). For @push, SQL is the shape
+// authority — derived projections are legitimate shape construction.
+func validateSelectProjections(selectNode *duckast.Node, fetchMode bool) error {
+	directive := "@push"
+	if fetchMode {
+		directive = "@fetch"
+	}
 	seenNames := make(map[string]bool)
 	for _, item := range selectNode.SelectList() {
 		// SELECT * is unconditionally rejected.
 		if item.Class() == "STAR" {
 			return fmt.Errorf(
-				"SELECT * is not allowed in a lib-backed model; project each output column with an explicit cast and alias (e.g. col::TYPE AS col)",
+				"SELECT * is not allowed in a %s model; project each output column with an explicit cast and alias (e.g. col::TYPE AS col)",
+				directive,
 			)
 		}
 
@@ -754,8 +860,8 @@ func validateSelectProjections(selectNode *duckast.Node) error {
 		if item.Class() != "CAST" {
 			name := projectionDisplayName(item)
 			return fmt.Errorf(
-				"projection %q is not cast; lib-backed models require every output column to be wrapped in an explicit cast (e.g. (%s)::TYPE AS alias)",
-				name, name,
+				"projection %q is not cast; %s models require every output column to be wrapped in an explicit cast (e.g. (%s)::TYPE AS alias)",
+				name, directive, name,
 			)
 		}
 
@@ -764,9 +870,24 @@ func validateSelectProjections(selectNode *duckast.Node) error {
 		if alias == "" {
 			name := projectionDisplayName(item)
 			return fmt.Errorf(
-				"cast projection %q has no explicit alias; lib-backed models require every output column to be aliased (e.g. %s::TYPE AS alias)",
-				name, name,
+				"cast projection %q has no explicit alias; %s models require every output column to be aliased (e.g. %s::TYPE AS alias)",
+				name, directive, name,
 			)
+		}
+
+		// In fetch mode, the CAST argument must be a bare or qualified
+		// COLUMN_REF. Function calls, arithmetic, CASE expressions etc.
+		// would make the projection an opaque transformation of API data —
+		// the @fetch contract is "raw projection of API fields with type
+		// declared by SQL". Push it to a downstream model.
+		if fetchMode {
+			child := item.Field("child")
+			if child == nil || child.Class() != "COLUMN_REF" {
+				return fmt.Errorf(
+					"@fetch projection %q must be `<col>::TYPE AS alias` — derived expressions, function calls, and arithmetic are not allowed in a @fetch model. Push the transformation to a downstream model that reads from this @fetch table.",
+					alias,
+				)
+			}
 		}
 
 		// Duplicate alias check — output schema must be unambiguous.

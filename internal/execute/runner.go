@@ -411,6 +411,15 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 	}
 
+	// Strict-push validator activates on @push. Push-mode scope is the
+	// outermost SELECT projection only — the rest of the SQL is free
+	// shape construction.
+	if model.Push != "" {
+		if err := validateStrictPushSchema(parsedAST, libCalls); err != nil {
+			return nil, fmt.Errorf("%s: %w", model.Target, err)
+		}
+	}
+
 	if r.libRegistry != nil && !r.libRegistry.Empty() {
 		if len(libCalls) > 0 {
 				// Validate supported_kinds for fetch

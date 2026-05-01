@@ -618,11 +618,13 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	modelPath := filepath.Join(p.Dir, "models", "raw/data.sql")
+	// Hash change is triggered by changing @incremental_initial — the SQL
+	// itself stays valid under v0.30.0's no-WHERE strict-fetch rule.
 	os.WriteFile(modelPath, []byte(`-- @kind: append
 -- @fetch
 -- @incremental: val
--- @incremental_initial: 2026-01-01
-SELECT id::BIGINT AS id, val::VARCHAR AS val FROM testapi('items') WHERE val > '2025-01-01'
+-- @incremental_initial: 2025-12-31
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM testapi('items')
 `), 0644)
 
 	// Third run — SQL changed (hash change → backfill), lib returns 0 rows.
@@ -832,10 +834,13 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 `)
 
 	modelPath := filepath.Join(p.Dir, "models", "raw/auditdata.sql")
+	// Hash change is triggered by reordering the projection (v0.30.0
+	// strict-fetch forbids WHERE; @audit is not in the hash, so the SQL
+	// itself must change).
 	os.WriteFile(modelPath, []byte(`-- @kind: table
 -- @fetch
 -- @audit: not a valid macro
-SELECT id::BIGINT AS id, val::BIGINT AS val FROM auditapi('items') WHERE 1=1
+SELECT val::BIGINT AS val, id::BIGINT AS id FROM auditapi('items')
 `), 0644)
 
 	// Second run — 0 rows, but audit parsing should still happen and fail
@@ -853,10 +858,13 @@ SELECT id::BIGINT AS id, val::BIGINT AS val FROM auditapi('items') WHERE 1=1
 // ---------------------------------------------------------------------------
 
 // TestLibCall_Merge_EmptyIncremental_Push verifies that a lib-driven merge
-// model with @sink correctly handles empty incremental runs: no duplication,
-// correct empty delta, sink semantics preserved.
+// model with a downstream @push sink correctly handles empty incremental
+// runs: no duplication, correct empty delta, sink semantics preserved.
+//
+// v0.30.0: @fetch + @push are now split across two models (a @fetch model
+// is forbidden from also being a @push model). The lifecycle below
+// alternates raw-fetch + downstream-push runs to exercise the same path.
 func TestLibCall_Merge_EmptyIncremental_Push(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	// Source lib: returns data on backfill, empty on incremental
@@ -894,48 +902,69 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
+	// Raw model: @fetch only, no @push
 	p.AddModel("raw/merged.sql", `-- @kind: merge
 -- @fetch
 -- @unique_key: id
 -- @incremental: score
 -- @incremental_initial: 0
--- @push: recorder
 SELECT id::BIGINT AS id, name::VARCHAR AS name, score::BIGINT AS score FROM mergesrc('items')
 `)
 
-	// Run 1 — backfill: 2 rows inserted, sink should fire
-	r1 := runModelWithLib(t, p, "raw/merged.sql")
-	t.Logf("run 1: rows=%d type=%s sync_ok=%d sync_fail=%d warnings=%v",
-		r1.RowsAffected, r1.RunType, r1.SyncSucceeded, r1.SyncFailed, r1.Warnings)
-	if r1.RowsAffected != 2 {
-		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
+	// Downstream push model: reads from raw.merged, no lib in FROM
+	p.AddModel("sync/merged.sql", `-- @kind: merge
+-- @unique_key: id
+-- @push: recorder
+SELECT id::BIGINT AS id, name::VARCHAR AS name, score::BIGINT AS score FROM raw.merged
+`)
+
+	// Run 1 — backfill on both: 2 rows propagate, sink fires on push model
+	rRaw1 := runModelWithLib(t, p, "raw/merged.sql")
+	if rRaw1.RowsAffected != 2 {
+		t.Fatalf("raw run 1: expected 2 rows, got %d", rRaw1.RowsAffected)
 	}
-	if r1.SyncSucceeded == 0 {
-		t.Fatalf("run 1: expected sink to succeed, got SyncSucceeded=0")
+	rSync1 := runModelWithLib(t, p, "sync/merged.sql")
+	t.Logf("sync run 1: rows=%d type=%s sync_ok=%d", rSync1.RowsAffected, rSync1.RunType, rSync1.SyncSucceeded)
+	if rSync1.RowsAffected != 2 {
+		t.Fatalf("sync run 1: expected 2 rows, got %d", rSync1.RowsAffected)
+	}
+	if rSync1.SyncSucceeded == 0 {
+		t.Fatalf("sync run 1: expected sink to succeed, got SyncSucceeded=0")
 	}
 
-	// Run 2 — incremental, lib returns 0 rows. Merge with 0 new rows should
-	// produce 0 rows affected. Sink should NOT produce spurious events.
-	r2 := runModelWithLib(t, p, "raw/merged.sql")
-	t.Logf("run 2: rows=%d type=%s sync_ok=%d sync_fail=%d warnings=%v",
-		r2.RowsAffected, r2.RunType, r2.SyncSucceeded, r2.SyncFailed, r2.Warnings)
-	if r2.RowsAffected != 0 {
-		t.Fatalf("run 2: expected 0 rows (no new data), got %d", r2.RowsAffected)
+	// Run 2 — incremental on both: lib returns 0 rows, raw is unchanged,
+	// sync model sees no deltas, sink does NOT fire spuriously.
+	rRaw2 := runModelWithLib(t, p, "raw/merged.sql")
+	if rRaw2.RowsAffected != 0 {
+		t.Fatalf("raw run 2: expected 0 rows (no new data), got %d", rRaw2.RowsAffected)
+	}
+	rSync2 := runModelWithLib(t, p, "sync/merged.sql")
+	t.Logf("sync run 2: rows=%d type=%s sync_ok=%d", rSync2.RowsAffected, rSync2.RunType, rSync2.SyncSucceeded)
+	if rSync2.RowsAffected != 0 {
+		t.Fatalf("sync run 2: expected 0 rows, got %d", rSync2.RowsAffected)
 	}
 
-	// Run 3 — still empty, verify no duplication
-	r3 := runModelWithLib(t, p, "raw/merged.sql")
-	if r3.RowsAffected != 0 {
-		t.Fatalf("run 3: expected 0 rows, got %d", r3.RowsAffected)
+	// Run 3 — still empty, no duplication
+	runModelWithLib(t, p, "raw/merged.sql")
+	rSync3 := runModelWithLib(t, p, "sync/merged.sql")
+	if rSync3.RowsAffected != 0 {
+		t.Fatalf("sync run 3: expected 0 rows, got %d", rSync3.RowsAffected)
 	}
 
-	// Verify total row count — should be exactly 2 (no duplication)
+	// Verify total row count on raw — should be exactly 2 (no duplication)
 	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.merged")
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != "2" {
-		t.Fatalf("expected 2 total rows after 3 runs, got %s", count)
+		t.Fatalf("expected 2 total rows in raw.merged after 3 runs, got %s", count)
+	}
+	count, err = p.Sess.QueryValue("SELECT COUNT(*) FROM sync.merged")
+	if err != nil {
+		t.Fatalf("count sync: %v", err)
+	}
+	if count != "2" {
+		t.Fatalf("expected 2 total rows in sync.merged, got %s", count)
 	}
 }
 
@@ -1020,12 +1049,14 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     }
 `)
 
-	// Change SQL to trigger hash change → backfill with new data
+	// Change SQL to trigger hash change → backfill with new data.
+	// Reorder columns to trigger the hash change without using WHERE
+	// (forbidden in @fetch under v0.30.0 strict-fetch).
 	modelPath := filepath.Join(p.Dir, "models", "raw/regional.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: tracked
 -- @fetch
 -- @group_key: region
-SELECT region::VARCHAR AS region, product::VARCHAR AS product, amount::BIGINT AS amount FROM trackedapi('items') WHERE 1=1
+SELECT product::VARCHAR AS product, region::VARCHAR AS region, amount::BIGINT AS amount FROM trackedapi('items')
 `), 0644)
 
 	// Run 4 — backfill with changed data
@@ -1069,11 +1100,14 @@ SELECT region::VARCHAR AS region, product::VARCHAR AS product, amount::BIGINT AS
 // Test 3: multiple lib calls — one empty, one with data
 // ---------------------------------------------------------------------------
 
-// TestLibCall_MixedEmpty_JoinTwoLibs verifies that when a model JOINs two
-// lib functions and one returns 0 rows while the other has data, the
-// rewrite handles both correctly: stub for the empty one, real temp table
-// for the other. Claims lifecycle must be correct for both.
-func TestLibCall_MixedEmpty_JoinTwoLibs(t *testing.T) {
+// TestLibCall_MixedEmpty_TwoIndependentLibs verifies that two independent
+// @fetch models — one with data, one returning 0 rows — both have correct
+// claims lifecycle. Pre-v0.30 this was tested via JOIN of two libs in a
+// single model; the strict-fetch contract now requires exactly one lib
+// per @fetch model, so the lifecycle is verified per model independently.
+// Cross-lib JOIN happens in a downstream staging model that reads from the
+// raw tables.
+func TestLibCall_MixedEmpty_TwoIndependentLibs(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Lib A: always returns data
@@ -1118,22 +1152,37 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     }
 `)
 
-	p.AddModel("raw/joined.sql", `-- @kind: table
+	// Two independent @fetch models, one per lib.
+	p.AddModel("raw/users.sql", `-- @kind: table
 -- @fetch
-SELECT u.user_id::BIGINT AS user_id, u.name::VARCHAR AS name, s.score::BIGINT AS score
-FROM users_api('users') u
-JOIN scores_api('scores') s ON u.user_id = s.user_id
+SELECT user_id::BIGINT AS user_id, name::VARCHAR AS name FROM users_api('users')
+`)
+	p.AddModel("raw/scores.sql", `-- @kind: table
+-- @fetch
+SELECT user_id::BIGINT AS user_id, score::BIGINT AS score FROM scores_api('scores')
 `)
 
-	// Run 1 — both libs have data, JOIN produces 2 rows
-	r1 := runModelWithLib(t, p, "raw/joined.sql")
-	t.Logf("run 1: rows=%d type=%s warnings=%v", r1.RowsAffected, r1.RunType, r1.Warnings)
-	if r1.RowsAffected != 2 {
-		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
+	rUsers := runModelWithLib(t, p, "raw/users.sql")
+	if rUsers.RowsAffected != 2 {
+		t.Fatalf("users: expected 2 rows, got %d (warnings: %v)", rUsers.RowsAffected, rUsers.Warnings)
+	}
+	rScores := runModelWithLib(t, p, "raw/scores.sql")
+	if rScores.RowsAffected != 2 {
+		t.Fatalf("scores: expected 2 rows, got %d (warnings: %v)", rScores.RowsAffected, rScores.Warnings)
 	}
 
-	// Verify data
-	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.joined")
+	// Downstream JOIN model — regular SQL, no @fetch.
+	p.AddModel("staging/joined.sql", `-- @kind: table
+SELECT u.user_id::BIGINT AS user_id, u.name::VARCHAR AS name, s.score::BIGINT AS score
+FROM raw.users u
+JOIN raw.scores s ON u.user_id = s.user_id
+`)
+	rJoined := runModelWithLib(t, p, "staging/joined.sql")
+	if rJoined.RowsAffected != 2 {
+		t.Fatalf("joined: expected 2 rows, got %d (warnings: %v)", rJoined.RowsAffected, rJoined.Warnings)
+	}
+
+	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM staging.joined")
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -1227,9 +1276,10 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     }
 `)
 
+	// Reorder columns to trigger hash change (WHERE forbidden in @fetch v0.30.0).
 	os.WriteFile(modelPath, []byte(`-- @kind: table
 -- @fetch
-SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email FROM dynapi('items') WHERE 1=1
+SELECT email::VARCHAR AS email, id::BIGINT AS id, name::VARCHAR AS name FROM dynapi('items')
 `), 0644)
 
 	r3 := runModelWithLib(t, p, "raw/dyn.sql")
@@ -1435,135 +1485,6 @@ SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
 	}
 }
 
-// TestLibCall_Stub_JoinColumnInON verifies that when a model JOINs two
-// libs, a column used only in JOIN ON (not in SELECT) is present in the
-// 0-row stub. This tests extractColumnsForLib's per-alias filtering.
-func TestLibCall_Stub_JoinColumnInON(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	// Lib A: always returns data
-	writeLib(t, p, "users_api", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {
-        "rows": [
-            {"user_id": 1, "name": "Alice"},
-            {"user_id": 2, "name": "Bob"},
-        ],
-        "next": None,
-    }
-`)
-
-	// Lib B: returns data on backfill, empty on incremental
-	writeLib(t, p, "scores_api", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page, is_backfill=True, last_value=""):
-    if not is_backfill:
-        return {"rows": [], "next": None}
-    return {
-        "rows": [
-            {"user_id": 1, "score": 100},
-            {"user_id": 2, "score": 200},
-        ],
-        "next": None,
-    }
-`)
-
-	// user_id is in JOIN ON but NOT in SELECT
-	p.AddModel("raw/joined.sql", `-- @kind: table
--- @fetch
-SELECT u.name::VARCHAR AS name, s.score::BIGINT AS score
-FROM users_api('users') u
-JOIN scores_api('scores') s ON u.user_id = s.user_id
-`)
-
-	// Run 1 — both have data
-	r1 := runModelWithLib(t, p, "raw/joined.sql")
-	if r1.RowsAffected != 2 {
-		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
-	}
-
-	// Run 2 — scores returns 0 rows. Stub must have user_id
-	// (from JOIN ON) even though it's not in SELECT.
-	modelPath := filepath.Join(p.Dir, "models", "raw/joined.sql")
-	os.WriteFile(modelPath, []byte(`-- @kind: table
--- @fetch
-SELECT u.name::VARCHAR AS name, s.score::BIGINT AS score
-FROM users_api('users') u
-JOIN scores_api('scores') s ON u.user_id = s.user_id
-WHERE 1=1
-`), 0644)
-
-	r2 := runModelWithLib(t, p, "raw/joined.sql")
-	// users has 2 rows, scores has 0 → JOIN produces 0 (or target-clone)
-	// Either way it must not crash.
-	t.Logf("run 2: rows=%d type=%s warnings=%v", r2.RowsAffected, r2.RunType, r2.Warnings)
-}
-
-// TestLibCall_Stub_ColumnsFilteredPerLib verifies that the columns kwarg
-// sent to fetch() only includes columns referenced against that specific
-// lib call, not columns from other sources (LATERAL, other libs, etc.).
-func TestLibCall_Stub_ColumnsFilteredPerLib(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	// This lib records what columns it receives
-	writeLib(t, p, "colcheck", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page, columns=[]):
-    col_names = [c["name"] for c in columns]
-    # Return column names as data so we can verify
-    rows = []
-    for name in col_names:
-        rows.append({"col_name": name, "val": "ok"})
-    return {"rows": rows, "next": None}
-`)
-
-	// The SELECT references col_name and val from the lib,
-	// plus a literal column. Only col_name and val should be
-	// in the columns kwarg, not the literal.
-	p.AddModel("raw/coltest.sql", `-- @kind: table
--- @fetch
-SELECT col_name::VARCHAR AS col_name, val::VARCHAR AS val, 'extra'::VARCHAR AS extra
-FROM colcheck('test')
-`)
-
-	r1 := runModelWithLib(t, p, "raw/coltest.sql")
-	t.Logf("run 1: rows=%d", r1.RowsAffected)
-
-	// Verify the lib received only col_name and val, not 'extra'
-	rows, err := p.Sess.QueryRows("SELECT col_name FROM raw.coltest ORDER BY col_name")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	// Should have col_name and val (the 2 columns the lib saw)
-	for _, r := range rows {
-		if r == "extra" {
-			t.Fatalf("lib received 'extra' column — should be filtered out (it's a literal, not a lib column)")
-		}
-	}
-}
-
 // TestLibCall_Stub_NoFalseSchemaEvolution verifies that incremental runs
 // with 0 lib rows do NOT produce false schema evolution warnings when
 // the target has non-VARCHAR types (e.g. DOUBLE, BIGINT).
@@ -1635,13 +1556,10 @@ SELECT series::VARCHAR AS series, date::VARCHAR AS date, value::DOUBLE AS value 
 // function fails the run if the preimage doesn't have the OLD value, so
 // any drift in the snapshot calculation will surface as SyncFailed > 0.
 func TestPushUpdatePreimage_FromPreChangeSnapshot(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	// Source lib: row id=1 with score=100 (run 1), then score=200 (run 2)
 	writeLib(t, p, "updsrc", `
-RUN_FILE = "_run_counter.txt"
-
 API = {
     "base_url": "https://example.com",
     "fetch": {
@@ -1678,30 +1596,38 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
                 fail("postimage score should be 200 (post-change), got " + str(row.get("score")))
 `)
 
+	// v0.30.0: split into raw-fetch + downstream-push models.
 	p.AddModel("raw/items.sql", `-- @kind: merge
 -- @fetch
 -- @unique_key: id
--- @push: checker
 SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
+`)
+	p.AddModel("sync/items.sql", `-- @kind: merge
+-- @unique_key: id
+-- @push: checker
+SELECT id::BIGINT AS id, score::BIGINT AS score FROM raw.items
 `)
 
 	// Run 1: backfill — single row insert, sink sees insert event
-	r1 := runModelWithLib(t, p, "raw/items.sql")
-	if r1.RowsAffected != 1 {
-		t.Fatalf("run 1: expected 1 row, got %d", r1.RowsAffected)
+	rRaw1 := runModelWithLib(t, p, "raw/items.sql")
+	if rRaw1.RowsAffected != 1 {
+		t.Fatalf("raw run 1: expected 1 row, got %d", rRaw1.RowsAffected)
 	}
-	if r1.SyncFailed != 0 {
-		t.Fatalf("run 1: SyncFailed=%d, expected 0 (warnings: %v)", r1.SyncFailed, r1.Warnings)
+	rSync1 := runModelWithLib(t, p, "sync/items.sql")
+	if rSync1.SyncFailed != 0 {
+		t.Fatalf("sync run 1: SyncFailed=%d, expected 0 (warnings: %v)", rSync1.SyncFailed, rSync1.Warnings)
 	}
 
-	// Run 2: same id, new score → merge produces update_preimage + update_postimage.
-	// The push() function asserts both have correct values for their slot.
-	r2 := runModelWithLib(t, p, "raw/items.sql")
-	if r2.SyncFailed != 0 {
-		t.Fatalf("run 2: SyncFailed=%d — preimage/postimage rows had wrong values, indicating readRowsByEvents read from wrong snapshot. Warnings: %v", r2.SyncFailed, r2.Warnings)
+	// Run 2: lib returns same id with new score. Raw merges → update.
+	// Sync model picks up the merge → sees update_preimage + update_postimage.
+	// The push() asserts preimage carries the pre-change value.
+	runModelWithLib(t, p, "raw/items.sql")
+	rSync2 := runModelWithLib(t, p, "sync/items.sql")
+	if rSync2.SyncFailed != 0 {
+		t.Fatalf("sync run 2: SyncFailed=%d — preimage/postimage rows had wrong values, indicating readRowsByEvents read from wrong snapshot. Warnings: %v", rSync2.SyncFailed, rSync2.Warnings)
 	}
-	if r2.SyncSucceeded == 0 {
-		t.Fatalf("run 2: SyncSucceeded=0, expected sink to fire on update (warnings: %v)", r2.Warnings)
+	if rSync2.SyncSucceeded == 0 {
+		t.Fatalf("sync run 2: SyncSucceeded=0, expected sink to fire on update (warnings: %v)", rSync2.Warnings)
 	}
 }
 
@@ -1716,7 +1642,6 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
 // This test runs an append + @sink model twice with a NEW row on the
 // second run, and asserts the sink saw only the new row — not all rows.
 func TestPreCommitSnapshot_AppendWithPush(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	// Source lib: returns 2 rows on backfill, 1 NEW row on incremental.
@@ -1752,41 +1677,57 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
+	// v0.30.0: split raw-fetch + downstream-push
 	p.AddModel("raw/scores.sql", `-- @kind: append
 -- @fetch
 -- @incremental: id
 -- @incremental_initial: 0
--- @push: sinkrec
 SELECT id::BIGINT AS id, score::BIGINT AS score FROM appendsrc('items')
 `)
+	p.AddModel("sync/scores.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @push: sinkrec
+SELECT id::BIGINT AS id, score::BIGINT AS score FROM raw.scores
+`)
 
-	// Run 1: backfill — 2 rows in, 2 in sink
-	r1 := runModelWithLib(t, p, "raw/scores.sql")
-	if r1.RowsAffected != 2 {
-		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
+	// Run 1: backfill — 2 rows in raw, 2 in sync, sink fires 2 times
+	rRaw1 := runModelWithLib(t, p, "raw/scores.sql")
+	if rRaw1.RowsAffected != 2 {
+		t.Fatalf("raw run 1: expected 2 rows, got %d", rRaw1.RowsAffected)
 	}
-	if r1.SyncSucceeded != 2 {
-		t.Fatalf("run 1: expected SyncSucceeded=2, got %d (warnings: %v)", r1.SyncSucceeded, r1.Warnings)
-	}
-
-	// Run 2: incremental — 1 NEW row. Sink delta should only include the
-	// new row. If preCommitSnapshot was not captured, the delta would
-	// also include run 1's rows → SyncSucceeded would be 3, not 1.
-	r2 := runModelWithLib(t, p, "raw/scores.sql")
-	if r2.RowsAffected != 1 {
-		t.Fatalf("run 2: expected 1 new row, got %d", r2.RowsAffected)
-	}
-	if r2.SyncSucceeded != 1 {
-		t.Fatalf("run 2: expected SyncSucceeded=1 (only the new row), got %d — preCommitSnapshot may be missing for append kind, causing run 1's rows to be replayed (warnings: %v)", r2.SyncSucceeded, r2.Warnings)
+	rSync1 := runModelWithLib(t, p, "sync/scores.sql")
+	if rSync1.SyncSucceeded != 2 {
+		t.Fatalf("sync run 1: expected SyncSucceeded=2, got %d (warnings: %v)", rSync1.SyncSucceeded, rSync1.Warnings)
 	}
 
-	// Verify total rows in target — exactly 3, no duplication
+	// Run 2: incremental — 1 NEW row in raw. Sync model picks it up via
+	// incremental cursor. Sink delta should only include the new row.
+	// If preCommitSnapshot was not captured, the delta would also include
+	// run 1's rows → SyncSucceeded would be 3, not 1.
+	rRaw2 := runModelWithLib(t, p, "raw/scores.sql")
+	if rRaw2.RowsAffected != 1 {
+		t.Fatalf("raw run 2: expected 1 new row, got %d", rRaw2.RowsAffected)
+	}
+	rSync2 := runModelWithLib(t, p, "sync/scores.sql")
+	if rSync2.SyncSucceeded != 1 {
+		t.Fatalf("sync run 2: expected SyncSucceeded=1 (only the new row), got %d — preCommitSnapshot may be missing for append kind (warnings: %v)", rSync2.SyncSucceeded, rSync2.Warnings)
+	}
+
+	// Verify totals
 	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.scores")
 	if err != nil {
-		t.Fatalf("count: %v", err)
+		t.Fatalf("count raw: %v", err)
 	}
 	if count != "3" {
-		t.Fatalf("expected 3 total rows after 2 runs, got %s", count)
+		t.Fatalf("expected 3 rows in raw.scores after 2 runs, got %s", count)
+	}
+	count, err = p.Sess.QueryValue("SELECT COUNT(*) FROM sync.scores")
+	if err != nil {
+		t.Fatalf("count sync: %v", err)
+	}
+	if count != "3" {
+		t.Fatalf("expected 3 rows in sync.scores, got %s", count)
 	}
 }
 
@@ -1796,7 +1737,6 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM appendsrc('items')
 // detection (group hashes), so the sink-side guard against spurious events
 // must hold for it too.
 func TestLibCall_Tracked_EmptyIncremental_Push(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	writeLib(t, p, "tracksrc", `
@@ -1832,41 +1772,46 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
+	// v0.30.0: split raw-fetch + downstream-push for tracked
 	p.AddModel("raw/regional.sql", `-- @kind: tracked
 -- @fetch
 -- @group_key: region
--- @push: trackedsink
 SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tracksrc('items')
 `)
+	p.AddModel("sync/regional.sql", `-- @kind: tracked
+-- @group_key: region
+-- @push: trackedsink
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM raw.regional
+`)
 
-	r1 := runModelWithLib(t, p, "raw/regional.sql")
-	if r1.RowsAffected != 2 {
-		t.Fatalf("run 1: expected 2 rows, got %d (warnings: %v)", r1.RowsAffected, r1.Warnings)
+	rRaw1 := runModelWithLib(t, p, "raw/regional.sql")
+	if rRaw1.RowsAffected != 2 {
+		t.Fatalf("raw run 1: expected 2 rows, got %d (warnings: %v)", rRaw1.RowsAffected, rRaw1.Warnings)
 	}
-	if r1.SyncSucceeded == 0 {
-		t.Fatalf("run 1: sink did not fire (SyncSucceeded=0, warnings: %v)", r1.Warnings)
+	rSync1 := runModelWithLib(t, p, "sync/regional.sql")
+	if rSync1.SyncSucceeded == 0 {
+		t.Fatalf("sync run 1: sink did not fire (SyncSucceeded=0, warnings: %v)", rSync1.Warnings)
 	}
 
 	// Run 2 — same source, no group hash changes. Tracked must not commit
-	// new rows, materialize must succeed, sink must not fail. With the
-	// lib above (always returning full state), the sink delta is empty
-	// and Badger has nothing pending after run 1's acks — so SyncSucceeded
-	// stays at 0 here.
-	r2 := runModelWithLib(t, p, "raw/regional.sql")
-	if r2.RowsAffected != 0 {
-		t.Fatalf("run 2: expected 0 rows, got %d", r2.RowsAffected)
+	// new rows, materialize must succeed, sink must not fail.
+	runModelWithLib(t, p, "raw/regional.sql")
+	rSync2 := runModelWithLib(t, p, "sync/regional.sql")
+	if rSync2.RowsAffected != 0 {
+		t.Fatalf("sync run 2: expected 0 rows, got %d", rSync2.RowsAffected)
 	}
-	if r2.SyncFailed != 0 {
-		t.Fatalf("run 2: SyncFailed=%d, expected 0 (warnings: %v)", r2.SyncFailed, r2.Warnings)
+	if rSync2.SyncFailed != 0 {
+		t.Fatalf("sync run 2: SyncFailed=%d, expected 0 (warnings: %v)", rSync2.SyncFailed, rSync2.Warnings)
 	}
 
 	// Run 3 — still empty, still stable
-	r3 := runModelWithLib(t, p, "raw/regional.sql")
-	if r3.RowsAffected != 0 {
-		t.Fatalf("run 3: expected 0 rows, got %d", r3.RowsAffected)
+	runModelWithLib(t, p, "raw/regional.sql")
+	rSync3 := runModelWithLib(t, p, "sync/regional.sql")
+	if rSync3.RowsAffected != 0 {
+		t.Fatalf("sync run 3: expected 0 rows, got %d", rSync3.RowsAffected)
 	}
-	if r3.SyncFailed != 0 {
-		t.Fatalf("run 3: SyncFailed=%d, expected 0", r3.SyncFailed)
+	if rSync3.SyncFailed != 0 {
+		t.Fatalf("sync run 3: SyncFailed=%d, expected 0", rSync3.SyncFailed)
 	}
 
 	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regional")
@@ -1883,11 +1828,9 @@ SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tracksrc('items'
 // changed group's events — not for unchanged groups. This pins the
 // "no spurious replay" guarantee at the tracked + sink interface.
 func TestLibCall_Tracked_GroupHashChange_Push(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	writeLib(t, p, "tgsrc", `
-state = {"phase": "backfill"}
 API = {
     "base_url": "https://example.com",
     "fetch": {
@@ -1915,23 +1858,33 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
+	// v0.30.0: split raw-fetch + downstream-push
 	p.AddModel("raw/groups.sql", `-- @kind: tracked
 -- @fetch
 -- @group_key: region
--- @push: tgsink
 SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tgsrc('items')
 `)
+	p.AddModel("sync/groups.sql", `-- @kind: tracked
+-- @group_key: region
+-- @push: tgsink
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM raw.groups
+`)
 
-	r1 := runModelWithLib(t, p, "raw/groups.sql")
-	if r1.RowsAffected != 2 || r1.SyncSucceeded < 2 {
-		t.Fatalf("run 1: rows=%d sync=%d, want 2/>=2 (warnings: %v)", r1.RowsAffected, r1.SyncSucceeded, r1.Warnings)
+	rRaw1 := runModelWithLib(t, p, "raw/groups.sql")
+	if rRaw1.RowsAffected != 2 {
+		t.Fatalf("raw run 1: rows=%d, want 2 (warnings: %v)", rRaw1.RowsAffected, rRaw1.Warnings)
 	}
-	syncAfterRun1 := r1.SyncSucceeded
+	rSync1 := runModelWithLib(t, p, "sync/groups.sql")
+	if rSync1.SyncSucceeded < 2 {
+		t.Fatalf("sync run 1: SyncSucceeded=%d, want >=2 (warnings: %v)", rSync1.SyncSucceeded, rSync1.Warnings)
+	}
+	syncAfterRun1 := rSync1.SyncSucceeded
 
-	// Run 2 — same lib, no changes
-	r2 := runModelWithLib(t, p, "raw/groups.sql")
-	if r2.SyncSucceeded != 0 {
-		t.Fatalf("run 2: expected sink quiet, got SyncSucceeded=%d", r2.SyncSucceeded)
+	// Run 2 — same lib, no changes. Sync should be quiet.
+	runModelWithLib(t, p, "raw/groups.sql")
+	rSync2 := runModelWithLib(t, p, "sync/groups.sql")
+	if rSync2.SyncSucceeded != 0 {
+		t.Fatalf("sync run 2: expected sink quiet, got SyncSucceeded=%d", rSync2.SyncSucceeded)
 	}
 
 	// Phase 2 — change US group's amount. EU unchanged. Tracked should detect
@@ -1952,23 +1905,26 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     ], "next": None}
 `)
 
-	r3 := runModelWithLib(t, p, "raw/groups.sql")
-	if r3.RowsAffected == 0 {
-		t.Fatalf("run 3: expected rows updated for US group, got 0 (warnings: %v)", r3.Warnings)
+	rRaw3 := runModelWithLib(t, p, "raw/groups.sql")
+	if rRaw3.RowsAffected == 0 {
+		t.Fatalf("raw run 3: expected rows updated for US group, got 0 (warnings: %v)", rRaw3.Warnings)
 	}
-	// Sink should fire for the changed group only (US: 1 row replaced)
-	// — total events should be small, not the full 2 rows from run 1.
-	if r3.SyncSucceeded == 0 {
-		t.Fatalf("run 3: sink did not fire on group change (warnings: %v)", r3.Warnings)
+	rSync3 := runModelWithLib(t, p, "sync/groups.sql")
+	if rSync3.SyncSucceeded == 0 {
+		t.Fatalf("sync run 3: sink did not fire on group change (warnings: %v)", rSync3.Warnings)
 	}
-	if r3.SyncSucceeded > syncAfterRun1 {
-		t.Errorf("run 3: sink fired more events (%d) than backfill (%d) — would mean entire table replayed instead of changed group only", r3.SyncSucceeded, syncAfterRun1)
+	if rSync3.SyncSucceeded > syncAfterRun1 {
+		t.Errorf("sync run 3: sink fired more events (%d) than backfill (%d) — would mean entire table replayed instead of changed group only", rSync3.SyncSucceeded, syncAfterRun1)
 	}
 
-	// US row should have new amount
+	// US row should have new amount in both raw and sync
 	usAmount, err := p.Sess.QueryValue("SELECT amount FROM raw.groups WHERE region = 'US'")
 	if err != nil || usAmount != "999" {
-		t.Fatalf("US amount = %q, want 999 (err: %v)", usAmount, err)
+		t.Fatalf("raw US amount = %q, want 999 (err: %v)", usAmount, err)
+	}
+	usAmount, err = p.Sess.QueryValue("SELECT amount FROM sync.groups WHERE region = 'US'")
+	if err != nil || usAmount != "999" {
+		t.Fatalf("sync US amount = %q, want 999 (err: %v)", usAmount, err)
 	}
 }
 
@@ -1977,7 +1933,6 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 // receives delete-classified events. Without this, downstream systems would
 // silently keep stale data after a group is dropped upstream.
 func TestLibCall_Tracked_GroupDisappears_Push(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	writeLib(t, p, "tdsrc", `
@@ -1996,8 +1951,6 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     ], "next": None}
 `)
 
-	// Sink that asserts at least one delete event arrives in run 2.
-	// Records the change_types it sees via fail() if no delete is observed.
 	writeLib(t, p, "tdsink", `
 API = {
     "push": {
@@ -2010,19 +1963,27 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
+	// v0.30.0: split raw-fetch + downstream-push
 	p.AddModel("raw/regions.sql", `-- @kind: tracked
 -- @fetch
 -- @group_key: region
--- @push: tdsink
 SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tdsrc('items')
 `)
+	p.AddModel("sync/regions.sql", `-- @kind: tracked
+-- @group_key: region
+-- @push: tdsink
+SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM raw.regions
+`)
 
-	r1 := runModelWithLib(t, p, "raw/regions.sql")
-	if r1.RowsAffected != 2 {
-		t.Fatalf("run 1: expected 2 rows, got %d", r1.RowsAffected)
+	rRaw1 := runModelWithLib(t, p, "raw/regions.sql")
+	if rRaw1.RowsAffected != 2 {
+		t.Fatalf("raw run 1: expected 2 rows, got %d", rRaw1.RowsAffected)
 	}
+	runModelWithLib(t, p, "sync/regions.sql")
 
-	// Phase 2 — EU group disappears. Tracked should DELETE EU's rows.
+	// Phase 2 — EU group disappears. Tracked on raw should DELETE EU's rows;
+	// the sync model picks up the delete and fires a delete-classified event
+	// to the sink.
 	writeLib(t, p, "tdsrc", `
 API = {
     "base_url": "https://example.com",
@@ -2038,20 +1999,28 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     ], "next": None}
 `)
 
-	r2 := runModelWithLib(t, p, "raw/regions.sql")
+	runModelWithLib(t, p, "raw/regions.sql")
+	rSync2 := runModelWithLib(t, p, "sync/regions.sql")
 
-	// Target should have only US row
+	// Both raw and sync should have only US row
 	count, err := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.regions")
 	if err != nil {
-		t.Fatalf("count: %v", err)
+		t.Fatalf("count raw: %v", err)
 	}
 	if count != "1" {
-		t.Fatalf("after group disappears: expected 1 row, got %s (rowsAffected=%d, warnings: %v)", count, r2.RowsAffected, r2.Warnings)
+		t.Fatalf("after group disappears: raw expected 1 row, got %s", count)
+	}
+	count, err = p.Sess.QueryValue("SELECT COUNT(*) FROM sync.regions")
+	if err != nil {
+		t.Fatalf("count sync: %v", err)
+	}
+	if count != "1" {
+		t.Fatalf("after group disappears: sync expected 1 row, got %s", count)
 	}
 
 	// Sink should have fired with at least the delete event for EU
-	if r2.SyncSucceeded == 0 {
-		t.Fatalf("sink did not fire for group-disappear case (SyncSucceeded=0, warnings: %v) — delete events lost", r2.Warnings)
+	if rSync2.SyncSucceeded == 0 {
+		t.Fatalf("sink did not fire for group-disappear case (SyncSucceeded=0, warnings: %v) — delete events lost", rSync2.Warnings)
 	}
 }
 
@@ -2130,11 +2099,12 @@ def fetch(resource, page):
     return {"rows": [{"id": 1, "name": "Alice", "amount": 9.5}], "next": None}
 `)
 
-	// Touch the model so the @kind hash changes and table re-runs.
+	// Touch the model so the hash changes and table re-runs.
+	// Column reorder triggers hash change (WHERE forbidden in @fetch v0.30.0).
 	modelPath := filepath.Join(p.Dir, "models", "raw/typed.sql")
 	os.WriteFile(modelPath, []byte(`-- @kind: table
 -- @fetch
-SELECT id::BIGINT AS id, name::VARCHAR AS name, amount::DOUBLE AS amount FROM src('items') WHERE 1=1
+SELECT name::VARCHAR AS name, id::BIGINT AS id, amount::DOUBLE AS amount FROM src('items')
 `), 0644)
 
 	r2 := runModelWithLib(t, p, "raw/typed.sql")
@@ -2304,66 +2274,6 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	}
 	if count != "0" {
 		t.Fatalf("delete_missing failed: expected 0 rows, got %s — opt-in hard-delete did not fire", count)
-	}
-}
-
-// TestLibCall_Stub_SQLShape_MultiLib_NoLeak pins that, in a multi-lib query
-// where one lib returns 0 rows, the SQL-shape stub for that lib is built
-// only from columns qualified to its alias — projection-only columns that
-// belong to OTHER libs are not leaked into this stub. Without the per-alias
-// filter, the stub would gain spurious columns and bind ambiguously against
-// the rewritten SQL.
-//
-// Regression for v0.24.0 reviewer concern #3 (extractColShapeForLib leak).
-func TestLibCall_Stub_SQLShape_MultiLib_NoLeak(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	// Lib A: always has data
-	writeLib(t, p, "api_a", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [
-        {"id": 1, "name": "Alice"},
-        {"id": 2, "name": "Bob"},
-    ], "next": None}
-`)
-
-	// Lib B: returns 0 rows on first call (drives the stub path)
-	writeLib(t, p, "api_b", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [], "next": None}
-`)
-
-	// SELECT projects a.name and b.score, joins on user_id. The stub for
-	// api_b must NOT gain `name` (which qualifies to a, not b).
-	p.AddModel("raw/joined.sql", `-- @kind: table
--- @fetch
-SELECT a.name::VARCHAR AS name, b.score::BIGINT AS score
-FROM api_a('users') a
-JOIN api_b('scores') b ON a.id = b.user_id
-`)
-
-	r1 := runModelWithLib(t, p, "raw/joined.sql")
-	t.Logf("run 1: rows=%d type=%s warnings=%v", r1.RowsAffected, r1.RunType, r1.Warnings)
-	// Build must not have failed with binding ambiguity on `name` between
-	// api_a's stub-or-real and api_b's stub.
-	if len(r1.Errors) > 0 {
-		t.Fatalf("run 1 failed: %v", r1.Errors)
 	}
 }
 
@@ -2765,92 +2675,6 @@ SELECT id::BIGINT AS id, amount * 2 AS doubled FROM src('items')
 	}
 }
 
-// TestStrictLibSchema_AcceptsComputedExprWithCast pins that a computed
-// expression wrapped in an explicit cast satisfies the rule.
-func TestStrictLibSchema_AcceptsComputedExprWithCast(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	writeLib(t, p, "src", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [{"id": 1, "amount": 100}], "next": None}
-`)
-
-	p.AddModel("raw/data.sql", `-- @kind: table
--- @fetch
-SELECT id::BIGINT AS id, (amount * 2)::BIGINT AS doubled FROM src('items')
-`)
-
-	r := runModelWithLib(t, p, "raw/data.sql")
-	if r.RowsAffected != 1 {
-		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
-	}
-}
-
-// TestStrictLibSchema_RegularTableColumnsAlsoNeedCasts pins that the
-// strict-cast rule applies uniformly to every projection in a lib-backed
-// model — even columns from a regular (non-lib) table joined with the lib.
-// SQL is the *only* schema source for the model output; reading types from
-// DuckDB's catalog still counts as inference and is rejected.
-func TestStrictLibSchema_RegularTableColumnsAlsoNeedCasts(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	if err := p.Sess.Exec(`CREATE SCHEMA IF NOT EXISTS reg`); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	if err := p.Sess.Exec(`CREATE TABLE reg.users AS SELECT 1::BIGINT AS user_id, 'Alice' AS name`); err != nil {
-		t.Fatalf("create users: %v", err)
-	}
-
-	writeLib(t, p, "scores", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [{"user_id": 1, "score": 100}], "next": None}
-`)
-
-	// `u.name` from a regular table — bare projection, must be rejected
-	// under strict mode even though DuckDB knows the type.
-	p.AddModel("raw/joined_bad.sql", `-- @kind: table
--- @fetch
-SELECT u.name, s.score::BIGINT AS score
-FROM reg.users u
-JOIN scores('items') s ON u.user_id = s.user_id
-`)
-	_, err := runModelWithLibErr(t, p, "raw/joined_bad.sql")
-	if err == nil {
-		t.Fatal("expected validation error for bare regular-table projection in lib-backed model")
-	}
-	if !strings.Contains(err.Error(), "not cast") {
-		t.Fatalf("error should mention missing cast: %v", err)
-	}
-
-	// Re-cast `u.name` and the model is accepted.
-	p.AddModel("raw/joined_ok.sql", `-- @kind: table
--- @fetch
-SELECT u.name::VARCHAR AS name, s.score::BIGINT AS score
-FROM reg.users u
-JOIN scores('items') s ON u.user_id = s.user_id
-`)
-	r := runModelWithLib(t, p, "raw/joined_ok.sql")
-	if r.RowsAffected != 1 {
-		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
-	}
-}
-
 // TestStrictLibSchema_RejectsCastWithoutAlias pins that the cast must be
 // followed by an explicit `AS name`. Implicit names from underlying
 // COLUMN_REFs do not satisfy the contract — the SELECT must declare every
@@ -2885,112 +2709,6 @@ SELECT id::BIGINT, name::VARCHAR FROM src('items')
 	}
 }
 
-// TestStrictLibSchema_RejectsCTEHidingSelectStar pins that the strict-schema
-// rules apply to SELECT_NODEs nested inside CTEs, not just the top-level
-// SELECT. Otherwise a user could route a `SELECT *` through a CTE and have
-// the outer SELECT project a typed subset, bypassing the contract.
-func TestStrictLibSchema_RejectsCTEHidingSelectStar(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	writeLib(t, p, "src", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
-`)
-
-	p.AddModel("raw/cte.sql", `-- @kind: table
--- @fetch
-WITH src_data AS (SELECT * FROM src('items'))
-SELECT id::BIGINT AS id FROM src_data
-`)
-
-	_, err := runModelWithLibErr(t, p, "raw/cte.sql")
-	if err == nil {
-		t.Fatal("expected validation error for SELECT * inside CTE")
-	}
-	if !strings.Contains(err.Error(), "SELECT *") {
-		t.Fatalf("error should mention SELECT *: %v", err)
-	}
-}
-
-// TestStrictLibSchema_RejectsUnionBranchBareProjection pins that the rules
-// apply to every branch of a set-operation (UNION, INTERSECT, EXCEPT). A
-// bare projection in one branch must not be hidden by a properly-typed
-// projection in another.
-func TestStrictLibSchema_RejectsUnionBranchBareProjection(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	writeLib(t, p, "src", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
-`)
-
-	// Left side has bare projections — must be rejected even though the
-	// right side is properly typed.
-	p.AddModel("raw/union.sql", `-- @kind: table
--- @fetch
-SELECT id, name FROM src('items')
-UNION ALL
-SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
-`)
-
-	_, err := runModelWithLibErr(t, p, "raw/union.sql")
-	if err == nil {
-		t.Fatal("expected validation error for bare projection on UNION-left side")
-	}
-	if !strings.Contains(err.Error(), "not cast") {
-		t.Fatalf("error should mention missing cast: %v", err)
-	}
-}
-
-// TestStrictLibSchema_AcceptsCTEWithTypedProjections pins the success path
-// for CTEs: when both the CTE and the outer SELECT cast and alias every
-// projection, the model is accepted.
-func TestStrictLibSchema_AcceptsCTEWithTypedProjections(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	writeLib(t, p, "src", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [{"id": 1, "name": "Alice"}], "next": None}
-`)
-
-	p.AddModel("raw/cte_ok.sql", `-- @kind: table
--- @fetch
-WITH src_data AS (
-    SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src('items')
-)
-SELECT id::BIGINT AS id, name::VARCHAR AS name FROM src_data
-`)
-
-	r := runModelWithLib(t, p, "raw/cte_ok.sql")
-	if r.RowsAffected != 1 {
-		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
-	}
-}
-
 // TestStrictLibSchema_RejectsDuplicateAliases pins that two projections
 // cannot share the same output name. The model's output schema must be
 // unambiguous.
@@ -3021,42 +2739,6 @@ SELECT id::BIGINT AS x, name::VARCHAR AS x FROM src('items')
 	}
 	if !strings.Contains(err.Error(), "duplicate output column name") {
 		t.Fatalf("error should mention duplicate name: %v", err)
-	}
-}
-
-// TestStrictLibSchema_AllowsInputOnlyRefsWithoutCast pins that columns
-// referenced only in WHERE / JOIN ON / GROUP BY (i.e. not projected) do
-// not require a cast. The strict-cast rule applies to output schema only.
-func TestStrictLibSchema_AllowsInputOnlyRefsWithoutCast(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	writeLib(t, p, "src", `
-API = {
-    "base_url": "https://example.com",
-    "fetch": {
-        "args": ["resource"],
-        "supported_kinds": ["table"],
-    },
-}
-
-def fetch(resource, page):
-    return {"rows": [
-        {"id": 1, "region": "US", "amount": 100},
-        {"id": 2, "region": "EU", "amount": 200},
-    ], "next": None}
-`)
-
-	// `region` is filtered on but never projected — no cast required for it.
-	p.AddModel("raw/filtered.sql", `-- @kind: table
--- @fetch
-SELECT id::BIGINT AS id, amount::BIGINT AS amount
-FROM src('items')
-WHERE region = 'US'
-`)
-
-	r := runModelWithLib(t, p, "raw/filtered.sql")
-	if r.RowsAffected != 1 {
-		t.Fatalf("expected 1 row, got %d (warnings: %v errors: %v)", r.RowsAffected, r.Warnings, r.Errors)
 	}
 }
 

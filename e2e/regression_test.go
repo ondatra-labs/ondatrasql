@@ -98,7 +98,8 @@ def push(rows):
 	p.AddModel("sync/items.sql", `-- @kind: append
 -- @push: append_push
 
-SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)
+SELECT id::BIGINT AS id, name::VARCHAR AS name
+FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)
 `)
 
 	// Run — should succeed (backfill)
@@ -135,7 +136,8 @@ def finalize(succeeded, failed):
 	p.AddModel("sync/wm_test.sql", `-- @kind: table
 -- @push: finalize_fail
 
-SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)
+SELECT id::BIGINT AS id, name::VARCHAR AS name
+FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)
 `)
 
 	// Run 1 — finalize fails, watermark should NOT be updated
@@ -353,10 +355,8 @@ SELECT 1 AS id, '2024-01-01' AS updated_at
 // ---------------------------------------------------------------------------
 
 func TestRegression_DeleteThreshold_WithLibCall(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
-	// Create a fetch lib
 	testutil.WriteFile(t, p.Dir, "lib/threshold_fetch.star", `
 API = {
     "base_url": "https://example.com",
@@ -376,7 +376,6 @@ def fetch(page, **kwargs):
     }
 `)
 
-	// Create a push lib
 	testutil.WriteFile(t, p.Dir, "lib/threshold_push.star", `
 API = {
     "base_url": "https://example.com",
@@ -387,25 +386,33 @@ def push(rows):
     return None
 `)
 
-	// Merge model with lib fetch + sink + detect_deletes
-	p.AddModel("sync/contacts.sql", `-- @kind: merge
+	// v0.30.0: split raw-fetch + downstream-push (merge model with sink).
+	// Pre-fix: checkDeleteThresholdPreMaterialize used model.SQL, which
+	// referenced the lib macro and returned an empty placeholder; threshold
+	// checked all rows for deletion. Post-fix: uses tmpTable with actual
+	// data. With the @fetch/@push split, the sync model sees raw.contacts
+	// (a real table), so the same threshold logic still applies but on the
+	// downstream side rather than against a lib macro.
+	p.AddModel("raw/contacts.sql", `-- @kind: table
 -- @fetch
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM threshold_fetch()
+`)
+	p.AddModel("sync/contacts.sql", `-- @kind: merge
 -- @unique_key: id
 -- @push: threshold_push
 
-SELECT id::BIGINT AS id, name::VARCHAR AS name FROM threshold_fetch()
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.contacts
 `)
 
-	// Run 1: backfill — should succeed
-	r1 := runModelWithSinkE2E(t, p, "sync/contacts.sql")
-	if r1.RunType == "skip" {
-		t.Fatal("run 1 should not skip")
+	rRaw := runModelWithSinkE2E(t, p, "raw/contacts.sql")
+	if rRaw.RowsAffected != 3 {
+		t.Fatalf("raw: expected 3 rows, got %d (errors: %v)", rRaw.RowsAffected, rRaw.Errors)
 	}
-	// Before fix: checkDeleteThresholdPreMaterialize used model.SQL
-	// which references threshold_fetch() macro (returns empty placeholder).
-	// This would incorrectly flag ALL rows for deletion.
-	// After fix: uses tmpTable which has actual data.
-	t.Logf("run 1: type=%s rows=%d errors=%v", r1.RunType, r1.RowsAffected, r1.Errors)
+	rSync := runModelWithSinkE2E(t, p, "sync/contacts.sql")
+	if rSync.RunType == "skip" {
+		t.Fatal("sync run 1 should not skip")
+	}
+	t.Logf("sync: type=%s rows=%d errors=%v", rSync.RunType, rSync.RowsAffected, rSync.Errors)
 }
 
 // ---------------------------------------------------------------------------
@@ -548,10 +555,8 @@ func hasWarning(r *execute.Result, substr string) bool {
 //   - on the second run with new data, only new rows reach upstream's sink
 //     and the downstream sees the combined state
 func TestE2E_MultiModel_CascadingPush(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
-	// Source lib for raw.events: returns 2 rows on backfill, 1 new on incremental.
 	testutil.WriteFile(t, p.Dir, "lib/casc_src.star", `
 API = {
     "base_url": "https://example.com",
@@ -570,7 +575,6 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     return {"rows": [{"id": 3, "kind": "click", "amount": 30}], "next": None}
 `)
 
-	// Sink lib (no-op). Existence of the sink fires the per-row contract.
 	testutil.WriteFile(t, p.Dir, "lib/casc_sink.star", `
 API = {
     "push": {
@@ -583,47 +587,61 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
-	// Upstream — append + sink
+	// v0.30.0: split raw fetch + downstream push (was a single @fetch + @push
+	// on raw/events.sql in v0.29). Now: raw/events @fetch only, sync/events
+	// reads from raw and carries @push.
 	p.AddModel("raw/events.sql", `-- @kind: append
 -- @fetch
 -- @incremental: id
 -- @incremental_initial: 0
--- @push: casc_sink
 SELECT id::BIGINT AS id, kind::VARCHAR AS kind, amount::BIGINT AS amount FROM casc_src('events')
 `)
-
-	// Downstream — table aggregation, no sink
+	p.AddModel("sync/events.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @push: casc_sink
+SELECT id::BIGINT AS id, kind::VARCHAR AS kind, amount::BIGINT AS amount FROM raw.events
+`)
+	// Aggregation downstream — no sink
 	p.AddModel("staging/events_summary.sql", `-- @kind: table
 SELECT kind, COUNT(*) AS event_count, SUM(amount) AS total
 FROM raw.events
 GROUP BY kind
 `)
 
-	// Run 1: backfill — upstream gets 2 rows + sink fires; downstream
-	// aggregates to 2 rows (one per kind).
-	r1up := runModelWithSinkE2E(t, p, "raw/events.sql")
-	if r1up.RowsAffected != 2 {
-		t.Fatalf("upstream run 1: rows=%d, want 2 (warnings: %v)", r1up.RowsAffected, r1up.Warnings)
+	// Run 1: backfill on all three. Sink fires from sync/events.
+	rRaw1 := runModelWithSinkE2E(t, p, "raw/events.sql")
+	if rRaw1.RowsAffected != 2 {
+		t.Fatalf("raw run 1: rows=%d, want 2 (warnings: %v)", rRaw1.RowsAffected, rRaw1.Warnings)
 	}
-	if r1up.SyncSucceeded == 0 {
-		t.Fatalf("upstream run 1: sink did not fire (warnings: %v)", r1up.Warnings)
+	rSync1 := runModelWithSinkE2E(t, p, "sync/events.sql")
+	if rSync1.RowsAffected != 2 {
+		t.Fatalf("sync run 1: rows=%d, want 2", rSync1.RowsAffected)
 	}
-	r1down := runModelWithSinkE2E(t, p, "staging/events_summary.sql")
-	if r1down.RowsAffected != 2 {
-		t.Fatalf("downstream run 1: rows=%d, want 2 (one per kind)", r1down.RowsAffected)
+	if rSync1.SyncSucceeded == 0 {
+		t.Fatalf("sync run 1: sink did not fire (warnings: %v)", rSync1.Warnings)
+	}
+	rSummary1 := runModelWithSinkE2E(t, p, "staging/events_summary.sql")
+	if rSummary1.RowsAffected != 2 {
+		t.Fatalf("summary run 1: rows=%d, want 2 (one per kind)", rSummary1.RowsAffected)
 	}
 
-	// Run 2: incremental — upstream gets 1 new row; downstream re-aggregates.
-	r2up := runModelWithSinkE2E(t, p, "raw/events.sql")
-	if r2up.RowsAffected != 1 {
-		t.Fatalf("upstream run 2: rows=%d, want 1 new", r2up.RowsAffected)
+	// Run 2: incremental — raw gets 1 new row, sync model picks it up,
+	// summary re-aggregates.
+	rRaw2 := runModelWithSinkE2E(t, p, "raw/events.sql")
+	if rRaw2.RowsAffected != 1 {
+		t.Fatalf("raw run 2: rows=%d, want 1 new", rRaw2.RowsAffected)
 	}
-	if r2up.SyncFailed != 0 {
-		t.Fatalf("upstream run 2: SyncFailed=%d (warnings: %v)", r2up.SyncFailed, r2up.Warnings)
+	rSync2 := runModelWithSinkE2E(t, p, "sync/events.sql")
+	if rSync2.RowsAffected != 1 {
+		t.Fatalf("sync run 2: rows=%d, want 1 new", rSync2.RowsAffected)
 	}
-	r2down := runModelWithSinkE2E(t, p, "staging/events_summary.sql")
-	if r2down.RowsAffected != 2 {
-		t.Fatalf("downstream run 2: rows=%d, want 2 (still one per kind)", r2down.RowsAffected)
+	if rSync2.SyncFailed != 0 {
+		t.Fatalf("sync run 2: SyncFailed=%d (warnings: %v)", rSync2.SyncFailed, rSync2.Warnings)
+	}
+	rSummary2 := runModelWithSinkE2E(t, p, "staging/events_summary.sql")
+	if rSummary2.RowsAffected != 2 {
+		t.Fatalf("summary run 2: rows=%d, want 2 (still one per kind)", rSummary2.RowsAffected)
 	}
 
 	// Verify cascading state: raw has 3 rows, staging has correct totals.
@@ -643,7 +661,6 @@ GROUP BY kind
 //   - one sink failing in a hypothetical configuration would not block the other
 //   - SyncSucceeded counts are per-model, not global
 func TestE2E_MultiModel_BothPushes(t *testing.T) {
-	t.Skip("v0.30.0: @fetch + @push on the same model is rejected — restructure test as split raw-fetch + downstream-push models")
 	p := testutil.NewProject(t)
 
 	testutil.WriteFile(t, p.Dir, "lib/users_src.star", `
@@ -682,24 +699,35 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
     pass
 `)
 
-	// Two unrelated models, both with their own sink.
-	p.AddModel("sync/users.sql", `-- @kind: append
+	// v0.30.0: each pipeline is split raw-fetch + downstream-push.
+	p.AddModel("raw/users.sql", `-- @kind: append
 -- @fetch
+-- @incremental: id
+-- @incremental_initial: 0
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM users_src('items')
+`)
+	p.AddModel("sync/users.sql", `-- @kind: append
 -- @incremental: id
 -- @incremental_initial: 0
 -- @push: users_sink
-SELECT id::BIGINT AS id, name::VARCHAR AS name FROM users_src('items')
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.users
 `)
-
-	p.AddModel("sync/orders.sql", `-- @kind: append
+	p.AddModel("raw/orders.sql", `-- @kind: append
 -- @fetch
 -- @incremental: id
 -- @incremental_initial: 0
--- @push: orders_sink
 SELECT id::BIGINT AS id, total::BIGINT AS total FROM orders_src('items')
 `)
+	p.AddModel("sync/orders.sql", `-- @kind: append
+-- @incremental: id
+-- @incremental_initial: 0
+-- @push: orders_sink
+SELECT id::BIGINT AS id, total::BIGINT AS total FROM raw.orders
+`)
 
-	// Run both, in either order — they should be independent.
+	// Run raw fetches first, then their respective sync models.
+	runModelWithSinkE2E(t, p, "raw/users.sql")
+	runModelWithSinkE2E(t, p, "raw/orders.sql")
 	rUsers := runModelWithSinkE2E(t, p, "sync/users.sql")
 	rOrders := runModelWithSinkE2E(t, p, "sync/orders.sql")
 

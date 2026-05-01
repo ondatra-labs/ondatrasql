@@ -777,7 +777,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: skip_push
 
-SELECT * FROM raw.items
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.items
 `)
 
 	// Run 1: backfill + sink
@@ -832,7 +832,7 @@ def push(rows):
 	p.AddModel("sync/report.sql", `-- @kind: table
 -- @push: table_push
 
-SELECT * FROM raw.report
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.report
 `)
 
 	// Run 1: initial full sync
@@ -894,7 +894,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: fail_push
 
-SELECT * FROM raw.src
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.src
 `)
 
 	// Run -- should succeed for materialization but report sink error
@@ -939,7 +939,7 @@ def finalize(succeeded, failed):
 -- @unique_key: id
 -- @push: fin_push
 
-SELECT * FROM raw.fin_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.fin_src
 `)
 
 	result := runModelWithSink(t, p, "sync/fin.sql")
@@ -977,7 +977,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: nofin_push
 
-SELECT * FROM raw.nofin_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.nofin_src
 `)
 
 	result := runModelWithSink(t, p, "sync/nofin.sql")
@@ -1071,7 +1071,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: partial_push
 
-SELECT * FROM raw.partial
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.partial
 `)
 
 	r := runModelWithSink(t, p, "sync/partial.sql")
@@ -1121,7 +1121,7 @@ def push(rows):
 	p.AddModel("sync/empty.sql", `-- @kind: table
 -- @push: empty_push
 
-SELECT * FROM raw.empty_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.empty_src
 `)
 
 	// Run 1: 1 row (insert)
@@ -1193,7 +1193,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: fields_push
 
-SELECT * FROM raw.fields_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.fields_src
 `)
 
 	runModelWithSink(t, p, "sync/fields.sql")
@@ -1285,7 +1285,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: retry_push
 
-SELECT * FROM raw.retry_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.retry_src
 `)
 
 	// Run 1: id=2 fails
@@ -1366,9 +1366,9 @@ def push(rows):
 	p.AddModel("sync/wm.sql", `-- @kind: table
 -- @push: wm_push
 
-SELECT 1 AS id, 'a' AS val
+SELECT 1::BIGINT AS id, 'a'::VARCHAR AS val
 UNION ALL
-SELECT 2, 'b'
+SELECT 2::BIGINT, 'b'::VARCHAR
 `)
 
 	// Run 1: push 2 rows
@@ -1395,11 +1395,11 @@ SELECT 2, 'b'
 	p.AddModel("sync/wm.sql", `-- @kind: table
 -- @push: wm_push
 
-SELECT 1 AS id, 'a' AS val
+SELECT 1::BIGINT AS id, 'a'::VARCHAR AS val
 UNION ALL
-SELECT 2, 'b'
+SELECT 2::BIGINT, 'b'::VARCHAR
 UNION ALL
-SELECT 3, 'c'
+SELECT 3::BIGINT, 'c'::VARCHAR
 `)
 	r3 := runModelWithSink(t, p, "sync/wm.sql")
 	t.Logf("run 3: type=%s sync_ok=%d", r3.RunType, r3.SyncSucceeded)
@@ -1445,7 +1445,7 @@ def push(rows):
 	p.AddModel("sync/empty_wm.sql", `-- @kind: table
 -- @push: empty_wm_push
 
-SELECT 1 AS id, 'a' AS val
+SELECT 1::BIGINT AS id, 'a'::VARCHAR AS val
 `)
 
 	runModelWithSink(t, p, "sync/empty_wm.sql")
@@ -1461,7 +1461,7 @@ SELECT 1 AS id, 'a' AS val
 	p.AddModel("sync/empty_wm.sql", `-- @kind: table
 -- @push: empty_wm_push
 
-SELECT id, val FROM (SELECT 1 AS id, 'a' AS val) WHERE 1=0
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM (SELECT 1 AS id, 'a' AS val) WHERE 1=0
 `)
 
 	runModelWithSink(t, p, "sync/empty_wm.sql")
@@ -1523,7 +1523,7 @@ def push(rows):
 -- @group_key: id
 -- @push: del_push
 
-SELECT * FROM raw.del_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.del_src
 `)
 
 	// Run 1: backfill 3 rows
@@ -1586,7 +1586,7 @@ def push(rows):
 -- @group_key: id
 -- @push: autodel_push
 
-SELECT * FROM raw.autodel_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.autodel_src
 `)
 
 	// Run 1: backfill 3 rows
@@ -1636,7 +1636,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: acked_push
 
-SELECT * FROM raw.acked_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.acked_src
 `)
 
 	// Run 1: successful push
@@ -1697,7 +1697,7 @@ def push(rows):
 -- @group_key: order_id
 -- @push: grp_push
 
-SELECT * FROM raw.order_items
+SELECT item_id::BIGINT AS item_id, order_id::VARCHAR AS order_id, price::DOUBLE AS price FROM raw.order_items
 `)
 
 	// Run 1: backfill all 4 items
@@ -1774,7 +1774,7 @@ def push(rows):
 -- @group_key: order_id
 -- @push: grpdel_push
 
-SELECT * FROM raw.grp_items
+SELECT item_id::BIGINT AS item_id, order_id::VARCHAR AS order_id, price::DOUBLE AS price FROM raw.grp_items
 `)
 
 	// Run 1: backfill
@@ -1847,7 +1847,7 @@ def push(rows):
 	p.AddModel("sync/append_test.sql", `-- @kind: append
 -- @push: append_push
 
-SELECT * FROM raw.append_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.append_src
 `)
 
 	// Run 1: push 2 rows
@@ -1924,7 +1924,7 @@ def push(rows):
 	p.AddModel("sync/bf_append.sql", `-- @kind: append
 -- @push: bf_push
 
-SELECT * FROM raw.bf_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.bf_src
 `)
 
 	// Run 1: push fails (all rows in backlog)
@@ -1946,7 +1946,7 @@ def push(rows):
 	p.AddModel("sync/bf_append.sql", `-- @kind: append
 -- @push: bf_push
 
-SELECT * FROM raw.bf_src WHERE id > 0
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.bf_src WHERE id > 0
 `)
 
 	mu.Lock()
@@ -2007,7 +2007,7 @@ def finalize(succeeded, failed):
 -- @unique_key: id
 -- @push: conc_push
 
-SELECT * FROM raw.conc_src
+SELECT id::BIGINT AS id, val::VARCHAR AS val FROM raw.conc_src
 `)
 
 	r := runModelWithSink(t, p, "sync/conc.sql")
@@ -2071,7 +2071,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: mdu_push
 
-SELECT * FROM raw.mdu_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM raw.mdu_src
 `)
 
 	// Run 1: backfill
@@ -2159,7 +2159,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: bug3_push
 
-SELECT * FROM raw.bug3_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email FROM raw.bug3_src
 `)
 
 	// Run 1: backfill
@@ -2300,7 +2300,7 @@ def push(rows):
 -- @unique_key: id
 -- @push: bug3b_push
 
-SELECT * FROM raw.bug3b_src
+SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email FROM raw.bug3b_src
 `)
 
 	// Run 1: backfill
