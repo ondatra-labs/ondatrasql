@@ -56,10 +56,13 @@ API = {
 }
 
 def push(rows=[], columns=[]):
-    # Columns should be sorted alphabetically
+    # v0.30.0: each column is a dict {"name": ..., "type": ...} (or just
+    # {"name": ...} when no schema info is available, as in the
+    # row-derived fallback path used by this test). Sort assertion runs
+    # on the name values.
     for i in range(len(columns) - 1):
-        if columns[i] > columns[i+1]:
-            fail("columns not sorted: " + columns[i] + " > " + columns[i+1])
+        if columns[i]["name"] > columns[i+1]["name"]:
+            fail("columns not sorted: " + columns[i]["name"] + " > " + columns[i+1]["name"])
 `), 0644)
 
 	rt := NewRuntime(nil, nil, dir)
