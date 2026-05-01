@@ -182,8 +182,7 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 			catPath = filepath.Join(projectDir, catPath)
 		}
 
-		var connStr string
-		connStr = "ducklake:" + catType + ":" + catPath
+		connStr := "ducklake:" + catType + ":" + catPath
 
 		info := CatalogInfo{
 			Type:    catType,
