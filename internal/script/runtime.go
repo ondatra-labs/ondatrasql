@@ -128,10 +128,11 @@ func (r *Runtime) libraryPredeclared(ctx context.Context, httpCfg ...*apiHTTPCon
 	}
 	return starlark.StringDict{
 		// Core I/O
-		"http": httpModule(ctx, cfg),
-		"env":  envModule(),
-		"xml":  xmlModule(),
-		"csv":  csvModule(),
+		"http":        httpModule(ctx, cfg),
+		"env":         envModule(),
+		"xml":         xmlModule(),
+		"csv":         csvModule(),
+		"lib_helpers": libHelpersModule(),
 
 		// DuckDB-backed builtins
 		"glob":        globBuiltin(r.sess),
