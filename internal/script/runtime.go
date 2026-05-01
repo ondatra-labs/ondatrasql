@@ -108,14 +108,43 @@ type Result struct {
 	badger      *badgerCollector  // internal: durable mode
 }
 
-// fileOptions returns the shared Starlark syntax options (Python-like semantics).
-func fileOptions() *syntax.FileOptions {
+// blueprintFileOptions returns the strict Starlark syntax options used
+// when loading lib/*.star blueprint files. v0.30.0 tightens two toggles
+// to enforce a clean module structure:
+//
+//   - GlobalReassign=false → a top-level name (API, fetch, push, helpers)
+//     can be defined exactly once. Catches `API = {...}; API = {...}`
+//     mutations that silently overwrite the dict the runtime introspects.
+//   - TopLevelControl=false → top-level if/for/while is rejected. The
+//     module structure becomes purely declarative (constants, dict
+//     literals, function defs). Conditional logic belongs inside a
+//     function body, not at module load time.
+//
+// Recursion / While / Set stay enabled — those are widely used in
+// fetch/push function bodies (parsing pagination cursors, retrying
+// transient errors, building deduplication sets).
+func blueprintFileOptions() *syntax.FileOptions {
 	return &syntax.FileOptions{
-		Set:             true, // set() built-in
-		While:           true, // while loops
-		TopLevelControl: true, // if/for/while at top level
-		GlobalReassign:  true, // reassign top-level names
-		Recursion:       true, // recursive functions
+		Set:             true,  // set() built-in
+		While:           true,  // while loops (inside function bodies)
+		Recursion:       true,  // recursive functions
+		TopLevelControl: false, // no if/for/while at module top level
+		GlobalReassign:  false, // each top-level name defined once
+	}
+}
+
+// adhocFileOptions returns the permissive Starlark syntax options used
+// for ad-hoc script execution via Runtime.Run (entrypoint for legacy
+// @script models and the runtime test harness that exercises modules
+// like time/json/csv directly with top-level statements). Blueprints
+// loaded via load() still get the strict blueprintFileOptions.
+func adhocFileOptions() *syntax.FileOptions {
+	return &syntax.FileOptions{
+		Set:             true,
+		While:           true,
+		Recursion:       true,
+		TopLevelControl: true,
+		GlobalReassign:  true,
 	}
 }
 
@@ -254,7 +283,7 @@ func (r *Runtime) makeLoadFunc(ctx context.Context, libPredeclared starlark.Stri
 		// Share the same cache for nested loads
 		libThread.Load = r.makeLoadFunc(ctx, libPredeclared, cache)
 
-		globals, err := starlark.ExecFileOptions(fileOptions(), libThread, module, data, libPredeclared)
+		globals, err := starlark.ExecFileOptions(blueprintFileOptions(), libThread, module, data, libPredeclared)
 		if err != nil {
 			delete(cache, absPath)
 			return nil, fmt.Errorf("load(%q): %w", module, err)
@@ -330,8 +359,10 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 	loadCache := make(map[string]starlark.StringDict)
 	thread.Load = r.makeLoadFunc(ctx, libPredeclared, loadCache)
 
-	// Execute the script with Python-like semantics enabled
-	_, err := starlark.ExecFileOptions(fileOptions(), thread, target+".star", code, predeclared)
+	// Ad-hoc Run() uses permissive options (top-level if/for/while OK,
+	// global reassign OK). Blueprints loaded via load() get the strict
+	// blueprintFileOptions instead.
+	_, err := starlark.ExecFileOptions(adhocFileOptions(), thread, target+".star", code, predeclared)
 	if err != nil {
 		return nil, fmt.Errorf("run script: %w", err)
 	}
