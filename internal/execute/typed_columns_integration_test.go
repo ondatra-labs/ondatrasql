@@ -46,7 +46,44 @@ func TestExtractTypedSelectColumns_CastTypes(t *testing.T) {
 	}
 }
 
-func TestExtractTypedSelectColumns_AliasOverrides(t *testing.T) {
+// In v0.30.0 the SQL alias on a CAST projection is the materialized
+// column name in DuckLake, NOT the column name the blueprint sees in
+// columns[]. The blueprint always sees the cast's source column ref —
+// the API field name it queries by and uses as the row key. This lets
+// a @fetch model rename API fields at projection time without the
+// blueprint having to change.
+
+func TestExtractTypedSelectColumns_RenameViaAlias(t *testing.T) {
+	// Concrete @fetch alias-rename example from the plan: API field
+	// AD_UNIT_NAME materializes as ad_unit. The blueprint must see
+	// AD_UNIT_NAME (the API name); DuckLake must store ad_unit (the
+	// internal name). Without this invariant the blueprint would have
+	// to know about ad_unit, breaking the layer separation.
+	p := testutil.NewProject(t)
+
+	astJSON, err := lineage.GetAST(p.Sess,
+		"SELECT AD_UNIT_NAME::VARCHAR AS ad_unit, AD_SERVER_IMPRESSIONS::BIGINT AS impressions FROM gam_report()")
+	if err != nil {
+		t.Fatalf("get AST: %v", err)
+	}
+	ast, _ := duckast.Parse(astJSON)
+	cols := extractTypedSelectColumns(ast)
+	if len(cols) != 2 {
+		t.Fatalf("got %d columns, want 2", len(cols))
+	}
+	col0 := cols[0].(map[string]any)
+	col1 := cols[1].(map[string]any)
+
+	// Blueprint sees the API field name, not the alias.
+	if col0["name"] != "AD_UNIT_NAME" {
+		t.Errorf("col 0: name = %v, want AD_UNIT_NAME (cast source — alias is the materialized name)", col0["name"])
+	}
+	if col1["name"] != "AD_SERVER_IMPRESSIONS" {
+		t.Errorf("col 1: name = %v, want AD_SERVER_IMPRESSIONS", col1["name"])
+	}
+}
+
+func TestExtractTypedSelectColumns_AliasDoesNotOverride(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	astJSON, err := lineage.GetAST(p.Sess, "SELECT price::DOUBLE AS unit_price FROM t")
@@ -59,8 +96,8 @@ func TestExtractTypedSelectColumns_AliasOverrides(t *testing.T) {
 		t.Fatalf("got %d columns, want 1", len(cols))
 	}
 	col := cols[0].(map[string]any)
-	if col["name"] != "unit_price" {
-		t.Errorf("name = %v, want unit_price (alias should override)", col["name"])
+	if col["name"] != "price" {
+		t.Errorf("name = %v, want price (cast source — alias should NOT override the column dict)", col["name"])
 	}
 	if col["type"] != "float" {
 		t.Errorf("type = %v, want float", col["type"])

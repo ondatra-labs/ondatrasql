@@ -579,7 +579,13 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 		var normalized map[string]any
 
 		if item.Class() == "CAST" {
-			// SELECT col::TYPE AS alias — extract type recursively from AST
+			// `SELECT col::TYPE AS alias` — type comes from the cast,
+			// `name` comes from the cast's child COLUMN_REF (the API
+			// field name the blueprint queries by and uses as row key).
+			// The SQL alias is the materialized column name in DuckLake;
+			// it is intentionally NOT mirrored here so that blueprints
+			// can rename columns at projection time without changing
+			// what they fetch.
 			castType := item.Field("cast_type")
 			normalized = normalizeTypeFromAST(castType)
 			child := item.Field("child")
@@ -588,9 +594,6 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 				if len(names) > 0 {
 					name = names[len(names)-1]
 				}
-			}
-			if alias := item.Alias(); alias != "" {
-				name = alias
 			}
 		} else if item.Class() == "COLUMN_REF" {
 			names := item.ColumnNames()
