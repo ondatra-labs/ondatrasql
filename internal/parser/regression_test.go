@@ -209,3 +209,111 @@ func TestParseModel_PlainCommentInSQLBody_OK(t *testing.T) {
 		t.Errorf("model.Kind = %q, want table", model.Kind)
 	}
 }
+
+// --- @fetch directive (v0.30.0) ---
+
+func TestParseModel_FetchDirective_BareMarker_OK(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "fetched.sql"), []byte(
+		"-- @kind: append\n-- @fetch\nSELECT id::BIGINT AS id FROM mylib()"), 0o644)
+
+	model, err := ParseModel(filepath.Join(modelsDir, "fetched.sql"), dir)
+	if err != nil {
+		t.Fatalf("bare @fetch should parse: %v", err)
+	}
+	if !model.Fetch {
+		t.Error("model.Fetch should be true after parsing @fetch")
+	}
+}
+
+func TestParseModel_FetchDirective_WithColon_Rejected(t *testing.T) {
+	t.Parallel()
+	// @fetch is a bare marker; arguments belong on the FROM lib(args) call.
+	// A user typing `@fetch: lib_name` is mixing it up with @push.
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
+		"-- @kind: append\n-- @fetch: mylib\nSELECT id::BIGINT AS id FROM mylib()"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
+	if err == nil {
+		t.Fatal("@fetch with colon-arg should be rejected")
+	}
+	if !strings.Contains(err.Error(), "bare marker") {
+		t.Errorf("error should explain @fetch is a bare marker, got: %v", err)
+	}
+}
+
+func TestParseModel_FetchDirective_WithSpaceArg_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
+		"-- @kind: append\n-- @fetch arg1\nSELECT id::BIGINT AS id FROM mylib()"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
+	if err == nil {
+		t.Fatal("@fetch with trailing arg should be rejected")
+	}
+	if !strings.Contains(err.Error(), "bare marker") {
+		t.Errorf("error should explain @fetch is a bare marker, got: %v", err)
+	}
+}
+
+func TestParseModel_FetchDirective_WithEventsKind_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
+		"-- @kind: events\n-- @fetch\nid BIGINT NOT NULL"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
+	if err == nil {
+		t.Fatal("@fetch + @kind: events should be rejected")
+	}
+	if !strings.Contains(err.Error(), "events") {
+		t.Errorf("error should mention events, got: %v", err)
+	}
+}
+
+func TestParseModel_FetchDirective_WithPush_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
+		"-- @kind: merge\n-- @unique_key: id\n-- @fetch\n-- @push: hubspot_push\nSELECT 1::BIGINT AS id FROM mylib()"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
+	if err == nil {
+		t.Fatal("@fetch + @push should be rejected")
+	}
+	if !strings.Contains(err.Error(), "@fetch and @push") {
+		t.Errorf("error should mention @fetch and @push, got: %v", err)
+	}
+}
+
+// @fetch is a recognised directive — appearing in the SQL body must
+// trigger the same "directive after SQL body" rejection as other directives.
+func TestParseModel_FetchDirective_AfterSQLBody_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
+		"-- @kind: append\nSELECT 1 AS id\n-- @fetch"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
+	if err == nil {
+		t.Fatal("@fetch after SQL body should be rejected")
+	}
+	if !strings.Contains(err.Error(), "after SQL body") {
+		t.Errorf("error should mention 'after SQL body', got: %v", err)
+	}
+}

@@ -124,6 +124,13 @@ type Model struct {
 	// Mapped to push.args names in the API dict.
 	PushArgs []string
 
+	// Fetch marks the model as a lib-backed fetch model. Set via the bare
+	// `@fetch` directive. Required on every model that contains a lib call
+	// in FROM (enforced at runtime in v0.30.0). Activates the strict
+	// schema validator (CAST + alias on every projection, no JOIN/WHERE/
+	// aggregate/etc.).
+	Fetch bool
+
 	// FilePath is the original file path (empty for database-stored models).
 	FilePath string
 }
@@ -232,6 +239,8 @@ var (
 	sinkRe                  = regexp.MustCompile(`^` + c + `\s*@sink:\s*(.*)$`)
 	sinkDetectDeletesRe     = regexp.MustCompile(`^` + c + `\s*@sink_detect_deletes:\s*(.+)$`)
 	sinkDeleteThresholdRe   = regexp.MustCompile(`^` + c + `\s*@sink_delete_threshold:\s*(.+)$`)
+	fetchRe                 = regexp.MustCompile(`^` + c + `\s*@fetch\s*$`)
+	fetchAnyRe              = regexp.MustCompile(`^` + c + `\s*@fetch\b`)
 	commentRe = regexp.MustCompile(`^(?:--|//|#)`)
 )
 
@@ -397,6 +406,12 @@ func ParseModel(path, projectDir string) (*Model, error) {
 				model.ExposeKey = strings.TrimSpace(matches[1])
 			}
 
+		case fetchRe.MatchString(trimmed):
+			model.Fetch = true
+
+		case fetchAnyRe.MatchString(trimmed):
+			return nil, fmt.Errorf("@fetch is a bare marker — write `-- @fetch` with no arguments. To pass arguments to the lib call, use `FROM lib_name(arg1, arg2)`")
+
 		case sinkRe.MatchString(trimmed):
 			return nil, fmt.Errorf("@sink was renamed to @push in v0.30.0 — update the directive (e.g. @push: hubspot_push)")
 
@@ -522,6 +537,8 @@ func isDirectiveLine(trimmed string) bool {
 		exposeRe.MatchString(trimmed),
 		pushRe.MatchString(trimmed),
 		sinkRe.MatchString(trimmed),
+		fetchRe.MatchString(trimmed),
+		fetchAnyRe.MatchString(trimmed),
 		sinkDetectDeletesRe.MatchString(trimmed),
 		sinkDeleteThresholdRe.MatchString(trimmed):
 		return true
@@ -644,6 +661,20 @@ func validateModel(m *Model) error {
 	// Validate @sink directives
 	if m.Push != "" && m.Kind == "events" {
 		return fmt.Errorf("@sink is not supported for events kind (events has its own ingest pipeline)")
+	}
+
+	// @fetch directive validations.
+	// The lib-call relationship rules (@fetch ↔ at least one lib call,
+	// no @fetch ↔ no lib calls) are enforced at runtime in the execute
+	// package, since they require the lib registry. Here we only enforce
+	// the directive-only combinations that don't need lib knowledge.
+	if m.Fetch {
+		if m.Kind == "events" {
+			return fmt.Errorf("@fetch is not compatible with @kind: events (events models have their own ingest pipeline)")
+		}
+		if m.Push != "" {
+			return fmt.Errorf("@fetch and @push cannot be combined on the same model — split into a @fetch model that materializes raw data and a downstream @push model that reads from it")
+		}
 	}
 
 	// Validate unique_key if present (single column only — composite keys use @group_key)
