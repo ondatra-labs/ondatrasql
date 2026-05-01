@@ -733,9 +733,18 @@ func odataVersion(next http.Handler) http.Handler {
 // (which would mean changing FormatResponse's exported signature).
 //
 // Returns the original bytes if the input doesn't end with `}` (defensive
-// against unexpected serialization shapes).
+// against unexpected serialization shapes), or if the response is so large
+// that the size computation would risk overflowing int. A 1 GiB OData
+// response is far above any reasonable response — if we ever see one it's
+// a symptom of a different problem and dropping the deltaLink annotation
+// is the right failure mode.
+const maxAnnotatedResponseSize = 1 << 30 // 1 GiB
+
 func appendODataAnnotation(data []byte, key, value string) []byte {
 	if len(data) == 0 || data[len(data)-1] != '}' {
+		return data
+	}
+	if len(data) > maxAnnotatedResponseSize {
 		return data
 	}
 	encodedValue, _ := json.Marshal(value)
