@@ -56,12 +56,13 @@ ondatrasql edit raw.countries
 
 ```sql
 -- @kind: table
+-- @fetch
 
 SELECT name::VARCHAR AS name, capital::VARCHAR AS capital, population::BIGINT AS population
 FROM rest_countries('europe')
 ```
 
-The file path determines the target table: `raw.countries`. Lib-backed models cast every projected column explicitly — see [SQL schema contract](/reference/lib-functions/fetch-contract/#sql-schema-contract).
+The file path determines the target table: `raw.countries`. `@fetch` declares this as a lib-backed model — every projected column is cast explicitly. See [Fetch Contract](/reference/lib-functions/fetch-contract/#sql-schema-contract).
 
 ## 4. Transform with SQL
 
@@ -136,7 +137,7 @@ ondatrasql sql "SELECT * FROM mart.population"
 ## Additional capabilities
 
 - **Serve to BI tools**: add [`@expose`](/guides/serve-data-via-odata/) and connect Power BI, Excel, or Grafana via OData v4
-- **Outbound sync**: [push data to APIs](/guides/outbound-sync/) with `@sink` and automatic change detection
+- **Outbound sync**: [push data to APIs](/guides/outbound-sync/) with `@push` and automatic change detection
 - **Ingest from APIs**: [blueprints](/reference/lib-functions/api-dict/) with HTTP, OAuth, and pagination
 - **Collect events**: [POST to an embedded endpoint](/guides/collect-events/) with in-memory and batch buffering
 - **Validate data**: [constraints, audits, and warnings](/reference/) with atomic rollback

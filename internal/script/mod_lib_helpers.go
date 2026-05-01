@@ -50,9 +50,12 @@ func duckTypeToJSONSchema(t starlark.Value) (starlark.Value, error) {
 		return primitiveDuckTypeToJSONSchema(string(v)), nil
 
 	case *starlark.List:
-		// LIST → array. The inner type is the first element.
+		// LIST → array. The inner type is the first element. An empty
+		// list maps to `{"type": "array"}` (any-array) — symmetric to
+		// the empty-STRUCT case below, both being the loose JSON Schema
+		// form of a composite with no inner constraint.
 		if v.Len() == 0 {
-			return jsonSchemaDict("type", starlark.String("string")), nil
+			return jsonSchemaDict("type", starlark.String("array")), nil
 		}
 		inner := v.Index(0)
 		items, err := duckTypeToJSONSchema(inner)

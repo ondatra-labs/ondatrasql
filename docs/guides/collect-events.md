@@ -1,5 +1,4 @@
 ---
-date: "2026-03-24"
 description: Collect events via HTTP POST with in-memory buffering. Events are materialized into DuckLake during pipeline runs. Use batch endpoint for durability.
 draft: false
 title: Collect Events

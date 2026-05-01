@@ -1,5 +1,4 @@
 ---
-date: "2026-04-20"
 description: How to build a lib function for API ingestion or outbound sync. Step-by-step from API dict to working fetch/push function.
 draft: false
 title: Create a Lib Function
@@ -14,7 +13,7 @@ mkdir -p lib
 touch lib/my_api.star
 ```
 
-The file name becomes the function name in SQL: `FROM my_api(...)` or `@sink: my_api`.
+The file name becomes the function name in SQL: `FROM my_api(...)` or `@push: my_api`.
 
 ## 2. Define the API dict
 
@@ -59,7 +58,7 @@ API = {
 - `args` — parameter names passed from SQL: `FROM my_api('users')` → `resource = "users"`
 - `page_size` — enables pagination (runtime manages the loop)
 
-SQL controls the schema. Column names and [normalized types](/reference/lib-functions/fetch-contract/#typed-columns) are extracted from your SELECT casts and passed to `fetch()` as the `columns` kwarg.
+SQL controls the schema. Column names and [DuckDB-native types](/reference/lib-functions/fetch-contract/#typed-columns) are extracted from your SELECT casts and passed to `fetch()` as the `columns` kwarg.
 
 ## 4. Write the fetch function
 
@@ -95,6 +94,7 @@ Use the two-model pattern — raw fetches, staging transforms:
 ```sql
 -- models/raw/users.sql
 -- @kind: append
+-- @fetch
 -- @incremental: updated_at
 
 SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email,
@@ -102,7 +102,7 @@ SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email,
 FROM my_api('users')
 ```
 
-Every column from a lib must be cast — see [SQL schema contract](/reference/lib-functions/fetch-contract/#sql-schema-contract). The casts also flow to the blueprint as [normalized types](/reference/lib-functions/fetch-contract/#typed-columns): `::JSON` becomes `"json"`, `::DECIMAL` becomes `"decimal"`.
+`@fetch` is required on every model that calls a lib in `FROM`. Every column must be cast — see [SQL schema contract](/reference/lib-functions/fetch-contract/#sql-schema-contract). The casts flow to the blueprint as [DuckDB-native types](/reference/lib-functions/fetch-contract/#typed-columns): `::JSON` becomes `"JSON"`, `::DECIMAL(18,3)` becomes `"DECIMAL(18,3)"`, `::TIMESTAMPTZ` becomes `"TIMESTAMPTZ"`.
 
 **Staging model** — SQL transforms, casts types, expands JSON:
 
@@ -171,21 +171,29 @@ def push(rows=[], batch_number=1):
     return results
 ```
 
-SQL model with `@sink`:
+SQL model with `@push`:
 
 ```sql
 -- models/sync/contacts.sql
 -- @kind: merge
 -- @unique_key: id
--- @sink: my_api
+-- @push: my_api
 
-SELECT id, name, email FROM staging.contacts
+SELECT
+    id::BIGINT AS id,
+    name::VARCHAR AS name,
+    email::VARCHAR AS email
+FROM staging.contacts
 ```
+
+`@push` and `@fetch` cannot be combined on the same model. To push data fetched from one API to another, split into a `@fetch` model that materializes the raw rows and a downstream `@push` model that reads from the materialized table.
 
 SQL can build nested JSON for APIs that expect structured payloads:
 
 ```sql
-SELECT id, json_object('name', name, 'email', email, 'tags', json_group_array(tag)) AS properties
+SELECT
+    id::BIGINT AS id,
+    json_object('name', name, 'email', email, 'tags', json_group_array(tag))::JSON AS properties
 FROM staging.contacts JOIN staging.tags USING (id)
 GROUP BY id, name, email
 ```
@@ -196,6 +204,7 @@ GROUP BY id, name, email
 
 ```sql
 -- @kind: append
+-- @fetch
 -- @incremental: updated_at
 SELECT id::BIGINT AS id, kind::VARCHAR AS kind, updated_at::TIMESTAMP AS updated_at
 FROM my_api('events')

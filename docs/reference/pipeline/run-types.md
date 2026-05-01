@@ -33,7 +33,7 @@ The run-type hash includes: SQL body, `@kind`, `@unique_key`, `@group_key`, `@pa
 
 ## Sink on skip
 
-When a model is skipped but has `@sink`, the runner still drains pending Badger backlog from previous failed pushes. No new delta is generated.
+When a model is skipped but has `@push`, the runner still drains pending Badger backlog from previous failed pushes. No new delta is generated.
 
 ## Incremental kwargs
 

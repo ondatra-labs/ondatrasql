@@ -399,4 +399,4 @@ Not supported:
 - `$format=xml` / Atom serialization
 - `Prefer: respond-async`
 
-For write access to external systems, use `@sink`.
+For write access to external systems, use `@push`.

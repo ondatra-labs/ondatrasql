@@ -210,3 +210,37 @@ func TestToJSONSchema_RejectsBadInput(t *testing.T) {
 		t.Errorf("error should explain expected types, got: %v", err)
 	}
 }
+
+// Empty LIST and empty STRUCT both map to their loose JSON Schema
+// counterparts — `{"type": "array"}` and `{"type": "object", "properties": {}}`.
+// normalizeTypeFromAST never emits empty composites in practice, but the
+// helper is callable from blueprint code that may construct types
+// dynamically, so a lenient mapping is safer than a runtime error.
+func TestToJSONSchema_EmptyList(t *testing.T) {
+	t.Parallel()
+	v := runStarlark(t, `lib_helpers.to_json_schema([])`)
+	if got := schemaTypeOf(t, v); got != "array" {
+		t.Errorf("empty list: type = %q, want array", got)
+	}
+	d := v.(*starlark.Dict)
+	if _, found, _ := d.Get(starlark.String("items")); found {
+		t.Errorf("empty list: should not carry an `items` key (no inner type to recurse on)")
+	}
+}
+
+func TestToJSONSchema_EmptyStruct(t *testing.T) {
+	t.Parallel()
+	v := runStarlark(t, `lib_helpers.to_json_schema({})`)
+	if got := schemaTypeOf(t, v); got != "object" {
+		t.Errorf("empty struct: type = %q, want object", got)
+	}
+	d := v.(*starlark.Dict)
+	props, found, _ := d.Get(starlark.String("properties"))
+	if !found {
+		t.Fatal("empty struct: missing `properties` key")
+	}
+	pd, ok := props.(*starlark.Dict)
+	if !ok || pd.Len() != 0 {
+		t.Errorf("empty struct: properties should be an empty dict, got %v", props)
+	}
+}

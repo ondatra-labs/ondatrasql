@@ -1,11 +1,31 @@
 ---
-date: "2026-04-20"
+date: "2026-05-01"
 description: 'Complete reference for the fetch() function contract: page object, return format, pagination, incremental state, and available modules.'
 draft: false
 title: Fetch Contract
 weight: 12
 ---
 Your `fetch()` function is called once per page by the runtime. It receives pagination context and returns rows. Starlark handles I/O — SQL handles transformation.
+
+## The `@fetch` directive
+
+A model that calls a lib function in its `FROM` clause must declare `@fetch`:
+
+```sql
+-- @kind: append
+-- @fetch
+-- @incremental: date
+
+SELECT
+    series::VARCHAR AS series,
+    date::DATE AS date,
+    value::DECIMAL(18,6) AS value
+FROM riksbank('SEKEURPMI')
+```
+
+`@fetch` is a bare marker (no arguments). Arguments to the lib call go on the `FROM` line, not the directive. The directive activates the strict-fetch validator and signals "this model produces its schema from a lib call".
+
+A `@fetch` model and a `@push` model are two different things — they cannot be combined on the same model. To push data fetched from one API to another, split into a `@fetch` model that materializes the raw rows and a downstream `@push` model that reads from the materialized table.
 
 ## Function signature
 
@@ -44,46 +64,76 @@ All are optional — declare them with defaults if your blueprint needs them. In
 
 ### Typed columns {#typed-columns}
 
-`columns` is how SQL communicates schema intent to Starlark. Each entry is a dict with `name`, `type` (normalized DuckDB type), and `json_schema_type` (JSON Schema equivalent):
+`columns` is how SQL communicates schema intent to Starlark. Each entry is a dict with `name` and `type`. The `type` is in DuckDB-native syntax — the same shape DuckDB's `json_structure` produces and `json_transform` consumes.
 
 ```python
 columns = [
-    {"name": "invoice_number", "type": "string", "json_schema_type": "string"},
-    {"name": "total", "type": "decimal", "json_schema_type": "number", "precision": "18", "scale": "3"},
-    {"name": "date", "type": "date", "json_schema_type": "string"},
-    {"name": "line_items", "type": "json", "json_schema_type": "array"},
-    {"name": "tags", "type": "list", "json_schema_type": "array", "element": {"type": "string", "json_schema_type": "string"}},
-    {"name": "address", "type": "struct", "json_schema_type": "object", "fields": [
-        {"name": "street", "type": "string", "json_schema_type": "string"},
-        {"name": "zip", "type": "integer", "json_schema_type": "integer"},
-    ]},
+    {"name": "invoice_number", "type": "VARCHAR"},
+    {"name": "total",          "type": "DECIMAL(18,3)"},
+    {"name": "date",           "type": "DATE"},
+    {"name": "created_at",     "type": "TIMESTAMPTZ"},
+    {"name": "items",          "type": "JSON"},
+    {"name": "tags",           "type": ["VARCHAR"]},
+    {"name": "address",        "type": {"street": "VARCHAR", "zip": "INTEGER"}},
 ]
 ```
 
-SQL casts control the types. Every column from a lib must be cast (see [SQL schema contract](#sql-schema-contract) below):
+| SQL | `type` |
+|---|---|
+| `name::VARCHAR` | `"VARCHAR"` |
+| `total::DECIMAL(10,2)` | `"DECIMAL(10,2)"` |
+| `total::DECIMAL` | `"DECIMAL(18,3)"` (default precision/scale) |
+| `count::INTEGER` | `"INTEGER"` |
+| `count::BIGINT` | `"BIGINT"` |
+| `rate::DOUBLE` | `"DOUBLE"` |
+| `rate::FLOAT` | `"FLOAT"` |
+| `active::BOOLEAN` | `"BOOLEAN"` |
+| `date::DATE` | `"DATE"` |
+| `ts::TIMESTAMP` | `"TIMESTAMP"` |
+| `ts::TIMESTAMPTZ` | `"TIMESTAMPTZ"` |
+| `items::JSON` | `"JSON"` |
+| `id::UUID` | `"UUID"` |
+| `tags::VARCHAR[]` | `["VARCHAR"]` |
+| `person::STRUCT(name VARCHAR, age INTEGER)` | `{"name": "VARCHAR", "age": "INTEGER"}` |
+| `m::MAP(VARCHAR, INTEGER)` | `"MAP(VARCHAR, INTEGER)"` |
 
-| SQL                    | `type`      | `json_schema_type` | Extra fields                    |
-| ---------------------- | ----------- | ------------------ | ------------------------------- |
-| `name::VARCHAR`        | `string`    | `string`           | —                               |
-| `total::DECIMAL`       | `decimal`   | `number`           | `precision`, `scale`            |
-| `total::DECIMAL(10,2)` | `decimal`   | `number`           | `precision: "10"`, `scale: "2"` |
-| `count::INTEGER`       | `integer`   | `integer`          | —                               |
-| `rate::DOUBLE`         | `float`     | `number`           | —                               |
-| `active::BOOLEAN`      | `boolean`   | `boolean`          | —                               |
-| `date::DATE`           | `date`      | `string`           | —                               |
-| `ts::TIMESTAMP`        | `timestamp` | `string`           | `tz: false`, `precision: "us"`  |
-| `ts::TIMESTAMPTZ`      | `timestamp` | `string`           | `tz: true`, `precision: "us"`   |
-| `items::JSON`          | `json`      | `array`            | —                               |
-| `id::UUID`             | `uuid`      | `string`           | —                               |
-| `tags::VARCHAR[]`      | `list`      | `array`            | `element: {"type": "string"}`   |
-| `person::STRUCT(...)`  | `struct`    | `object`           | `fields: [...]` (recursive)     |
-| `m::MAP(VARCHAR, INT)` | `map`       | `object`           | `key: {...}`, `value: {...}`    |
+Width and precision distinctions are preserved (`TINYINT` vs `BIGINT`, `FLOAT` vs `DOUBLE`, `TIMESTAMP_NS` vs `TIMESTAMPTZ`) — the column dict carries enough information to round-trip back to the same DuckDB type.
 
-Blueprints choose which field to use:
+The `name` field is the **cast source column reference**, not the SQL alias. For
 
-- `col["json_schema_type"]` — for APIs that accept JSON Schema (Mistral OCR, OpenAI, etc.)
-- `col["type"]` — for blueprints that need the normalized type (GAM: `string` = dimension)
-- Neither — for APIs that don't need type information (Riksbank, Google Sheets fetch)
+```sql
+SELECT AD_UNIT_NAME::VARCHAR AS ad_unit FROM gam_report()
+```
+
+the blueprint sees `name = "AD_UNIT_NAME"` (the API field it queries by and uses as the row key). The alias `ad_unit` is the materialized column name in DuckLake; the runtime renames at projection time without involving the blueprint. This lets a model author rename API fields without modifying the lib.
+
+#### JSON Schema mapping
+
+Blueprints that talk to JSON-Schema-aware APIs (OpenAI structured outputs, Mistral OCR, Anthropic) use the `lib_helpers.to_json_schema` helper to convert a DuckDB type into a JSON Schema dict:
+
+```python
+def fetch(page, columns=[]):
+    schema = {"type": "object", "properties": {
+        col["name"]: lib_helpers.to_json_schema(col["type"])
+        for col in columns
+    }}
+    resp = http.post("/v1/structured", json={"schema": schema, ...})
+```
+
+| DuckDB type | JSON Schema |
+|---|---|
+| `BIGINT`, `INTEGER`, `SMALLINT`, `TINYINT`, `HUGEINT` (and unsigned variants) | `{"type": "integer"}` |
+| `DECIMAL(...)`, `DOUBLE`, `FLOAT`, `REAL` | `{"type": "number"}` |
+| `BOOLEAN` | `{"type": "boolean"}` |
+| `DATE` | `{"type": "string", "format": "date"}` |
+| `TIMESTAMP*` (any variant) | `{"type": "string", "format": "date-time"}` |
+| Other primitives (`VARCHAR`, `UUID`, `JSON`, `BLOB`, `MAP(...)`, `UNION(...)`) | `{"type": "string"}` |
+| `["TYPE"]` (LIST) | `{"type": "array", "items": <recurse>}` |
+| `{"field": "TYPE", ...}` (STRUCT) | `{"type": "object", "properties": {...}}` |
+
+Width/precision distinctions inside DuckDB collapse to the same JSON Schema type — JSON Schema doesn't carry that information.
+
+Blueprints that don't need a JSON Schema (Riksbank, Google Sheets fetch) ignore the `type` field entirely.
 
 ## Page object
 
@@ -94,49 +144,35 @@ Read-only struct:
 | `page.cursor` | any | `None` on first page. On subsequent pages, whatever you returned as `next`. |
 | `page.size` | int | From `API.fetch.page_size`. Constant across all pages. |
 
-## SQL schema contract
+## SQL schema contract {#sql-schema-contract}
 
-For lib-backed models, SQL is the complete schema source. Every output column must be selected explicitly, cast explicitly to its final DuckDB type, and named explicitly. Schema inference from returned rows, from existing targets, or from `SELECT *` is not part of the contract.
+A `@fetch` model is a passthrough projection of API rows. The strict-fetch validator runs before any `fetch()` call and rejects any model that doesn't fit the canonical shape:
 
 ```sql
+-- @fetch
 SELECT
-    id::BIGINT          AS id,
-    name::VARCHAR       AS name,
-    total::DECIMAL(10,2) AS total,
-    items::JSON         AS items,
-    created_at::TIMESTAMPTZ AS created_at
-FROM my_lib('items')
+    col1::TYPE AS alias1,
+    col2::TYPE AS alias2,
+    ...
+FROM lib(args)
 ```
 
-The rules apply to every projection in every SELECT in the model — top-level, CTEs, set-op branches (`UNION`, `INTERSECT`, `EXCEPT`), and subqueries:
+That's it. Every constraint below is mechanical:
 
-- `SELECT *` is rejected.
-- The outermost node of every projection must be a `CAST`. Bare column refs, computed expressions, function calls, and literals are all rejected unless wrapped in a cast.
-- Every projection must carry an explicit alias (`AS name`). Implicit names from underlying column refs do not count.
-- Two projections in the same SELECT cannot share the same output name.
-
-The rule applies uniformly to every output column — including columns from regular tables joined with the lib. Columns referenced only in `WHERE`, `JOIN ON`, or `GROUP BY` (not projected) are unaffected; they are not in the output schema.
-
-Valid:
-
-```sql
-SELECT
-    u.name::VARCHAR AS name,
-    s.score::BIGINT AS score
-FROM reg.users u
-JOIN my_lib('scores') s ON u.user_id = s.user_id
-```
-
-Invalid:
-
-```sql
-SELECT * FROM my_lib('items')
-SELECT id, name, total FROM my_lib('items')
-SELECT id::BIGINT AS id, price * qty AS total FROM my_lib('items')
-SELECT id::BIGINT, name::VARCHAR FROM my_lib('items')
-```
-
-The fix for the third row is `(price * qty)::DECIMAL(10,2) AS total`. The fix for the fourth row is `AS id` and `AS name`.
+| Rule | Why |
+|---|---|
+| `SELECT *` is rejected | The output schema must be explicit, not inferred |
+| Every projection must be wrapped in `CAST` | Types come from SQL, not from data inspection |
+| The CAST argument must be a bare or qualified `COLUMN_REF` (`col` or `tbl.col`) | The projection mirrors the API field — derived expressions, function calls, and arithmetic belong in a downstream model |
+| Every projection must carry an explicit `AS alias` | The materialized column name is declared, not implicit |
+| Two projections in the same SELECT cannot share an alias | Output schema must be unambiguous |
+| `FROM` must be exactly one lib call | `JOIN`, regular tables, subqueries, multi-source FROM are all rejected — split into a downstream model |
+| No `WHERE` | Filtering happens via lib args (server-side) or in a downstream model |
+| No `GROUP BY` or aggregate functions in projection | Aggregation belongs in a downstream model |
+| No `DISTINCT` | Deduplication belongs in a downstream model |
+| No `ORDER BY` | Ordering belongs in a downstream model |
+| No `LIMIT` / `OFFSET` (cross-cutting) | Pagination is the lib's job; sampling belongs in `ondatrasql query --limit N` |
+| No `UNION` / `INTERSECT` / `EXCEPT` | One lib call → one model |
 
 Validation runs at the start of every `ondatrasql run` / `ondatrasql sandbox`. A violation aborts the run before any `fetch()` is called, naming the offending projection.
 
@@ -144,6 +180,8 @@ Two consequences worth knowing:
 
 - **Empty fetches** produce a typed target from the SQL alone — the runtime never has to guess types on the first run or after a schema change.
 - **Schema evolution** is detected from the SQL diff, not from runtime data inspection. Add a column to the SELECT and the next run alters the target.
+
+The fix for almost every rejection is the two-model pattern below.
 
 ## Return format
 
@@ -257,13 +295,14 @@ if start_date > yesterday:
 
 ## The two-model pattern
 
-Blueprints return raw API data. SQL transforms it in a downstream model. This keeps the layers separate:
+`@fetch` models stay close to the API shape. Transformation — JOIN, WHERE, GROUP BY, derived expressions, multi-source combination — happens in downstream models that read from the materialized fetch table.
 
-**Raw model** — Starlark fetches, column names match the API:
+**Raw model** (`@fetch`) — column refs match the API:
 
 ```sql
 -- models/raw/data.sql
 -- @kind: append
+-- @fetch
 -- @incremental: date
 
 SELECT
@@ -287,7 +326,34 @@ FROM raw.data
 GROUP BY date
 ```
 
-Don't alias or transform in the raw model. Don't call APIs in the staging model. Each layer does one thing.
+**Joining two libs** — write two raw models, then join in staging:
+
+```sql
+-- models/raw/users.sql
+-- @kind: table
+-- @fetch
+SELECT user_id::BIGINT AS user_id, name::VARCHAR AS name FROM users_api('users')
+```
+
+```sql
+-- models/raw/scores.sql
+-- @kind: table
+-- @fetch
+SELECT user_id::BIGINT AS user_id, score::BIGINT AS score FROM scores_api('scores')
+```
+
+```sql
+-- models/staging/joined.sql
+-- @kind: table
+SELECT
+    u.user_id::BIGINT AS user_id,
+    u.name::VARCHAR AS name,
+    s.score::BIGINT AS score
+FROM raw.users u
+JOIN raw.scores s ON u.user_id = s.user_id
+```
+
+The split is mechanical and worth it: each `@fetch` model has its own lib lifecycle, its own incremental state, and a deterministic shape contract. The downstream model is plain SQL.
 
 ## Available builtins and modules
 
@@ -301,6 +367,7 @@ Don't alias or transform in the raw model. Don't call APIs in the staging model.
 | `time` | Date/time operations (Starlark stdlib). |
 | `xml` | XML parsing. |
 | `csv` | CSV parsing. |
+| `lib_helpers` | OndatraSQL helpers: `lib_helpers.to_json_schema(t)` converts a DuckDB type to a JSON Schema dict. |
 
 ### DuckDB-backed builtins
 

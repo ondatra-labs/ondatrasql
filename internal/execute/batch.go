@@ -57,6 +57,8 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, confi
 				PartitionedBy:      m.PartitionedBy,
 				Incremental:        m.Incremental,
 				IncrementalInitial: m.IncrementalInitial,
+				Fetch:              m.Fetch,
+				Push:               m.Push,
 				ConfigHash:         cfgHash,
 			}),
 			kind: m.Kind,
@@ -127,6 +129,8 @@ func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model, configHash 
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
+		Fetch:              model.Fetch,
+		Push:               model.Push,
 		ConfigHash:         cfgHash,
 	}), "'", "''")
 	kind := strings.ReplaceAll(model.Kind, "'", "''")

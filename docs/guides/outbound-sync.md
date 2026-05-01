@@ -1,11 +1,10 @@
 ---
-date: "2026-04-04T00:00:00+02:00"
-description: Push pipeline data to external APIs using @sink. Step-by-step setup with batching, rate limiting, and per-row tracking.
+description: Push pipeline data to external APIs using @push. Step-by-step setup with batching, rate limiting, and per-row tracking.
 draft: false
 title: Sync Data to External APIs
 weight: 9
 ---
-Push data to external systems using `@sink`. The runtime handles batching, rate limiting, per-row tracking, and crash recovery.
+Push data to external systems using `@push`. The runtime handles batching, rate limiting, per-row tracking, and crash recovery.
 
 ## 1. Create a lib function
 
@@ -58,14 +57,18 @@ Return keys are composite: `"rowid:change_type"`. This ensures that `update_prei
 -- models/sync/hubspot.sql
 -- @kind: merge
 -- @unique_key: customer_id
--- @sink: hubspot_push
+-- @push: hubspot_push
 
-SELECT customer_id, email, name, plan
+SELECT
+    customer_id::BIGINT AS customer_id,
+    email::VARCHAR AS email,
+    name::VARCHAR AS name,
+    plan::VARCHAR AS plan
 FROM mart.customers
 WHERE active = true
 ```
 
-`@sink` works with `table`, `append`, `merge`, and `tracked` kinds.
+`@push` works with `table`, `append`, `merge`, and `tracked` kinds.
 
 ## 3. Run
 
@@ -86,7 +89,7 @@ Each kind produces different change types from DuckLake's `table_changes()`:
 | `merge` | MERGE INTO | `insert`, `update_postimage` (+ `update_preimage`) |
 | `tracked` | DELETE + INSERT | `delete` + `insert` (your push groups by key) |
 
-`scd2` is not supported with `@sink` — use `@kind: table` with `WHERE is_current = true` to push current state.
+`scd2` is not supported with `@push` — use `@kind: table` with `WHERE is_current = true` to push current state.
 
 Your Starlark push function handles the logic. For example, tracked's DELETE+INSERT pattern means you group by key to distinguish updates from real deletes.
 
@@ -97,8 +100,12 @@ Your Starlark push function handles the logic. For example, tracked's DELETE+INS
 ```sql
 -- @kind: merge
 -- @unique_key: customer_id
--- @sink: crm_push
-SELECT customer_id, email, plan FROM mart.customers
+-- @push: crm_push
+SELECT
+    customer_id::BIGINT AS customer_id,
+    email::VARCHAR AS email,
+    plan::VARCHAR AS plan
+FROM mart.customers
 ```
 
 Push receives `insert` for new rows, `update_postimage` for changed rows. Map to POST and PATCH respectively.
@@ -108,8 +115,13 @@ Push receives `insert` for new rows, `update_postimage` for changed rows. Map to
 ```sql
 -- @kind: tracked
 -- @group_key: invoice_id
--- @sink: erp_push
-SELECT invoice_id, line_item, quantity, price FROM mart.invoice_lines
+-- @push: erp_push
+SELECT
+    invoice_id::BIGINT AS invoice_id,
+    line_item::VARCHAR AS line_item,
+    quantity::INTEGER AS quantity,
+    price::DECIMAL(18,2) AS price
+FROM mart.invoice_lines
 ```
 
 Push receives `delete` + `insert` events. Group by `invoice_id` — if a key has both deletes and inserts, it's an update. If only deletes, the entity was removed.
@@ -118,8 +130,11 @@ Push receives `delete` + `insert` events. Group by `invoice_id` — if a key has
 
 ```sql
 -- @kind: append
--- @sink: slack_post
-SELECT message, channel FROM mart.notifications
+-- @push: slack_post
+SELECT
+    message::VARCHAR AS message,
+    channel::VARCHAR AS channel
+FROM mart.notifications
 ```
 
 Push always receives `insert` — append-only data.
@@ -128,8 +143,11 @@ Push always receives `insert` — append-only data.
 
 ```sql
 -- @kind: table
--- @sink: sheets_push
-SELECT region, revenue FROM mart.regional_summary
+-- @push: sheets_push
+SELECT
+    region::VARCHAR AS region,
+    revenue::DECIMAL(18,2) AS revenue
+FROM mart.regional_summary
 ```
 
 Push receives `delete` events (from truncate) and `insert` events (new data). For a simple full replace, filter to inserts only.
@@ -139,4 +157,4 @@ Push receives `delete` events (from truncate) and `insert` events (new data). Fo
 - [Push Contract](/reference/lib-functions/push-contract/) for internal fields, return values, batch modes, and crash recovery
 - [API Dict](/reference/lib-functions/api-dict/) for all push configuration options
 - [Create a Lib Function](/guides/create-a-blueprint/) for the full blueprint walkthrough
-- [Directives](/reference/pipeline/directives/) for `@sink` and `@group_key`
+- [Directives](/reference/pipeline/directives/) for `@push` and `@group_key`

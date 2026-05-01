@@ -29,7 +29,7 @@ API = {
 
 **Inbound**: your SQL writes `FROM hubspot('contacts')`, and the runtime calls `fetch()` with managed pagination.
 
-**Outbound**: your SQL writes `@sink: hubspot`, and the runtime detects what changed and calls `push()` per batch.
+**Outbound**: your SQL writes `@push: hubspot`, and the runtime detects what changed and calls `push()` per batch.
 
 You don't register anything. Drop a `.star` file in `lib/` and it's available. The runtime scans `lib/` at startup, validates the dict, and registers DuckDB macros so the SQL parser accepts `FROM func_name(...)`.
 

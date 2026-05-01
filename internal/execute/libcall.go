@@ -710,34 +710,32 @@ func extractColumnsForLib(ast *duckast.AST, alias string, singleSource bool) []s
 }
 
 
-// validateStrictLibSchema enforces the strict-schema contract on lib-backed
+// validateStrictLibSchema enforces the strict-schema contract on `@fetch`
 // models: SQL is the complete schema source. Every output column must be
 // explicitly selected, explicitly cast to its final DuckDB type, and
-// explicitly aliased. The runtime never infers the output schema from data,
-// from the target table, or from regular-table catalog metadata.
+// explicitly aliased. The runtime never infers the output schema from
+// data, from the target table, or from regular-table catalog metadata.
 //
-// Rules — applied to every projection in every SELECT in the model
-// (top-level, CTEs, set-op branches, subqueries):
-//   - SELECT * is rejected.
-//   - Outermost node must be CAST. Bare COLUMN_REF, computed expressions,
-//     literals, function calls — all rejected unless wrapped in a cast.
-//   - The projection must carry an explicit alias (`AS name`). Implicit
-//     names from underlying COLUMN_REFs do not count.
-//   - Two projections in the same SELECT cannot share the same output name.
+// Top-level rules (the `@fetch` model is exactly one SELECT against one
+// lib call):
+//   - FROM must be a single TABLE_FUNCTION (no JOIN, BASE_TABLE, or SUBQUERY)
+//   - No WHERE, GROUP BY, DISTINCT, ORDER BY
+//   - No top-level UNION/INTERSECT/EXCEPT
 //
-// Walking every SELECT_NODE (not only the top-level one) is what closes
-// the bypass via CTE / UNION — without that, an inner `SELECT *` could
-// hide behind a properly-typed outer projection.
+// Per-SELECT rules — applied to every SELECT_NODE in the AST (top-level,
+// CTEs, set-op branches, subqueries) so an inner `SELECT *` can't hide
+// behind a properly-typed outer projection:
+//   - SELECT * is rejected
+//   - Outermost node of every projection must be CAST
+//   - CAST argument must be a bare or qualified COLUMN_REF
+//   - Every projection must carry an explicit `AS alias`
+//   - Two projections in the same SELECT cannot share an alias
 //
-// The rules apply uniformly: a column from a regular table joined with a
-// lib still needs a cast and alias. The contract is the same whether the
-// lib declares its columns statically or dynamically — for any lib-backed
-// model, SQL is the schema authority.
-//
-// Returns nil only when there are no lib calls in the model (pure SQL
-// transforms are not subject to this contract).
-func validateStrictLibSchema(ast *duckast.AST, libCalls []LibCall) error {
-	if ast == nil || len(libCalls) == 0 {
+// The caller (runner.go) gates this on `model.Fetch` — the relationship
+// rule above ensures `@fetch` implies at least one lib call, so the
+// validator never runs without a lib in FROM.
+func validateStrictLibSchema(ast *duckast.AST) error {
+	if ast == nil {
 		return nil
 	}
 

@@ -118,6 +118,8 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
+		Fetch:              model.Fetch,
+		Push:               model.Push,
 		ConfigHash:         r.configHash,
 	})
 	r.trace(result, "hash_script", stepStart, "ok")

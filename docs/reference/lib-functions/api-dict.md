@@ -111,7 +111,7 @@ API = {
 | `supported_columns` | list | none | Optional whitelist of valid column names. Validated at startup. |
 | `supported_kinds` | list | none | Optional whitelist of valid model kinds. Validated at startup. |
 
-SQL controls the schema — the runtime extracts column names and [normalized types](/reference/lib-functions/fetch-contract/#typed-columns) from the SELECT via DuckDB AST and passes them to `fetch()` as the `columns` kwarg.
+SQL controls the schema — the runtime extracts column names and [DuckDB-native types](/reference/lib-functions/fetch-contract/#typed-columns) from the SELECT via DuckDB AST and passes them to `fetch()` as the `columns` kwarg.
 
 If `supported_columns` is declared and SQL requests an unknown column, the model fails at parse time. If not declared, any column name is accepted.
 
@@ -160,7 +160,7 @@ Async mode requires `submit()`, `check()`, and `fetch_result()` functions instea
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `args` | list | `[]` | Parameter names from `@sink: name('arg1', 'arg2')` |
+| `args` | list | `[]` | Parameter names from `@push: name('arg1', 'arg2')` |
 | `supported_kinds` | list | none | Optional whitelist of valid model kinds. Validated at startup. |
 | `batch_size` | int | 1 | Rows per `push()` call |
 | `batch_mode` | string | `"sync"` | `"sync"`, `"atomic"`, or `"async"` |
@@ -169,17 +169,17 @@ Async mode requires `submit()`, `check()`, and `fetch_result()` functions instea
 | `poll_interval` | string | `"30s"` | Async polling interval |
 | `poll_timeout` | string | `"1h"` | Async polling timeout |
 
-### Sink args
+### Push args
 
 ```python
 API = {"push": {"args": ["spreadsheet_id", "range"]}}
 ```
 
 ```sql
--- @sink: gsheets('1DYJCOd...', 'Sheet1')
+-- @push: gsheets('1DYJCOd...', 'Sheet1')
 ```
 
-Args are positional strings from the `@sink` directive. Mapped to push kwargs by name:
+Args are positional strings from the `@push` directive. Mapped to push kwargs by name:
 
 ```python
 def push(rows=[], spreadsheet_id="", range=""):
@@ -198,10 +198,10 @@ All parameters are kwargs. Declare only what your blueprint needs — the runtim
 | `rows` | list | Row dicts with column values + internal fields |
 | `batch_number` | int | 1-based batch counter |
 | `kind` | string | Model kind: `table`, `append`, `merge`, `tracked` |
-| `key_columns` | list | Key column names — @unique_key for merge, @group_key for tracked (e.g. `["id"]` or `["region", "year"]`) |
-| `columns` | list | Column names (sorted, excluding internal fields) |
+| `key_columns` | list | Key column names — `@unique_key` for merge, `@group_key` for tracked (e.g. `["id"]` or `["region", "year"]`) |
+| `columns` | list | Typed column dicts — `[{"name": "id", "type": "BIGINT"}, ...]` from the materialized DuckLake table schema. See [Push Contract — Typed columns](/reference/lib-functions/push-contract/#typed-columns). |
 
-Plus any sink args declared in `push.args`.
+Plus any push args declared in `push.args`.
 
 ### Batch modes
 
@@ -239,6 +239,6 @@ The runtime validates at startup:
 - `rate_limit.per` must be valid duration
 - `rate_limit.requests` must be > 0
 - `async: True` requires `submit()`, `check()`, `fetch_result()` — not `fetch()`
-- `scd2` kind with `@sink` is not allowed
+- `scd2` kind with `@push` is not allowed
 
 See [Fetch Contract](/reference/lib-functions/fetch-contract/) and [Push Contract](/reference/lib-functions/push-contract/) for the complete function specs.

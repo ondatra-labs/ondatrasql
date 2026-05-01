@@ -20,7 +20,7 @@ Each stage runs at a different point in the pipeline and has different failure b
 
 Constraints validate individual rows before data enters your target table. If any row fails, the model stops and nothing is written. Your target table is never touched.
 
-This is your first line of defense. It catches data quality issues at the source — before they propagate to downstream models or get pushed to external APIs via `@sink`. If you're doing outbound sync, constraints are especially important: they prevent invalid data from ever reaching the external system.
+This is your first line of defense. It catches data quality issues at the source — before they propagate to downstream models or get pushed to external APIs via `@push`. If you're doing outbound sync, constraints are especially important: they prevent invalid data from ever reaching the external system.
 
 See the [Constraints reference](/reference/validation/constraints/) for syntax and the full macro list.
 

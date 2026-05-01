@@ -4,7 +4,7 @@ draft: false
 title: Outbound Sync
 weight: 9
 ---
-When a model has `@sink`, the runner pushes change events to an external system. This page explains the design decisions behind that mechanism.
+When a model has `@push`, the runner pushes change events to an external system. This page explains the design decisions behind that mechanism.
 
 ## Commit first, push second
 

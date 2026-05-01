@@ -1,5 +1,4 @@
 ---
-date: "2026-04-20"
 description: Pull data from REST APIs into your pipeline using lib functions. Pagination, incremental loads, OAuth, and error handling.
 draft: false
 title: Fetch Data from APIs
@@ -56,6 +55,7 @@ def fetch(resource, page):
 ```sql
 -- models/raw/users.sql
 -- @kind: table
+-- @fetch
 
 SELECT id::BIGINT AS id, name::VARCHAR AS name, email::VARCHAR AS email,
        metadata::JSON AS metadata
@@ -86,17 +86,20 @@ Both models participate in the DAG. The staging model runs automatically after t
 
 ## SQL casts control the API
 
-The runtime extracts column names and [normalized types](/reference/lib-functions/fetch-contract/#typed-columns) from your SELECT casts via DuckDB AST. These are passed to `fetch()` as the `columns` kwarg:
+The runtime extracts column names and [DuckDB-native types](/reference/lib-functions/fetch-contract/#typed-columns) from your SELECT casts via DuckDB AST. These are passed to `fetch()` as the `columns` kwarg:
 
-| SQL | Normalized type | Use case |
-|---|---|---|
-| `total::DECIMAL` | `decimal` | Numeric field |
-| `count::INTEGER` | `integer` | Integer field |
-| `items::JSON` | `json` | Structured data (arrays, objects) |
-| `date::DATE` | `date` | Date field |
-| `name::VARCHAR` | `string` | String field |
+| SQL | `type` value |
+|---|---|
+| `total::DECIMAL(18,3)` | `"DECIMAL(18,3)"` |
+| `count::INTEGER` | `"INTEGER"` |
+| `count::BIGINT` | `"BIGINT"` |
+| `items::JSON` | `"JSON"` |
+| `date::DATE` | `"DATE"` |
+| `name::VARCHAR` | `"VARCHAR"` |
+| `tags::VARCHAR[]` | `["VARCHAR"]` |
+| `address::STRUCT(street VARCHAR, zip INTEGER)` | `{"street": "VARCHAR", "zip": "INTEGER"}` |
 
-Blueprints can use this to adapt their API requests. For example, the GAM blueprint splits columns into dimensions (`string`) and metrics (anything else) based on normalized type.
+Blueprints can use the type value to adapt their API requests — for example, the GAM blueprint splits columns into dimensions (`VARCHAR`) and metrics (numeric types). For blueprints that need JSON Schema, use [`lib_helpers.to_json_schema(col["type"])`](/reference/lib-functions/starlark-modules/) to convert.
 
 ## Pagination patterns
 
@@ -254,6 +257,7 @@ Use `@incremental` to fetch only new data on subsequent runs:
 ```sql
 -- models/raw/events.sql
 -- @kind: append
+-- @fetch
 -- @incremental: created_at
 
 SELECT id::BIGINT AS id, name::VARCHAR AS name, created_at::TIMESTAMP AS created_at

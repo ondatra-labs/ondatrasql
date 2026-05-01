@@ -1,5 +1,5 @@
 ---
-date: "2026-04-20"
+date: "2026-05-01"
 description: 'Complete reference for the push() function contract: internal fields, change types, return values, and batch modes.'
 draft: false
 title: Push Contract
@@ -9,18 +9,97 @@ Your `push()` function receives rows from the runtime and sends them to an exter
 
 ## How push fits the architecture
 
-SQL transforms data and declares what to sync:
+SQL transforms data and declares what to sync via `@push`:
 
 ```sql
 -- models/sync/contacts.sql
 -- @kind: merge
 -- @unique_key: id
--- @sink: crm('workspace_123')
+-- @push: crm('workspace_123')
 
-SELECT id, name, email FROM staging.contacts
+SELECT
+    id::BIGINT AS id,
+    name::VARCHAR AS name,
+    email::VARCHAR AS email
+FROM staging.contacts
 ```
 
 The runtime materializes the SQL, detects changes via DuckLake snapshots, and calls `push()` with the delta rows. Starlark sends them to the API — nothing else.
+
+## Strict @push contract {#strict-push-contract}
+
+A `@push` model produces the shape sent to the API. The strict-push validator checks the **outermost SELECT projection** only:
+
+| Rule | Why |
+|---|---|
+| `SELECT *` is rejected | Output schema must be explicit |
+| Every outer projection must be wrapped in `CAST` | Types come from SQL |
+| Every outer projection must carry `AS alias` | The alias is the field name sent to the API |
+| Lib calls in `FROM` are rejected | That would be a `@fetch` model — read from a materialized fetch table instead |
+
+Inside the model, SQL is fully free. JOIN, WHERE, GROUP BY, aggregates, DISTINCT, ORDER BY, CTEs, subqueries, derived expressions — all legitimate shape construction. The only cross-cutting rule that still applies is the [LIMIT/OFFSET ban](/reference/pipeline/directives/) on every pipeline model.
+
+Three valid `@push` models:
+
+**Simple projection:**
+
+```sql
+-- @kind: merge
+-- @unique_key: Id
+-- @push: salesforce('Contact')
+
+SELECT
+    id::BIGINT AS Id,
+    email::VARCHAR AS Email__c,
+    first_name::VARCHAR AS FirstName
+FROM staging.contacts
+```
+
+**Filter and derived expression:**
+
+```sql
+-- @kind: append
+-- @push: api('newsletter')
+
+SELECT
+    id::BIGINT AS subscriber_id,
+    email::VARCHAR AS email,
+    CONCAT(first_name, ' ', last_name)::VARCHAR AS display_name,
+    LOWER(country_code)::VARCHAR AS region
+FROM staging.subscribers
+WHERE active = true
+```
+
+**JOIN and aggregate:**
+
+```sql
+-- @kind: table
+-- @push: api('customer-summary')
+
+SELECT
+    c.id::BIGINT AS customer_id,
+    c.email::VARCHAR AS email,
+    SUM(o.total)::DECIMAL(18,2) AS lifetime_value,
+    COUNT(o.id)::INTEGER AS order_count
+FROM staging.customers c
+LEFT JOIN staging.orders o ON c.id = o.customer_id
+GROUP BY c.id, c.email
+```
+
+### Field-name mapping is the SQL alias
+
+The SQL alias on a `@push` projection is the field name the row carries to the blueprint, and onward to the API. There is no `field_mapping` concept in the API dict; SQL aliases do the work.
+
+```sql
+-- @push: salesforce('Contact')
+SELECT
+    id::BIGINT AS Id,
+    email::VARCHAR AS Email__c,
+    custom_data::JSON AS CustomData__c
+FROM staging.contacts
+```
+
+Salesforce custom fields, Google Sheets column headers, generic REST payloads — same model, different aliases, no blueprint changes.
 
 ## Function signature
 
@@ -35,21 +114,38 @@ All parameters are kwargs. Declare only what your blueprint needs — the runtim
 | `rows` | list | Row dicts with column values + internal fields |
 | `batch_number` | int | 1-based batch counter |
 | `kind` | string | Model kind: `table`, `append`, `merge`, `tracked` |
-| `key_columns` | list | Key column names — @unique_key for merge, @group_key for tracked (e.g. `["id"]` or `["region", "year"]`) |
-| `columns` | list | Column names (sorted, excluding internal fields) |
+| `key_columns` | list | Key column names — `@unique_key` for merge, `@group_key` for tracked (e.g. `["id"]` or `["region", "year"]`) |
+| `columns` | list | Typed column dicts from the materialized DuckLake table — `[{"name": "id", "type": "BIGINT"}, ...]` |
 
-Plus any sink args declared in `push.args` (see [API Dict — Sink args](/reference/lib-functions/api-dict/#push-section)).
+Plus any push args declared in `push.args` (see [API Dict — Push args](/reference/lib-functions/api-dict/#push-section)).
 
-## Sink args
+### Typed columns {#typed-columns}
 
-Push can receive arguments from the `@sink` directive:
+`columns` mirrors the @fetch shape but uses the **materialized table's schema** as its source — names are the SQL aliases (the keys the row dicts are keyed by), types are the real DuckDB types from the DuckLake table:
+
+```python
+columns = [
+    {"name": "Id",            "type": "BIGINT"},
+    {"name": "Email__c",      "type": "VARCHAR"},
+    {"name": "CustomData__c", "type": "JSON"},
+    {"name": "Tags",          "type": ["VARCHAR"]},
+]
+```
+
+The shape is identical to [@fetch's typed columns](/reference/lib-functions/fetch-contract/#typed-columns) (DuckDB-native primitives, `["LIST"]`, `{"field": "TYPE"}`), so `lib_helpers.to_json_schema(col["type"])` works the same way for push as for fetch.
+
+When the catalog lookup fails for a transient reason, the runtime falls back to deriving names from the row dicts (still a list of dicts, but without the `type` field). Push attempts continue rather than nacking the batch.
+
+## Push args
+
+Push can receive arguments from the `@push` directive:
 
 ```python
 API = {"push": {"args": ["spreadsheet_id", "range"]}}
 ```
 
 ```sql
--- @sink: gsheets('1DYJCOd...', 'Sheet1')
+-- @push: gsheets('1DYJCOd...', 'Sheet1')
 ```
 
 ```python
@@ -85,7 +181,7 @@ An UPDATE produces two rows with the same `__ondatra_rowid`: `update_preimage` (
 | `merge` | MERGE INTO | `insert`, `update_postimage` (+ `update_preimage`) |
 | `tracked` | DELETE + INSERT per group | `delete` + `insert` |
 
-`scd2` is not supported with `@sink` — use `@kind: table` with `WHERE is_current = true` to push current state instead.
+`scd2` is not supported with `@push` — use `@kind: table` with `WHERE is_current = true` to push current state instead.
 
 Your push function decides what to do with each change type. The runtime does no filtering.
 
@@ -219,15 +315,15 @@ SQL controls the transformation — including building nested JSON for APIs that
 -- models/sync/api_contacts.sql
 -- @kind: merge
 -- @unique_key: id
--- @sink: crm('workspace_123')
+-- @push: crm('workspace_123')
 
 SELECT
-    id,
+    id::BIGINT AS id,
     json_object(
         'name', first_name || ' ' || last_name,
         'email', email,
         'tags', json_group_array(tag)
-    ) AS properties
+    )::JSON AS properties
 FROM staging.contacts
 JOIN staging.contact_tags USING (id)
 GROUP BY id, first_name, last_name, email

@@ -33,13 +33,16 @@ type ModelDirectives struct {
 	PartitionedBy      []string
 	Incremental        string
 	IncrementalInitial string
+	Fetch              bool   // @fetch — flips strict-fetch validator + lib-call relationship rule
+	Push               string // @push — flips strict-push validator + sink wiring
 	ConfigHash         string // SHA256 of config/*.sql files (macros, variables, etc.)
 }
 
 // ModelHash calculates a hash that includes both the code body and semantic
 // directives. Changing @kind, @unique_key, @partitioned_by, @incremental,
-// @incremental_initial, or config/*.sql file content triggers a backfill
-// because the hash changes.
+// @incremental_initial, @fetch, @push, or config/*.sql file content triggers
+// a backfill because the hash changes — which forces validators to fire on
+// the next run instead of being silently bypassed by the skip path.
 func ModelHash(sql string, d ModelDirectives) string {
 	normalized := normalize(sql)
 
@@ -59,6 +62,12 @@ func ModelHash(sql string, d ModelDirectives) string {
 	b.WriteString(d.Incremental)
 	b.WriteString("\x00incremental_initial=")
 	b.WriteString(d.IncrementalInitial)
+	b.WriteString("\x00fetch=")
+	if d.Fetch {
+		b.WriteString("1")
+	}
+	b.WriteString("\x00push=")
+	b.WriteString(d.Push)
 	if d.ConfigHash != "" {
 		b.WriteString("\x00config=")
 		b.WriteString(d.ConfigHash)

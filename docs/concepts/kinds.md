@@ -12,19 +12,19 @@ The simplest thing is to rebuild the entire table every time. That's `@kind: tab
 
 The alternative is to update incrementally: only process what changed. But that requires knowing *what* changed, and different data shapes need different strategies. That's why the kinds exist.
 
-All kinds except `events` and `scd2` support `@sink` for outbound sync. The runtime exposes raw DuckLake change types to your push function, so your Starlark code decides how to handle each type.
+All kinds except `events` and `scd2` support `@push` for outbound sync. The runtime exposes raw DuckLake change types to your push function, so your Starlark code decides how to handle each type.
 
 ## table — the safe default
 
 When you don't know what to pick, use `table`. It rebuilds when your upstream data changes and skips when nothing changed. This is the right choice for aggregates, staging layers, lookup tables — anything where a full rebuild is fast enough and you want the simplest mental model.
 
-With `@sink`, table kind pushes change events from `table_changes()` — `delete` events from the truncate and `insert` events for the new rows. For a simple full replace, your push function can filter to inserts only. For small reference tables this works well.
+With `@push`, table kind pushes change events from `table_changes()` — `delete` events from the truncate and `insert` events for the new rows. For a simple full replace, your push function can filter to inserts only. For small reference tables this works well.
 
 ## append — for data that only grows
 
 Event logs, fact tables, audit trails — data that arrives and never changes. New rows are added, old rows are never touched. OndatraSQL uses DuckLake time-travel to automatically rewrite your query so it returns only rows added since last run.
 
-With `@sink`, push receives only `insert` change types — straightforward.
+With `@push`, push receives only `insert` change types — straightforward.
 
 The tradeoff you should know about: if a source row gets corrected after ingestion, the correction won't propagate. Append treats history as immutable. If you need corrections to flow through, use `merge` instead.
 
@@ -32,7 +32,7 @@ The tradeoff you should know about: if a source row gets corrected after ingesti
 
 This is the classic CRM sync pattern: one row per customer, one row per product, one row per order. Merge upserts by `@unique_key` using a `MERGE INTO` statement — it updates existing rows and inserts new ones.
 
-With `@sink`, push receives `insert` for new rows and `update_postimage` for changed rows. Your Starlark code can map these to POST and PATCH calls respectively. You also get `update_preimage` if you need the row's previous state (useful for conditional updates or audit logging).
+With `@push`, push receives `insert` for new rows and `update_postimage` for changed rows. Your Starlark code can map these to POST and PATCH calls respectively. You also get `update_preimage` if you need the row's previous state (useful for conditional updates or audit logging).
 
 Note: merge doesn't detect rows that disappeared from your source query. If you need mirror sync (deletes included), use `tracked` instead.
 
@@ -42,7 +42,7 @@ Here's the problem merge can't solve: an invoice has line items. An OCR result h
 
 Tracked groups your rows by `@group_key`, computes a content hash per group, and only writes groups whose hash changed. It materializes via DELETE+INSERT, so `table_changes()` produces `delete` and `insert` events. Composite keys are supported: `@group_key: region, year`.
 
-With `@sink`, your push function receives `delete` and `insert` events grouped by key. If a key has both deletes and inserts, it's an update. If only deletes, the entity was truly removed. This gives you full mirror sync — including deletes.
+With `@push`, your push function receives `delete` and `insert` events grouped by key. If a key has both deletes and inserts, it's an update. If only deletes, the entity was truly removed. This gives you full mirror sync — including deletes.
 
 When the source is a lib, a 0-row fetch defaults to "no change" — target rows are preserved rather than deleted. A lib that fully enumerates its source and treats an empty fetch as "everything is gone" must opt in to deletion via `empty_result` in the fetch return; see [Fetch Contract](/reference/lib-functions/fetch-contract/#empty-fetches-and-tracked).
 
@@ -52,11 +52,11 @@ The tradeoff: tracked adds a `_content_hash` column and does full-state comparis
 
 SCD2 (Slowly Changing Dimension Type 2) keeps every version of a row. When a product's price changes, the old row gets a `valid_to_snapshot` and a new row is inserted with `is_current = true`. If you're doing dimensional modeling for BI, this is the standard technique.
 
-`@sink` is not supported with scd2. To push current state to an external system, use `@kind: table` with `WHERE is_current = true` in a separate sync model.
+`@push` is not supported with scd2. To push current state to an external system, use `@kind: table` with `WHERE is_current = true` in a separate sync model.
 
 ## events — data from the outside
 
-Events models are the odd one out. They don't run a query — they define a column schema and receive data via HTTP POST. Think product analytics, webhook handlers, or IoT sensor data. Events is the only kind that doesn't support `@sink` — it has its own ingest pipeline.
+Events models are the odd one out. They don't run a query — they define a column schema and receive data via HTTP POST. Think product analytics, webhook handlers, or IoT sensor data. Events is the only kind that doesn't support `@push` — it has its own ingest pipeline.
 
 See [Event Collection](/guides/collect-events/) for how to set this up.
 

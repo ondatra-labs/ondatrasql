@@ -1,5 +1,6 @@
 ---
-description: Runtime modules available in Starlark blueprints. Incremental state, env, url, crypto, xml, csv, json, time.
+date: "2026-05-01"
+description: Runtime modules and builtins available in Starlark blueprints — http, env, json, time, xml, csv, lib_helpers, plus DuckDB-backed and Go-native helpers.
 draft: false
 title: Starlark Modules
 weight: 22
@@ -129,6 +130,44 @@ rows = csv.decode(data, delimiter="\t", header=False)  # returns list of lists
 
 output = csv.encode([{"name": "Alice", "age": "30"}])
 ```
+
+## lib_helpers
+
+OndatraSQL helpers that bridge column-dict types to formats other systems use.
+
+### `to_json_schema(t)`
+
+Convert a DuckDB-native type into a JSON Schema dict. The input is whatever a column dict's `type` field carries — a string, a list (LIST), or a dict (STRUCT) — and the output is a JSON Schema dict.
+
+```python
+schema = lib_helpers.to_json_schema("BIGINT")
+# {"type": "integer"}
+
+schema = lib_helpers.to_json_schema("DECIMAL(18,3)")
+# {"type": "number"}
+
+schema = lib_helpers.to_json_schema("TIMESTAMPTZ")
+# {"type": "string", "format": "date-time"}
+
+schema = lib_helpers.to_json_schema(["VARCHAR"])
+# {"type": "array", "items": {"type": "string"}}
+
+schema = lib_helpers.to_json_schema({"street": "VARCHAR", "zip": "INTEGER"})
+# {"type": "object", "properties": {"street": {"type": "string"}, "zip": {"type": "integer"}}}
+```
+
+Typical usage from a fetch blueprint that talks to a JSON-Schema-aware API (OpenAI structured outputs, Mistral OCR, Anthropic):
+
+```python
+def fetch(page, columns=[]):
+    schema = {"type": "object", "properties": {
+        col["name"]: lib_helpers.to_json_schema(col["type"])
+        for col in columns
+    }}
+    resp = http.post("/v1/structured", json={"schema": schema, ...})
+```
+
+Width and precision distinctions inside DuckDB (`TINYINT` vs `BIGINT`, `FLOAT` vs `DOUBLE`, `TIMESTAMP_NS` vs `TIMESTAMPTZ`) collapse to the same JSON Schema type — JSON Schema doesn't carry that information. See [Fetch Contract — JSON Schema mapping](/reference/lib-functions/fetch-contract/#typed-columns) for the full mapping table.
 
 ## DuckDB-backed builtins
 

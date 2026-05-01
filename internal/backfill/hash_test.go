@@ -172,6 +172,38 @@ func TestModelHash(t *testing.T) {
 		}
 	})
 
+	// v0.30.0: @fetch and @push are part of the hash so adding/removing
+	// them triggers backfill — and therefore validators run on the next
+	// run instead of being silently bypassed by the skip path.
+	t.Run("toggling @fetch changes hash", func(t *testing.T) {
+		t.Parallel()
+		d := baseDirectives
+		d.Fetch = true
+		h1 := ModelHash(baseSQL, baseDirectives)
+		h2 := ModelHash(baseSQL, d)
+		if h1 == h2 {
+			t.Error("toggling @fetch should produce different hash")
+		}
+	})
+
+	t.Run("changing @push changes hash", func(t *testing.T) {
+		t.Parallel()
+		d := baseDirectives
+		d.Push = "hubspot_push"
+		h1 := ModelHash(baseSQL, baseDirectives)
+		h2 := ModelHash(baseSQL, d)
+		if h1 == h2 {
+			t.Error("setting @push should produce different hash")
+		}
+		// And changing the push name should also flip
+		d2 := d
+		d2.Push = "salesforce_push"
+		h3 := ModelHash(baseSQL, d2)
+		if h2 == h3 {
+			t.Error("changing @push lib name should produce different hash")
+		}
+	})
+
 	t.Run("ModelHash differs from Hash for same SQL", func(t *testing.T) {
 		t.Parallel()
 		h1 := Hash(baseSQL)
@@ -180,6 +212,49 @@ func TestModelHash(t *testing.T) {
 			t.Error("ModelHash should differ from Hash (includes directives)")
 		}
 	})
+}
+
+// TestModelHash_FormatStability pins the absolute hash format. Bumping
+// these snapshot values silently invalidates every existing model's
+// stored hash and forces a backfill across the fleet — it should only
+// happen as part of an intentional release-note-grade migration. If
+// you change the WriteString sequence in ModelHash, update these
+// values explicitly so reviewers see the cost on the diff.
+func TestModelHash_FormatStability(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		sql  string
+		d    ModelDirectives
+		want string
+	}{
+		{
+			"plain table",
+			"SELECT 1 AS id",
+			ModelDirectives{Kind: "table"},
+			"469e018fdea495b95da7807bc3271559fd35ca362450db5a301fd7187b0396cc",
+		},
+		{
+			"fetch+incremental",
+			"SELECT id::BIGINT AS id FROM api()",
+			ModelDirectives{Kind: "append", Fetch: true, Incremental: "id"},
+			"0e062843492bb86b0e6404add0fada4b90b78fc1ff52d72a275ddae8378bd0db",
+		},
+		{
+			"push merge",
+			"SELECT id::BIGINT AS id FROM staging.t",
+			ModelDirectives{Kind: "merge", UniqueKey: "id", Push: "hubspot_push"},
+			"ecdbaf20aea4851d5876da951865bb724df7984d8ee0a12eed1669f192433130",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ModelHash(c.sql, c.d)
+			if got != c.want {
+				t.Errorf("hash format drift!\n got:  %s\n want: %s\n\nIf this change is intentional (and you accept that every existing model rebuilds), update the snapshot. Otherwise revert the WriteString sequence in ModelHash.", got, c.want)
+			}
+		})
+	}
 }
 
 func TestHash_Length(t *testing.T) {

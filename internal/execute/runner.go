@@ -202,6 +202,8 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		PartitionedBy:      model.PartitionedBy,
 		Incremental:        model.Incremental,
 		IncrementalInitial: model.IncrementalInitial,
+		Fetch:              model.Fetch,
+		Push:               model.Push,
 		ConfigHash:         r.configHash,
 	})
 	r.trace(result, "hash_sql", stepStart, "ok")
@@ -406,7 +408,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// len(libCalls) > 0 are equivalent — but the contract is now
 	// declared by the directive, not inferred from the FROM clause.
 	if model.Fetch {
-		if err := validateStrictLibSchema(parsedAST, libCalls); err != nil {
+		if err := validateStrictLibSchema(parsedAST); err != nil {
 			return nil, fmt.Errorf("%s: %w", model.Target, err)
 		}
 	}

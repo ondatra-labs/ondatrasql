@@ -1,5 +1,4 @@
 ---
-date: "2026-04-20"
 description: How to authenticate with OAuth providers for API ingestion and outbound sync. One-time setup, automatic token refresh.
 draft: false
 title: Set Up OAuth Authentication
