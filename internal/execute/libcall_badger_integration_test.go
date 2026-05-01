@@ -834,10 +834,10 @@ SELECT id::BIGINT AS id, val::BIGINT AS val FROM auditapi('items') WHERE 1=1
 // Test 1: merge + lib + empty incremental + sink
 // ---------------------------------------------------------------------------
 
-// TestLibCall_Merge_EmptyIncremental_Sink verifies that a lib-driven merge
+// TestLibCall_Merge_EmptyIncremental_Push verifies that a lib-driven merge
 // model with @sink correctly handles empty incremental runs: no duplication,
 // correct empty delta, sink semantics preserved.
-func TestLibCall_Merge_EmptyIncremental_Sink(t *testing.T) {
+func TestLibCall_Merge_EmptyIncremental_Push(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Source lib: returns data on backfill, empty on incremental
@@ -1594,14 +1594,14 @@ SELECT series::VARCHAR AS series, date::VARCHAR AS date, value::DOUBLE AS value 
 	}
 }
 
-// TestSinkUpdatePreimage_FromPreChangeSnapshot pins that update_preimage
+// TestPushUpdatePreimage_FromPreChangeSnapshot pins that update_preimage
 // rows are read from the snapshot BEFORE the change (e.Snapshot - 1), not
 // from current state. The bug class: someone changes the snapshot offset
 // in readRowsByEvents and the preimage starts containing the post-change
 // values, silently breaking change-aware push() semantics. The push()
 // function fails the run if the preimage doesn't have the OLD value, so
 // any drift in the snapshot calculation will surface as SyncFailed > 0.
-func TestSinkUpdatePreimage_FromPreChangeSnapshot(t *testing.T) {
+func TestPushUpdatePreimage_FromPreChangeSnapshot(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Source lib: row id=1 with score=100 (run 1), then score=200 (run 2)
@@ -1670,7 +1670,7 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
 	}
 }
 
-// TestPreCommitSnapshot_AppendWithSink pins that the preCommitSnapshot
+// TestPreCommitSnapshot_AppendWithPush pins that the preCommitSnapshot
 // capture is gated by `model.Push != ""` only — not narrowed to specific
 // kinds (merge/tracked). The bug class: someone changes the gate to
 // `if model.Kind == "merge" || ...`, breaking append + @sink. Without
@@ -1680,7 +1680,7 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
 //
 // This test runs an append + @sink model twice with a NEW row on the
 // second run, and asserts the sink saw only the new row — not all rows.
-func TestPreCommitSnapshot_AppendWithSink(t *testing.T) {
+func TestPreCommitSnapshot_AppendWithPush(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Source lib: returns 2 rows on backfill, 1 NEW row on incremental.
@@ -1753,12 +1753,12 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM appendsrc('items')
 	}
 }
 
-// TestLibCall_Tracked_EmptyIncremental_Sink mirrors the merge equivalent for
+// TestLibCall_Tracked_EmptyIncremental_Push mirrors the merge equivalent for
 // the tracked kind: backfill produces rows + sink events, then an empty
 // incremental run must NOT re-fire the sink. Tracked has its own change
 // detection (group hashes), so the sink-side guard against spurious events
 // must hold for it too.
-func TestLibCall_Tracked_EmptyIncremental_Sink(t *testing.T) {
+func TestLibCall_Tracked_EmptyIncremental_Push(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	writeLib(t, p, "tracksrc", `
@@ -1839,11 +1839,11 @@ SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tracksrc('items'
 	}
 }
 
-// TestLibCall_Tracked_GroupHashChange_Sink verifies that when a tracked
+// TestLibCall_Tracked_GroupHashChange_Push verifies that when a tracked
 // group's content changes (hash differs), the sink fires only for the
 // changed group's events — not for unchanged groups. This pins the
 // "no spurious replay" guarantee at the tracked + sink interface.
-func TestLibCall_Tracked_GroupHashChange_Sink(t *testing.T) {
+func TestLibCall_Tracked_GroupHashChange_Push(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	writeLib(t, p, "tgsrc", `
@@ -1931,11 +1931,11 @@ def fetch(resource, page, is_backfill=True, last_value=""):
 	}
 }
 
-// TestLibCall_Tracked_GroupDisappears_Sink pins that when a group disappears
+// TestLibCall_Tracked_GroupDisappears_Push pins that when a group disappears
 // from the source, tracked DELETEs its rows from the target and the sink
 // receives delete-classified events. Without this, downstream systems would
 // silently keep stale data after a group is dropped upstream.
-func TestLibCall_Tracked_GroupDisappears_Sink(t *testing.T) {
+func TestLibCall_Tracked_GroupDisappears_Push(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	writeLib(t, p, "tdsrc", `

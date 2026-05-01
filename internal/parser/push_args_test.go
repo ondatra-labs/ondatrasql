@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func TestParseSinkArgs(t *testing.T) {
+func TestParsePushArgs(t *testing.T) {
 	tests := []struct {
 		input string
 		want  []string

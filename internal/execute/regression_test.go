@@ -880,12 +880,12 @@ func TestLoadExtension_NewlineInRepo(t *testing.T) {
 
 // --- Cat 10 BLOCKER: sink delta early returns ---
 
-// TestCreateSinkDelta_NewSnapshotZero verifies that createPushDelta returns
+// TestCreatePushDelta_NewSnapshotZero verifies that createPushDelta returns
 // nil events (and no error) when newSnapshot == 0 — i.e. the post-commit
 // snapshot capture failed or no commit happened. Without this guard, the
 // table_changes() query would treat 0 as a real range start and replay
 // the entire table on every skip run.
-func TestCreateSinkDelta_NewSnapshotZero(t *testing.T) {
+func TestCreatePushDelta_NewSnapshotZero(t *testing.T) {
 	t.Parallel()
 
 	r := &Runner{} // no session needed; early return must fire first
@@ -903,10 +903,10 @@ func TestCreateSinkDelta_NewSnapshotZero(t *testing.T) {
 	}
 }
 
-// TestCreateSinkDelta_EmptySink verifies the early return when the model
+// TestCreatePushDelta_EmptyPush verifies the early return when the model
 // has no @sink directive. Without this, every model would issue a
 // table_changes() query whether it had a sink or not.
-func TestCreateSinkDelta_EmptySink(t *testing.T) {
+func TestCreatePushDelta_EmptyPush(t *testing.T) {
 	t.Parallel()
 
 	r := &Runner{} // no session needed; early return must fire first

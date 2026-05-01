@@ -23,7 +23,7 @@ func writeSinkModel(t *testing.T, dir, relPath, content string) string {
 	return full
 }
 
-func TestParseSinkDirective(t *testing.T) {
+func TestParsePushDirective(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -88,7 +88,7 @@ SELECT id FROM source
 	}
 }
 
-func TestParseSinkRejectsEventsKind(t *testing.T) {
+func TestParsePushRejectsEventsKind(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -107,7 +107,7 @@ SELECT id FROM source
 	}
 }
 
-func TestParseSinkAllowsSCD2Syntax(t *testing.T) {
+func TestParsePushAllowsSCD2Syntax(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 

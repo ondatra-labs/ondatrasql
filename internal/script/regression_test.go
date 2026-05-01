@@ -191,7 +191,7 @@ func TestInjectAPIAuth_ServiceAccount_MalformedJSON(t *testing.T) {
 
 // --- RunPush PerRow regression tests ---
 
-func TestRunSink_PerRow_EmptyStringValue(t *testing.T) {
+func TestRunPush_PerRow_EmptyStringValue(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "emptyval_push", `
@@ -217,7 +217,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_PerRow_IntegerValue(t *testing.T) {
+func TestRunPush_PerRow_IntegerValue(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "intval_push", `
@@ -540,7 +540,7 @@ func TestGoToStarlark_Uint64(t *testing.T) {
 
 // --- RunPushPoll: per-row non-string values converted (same as RunPush) ---
 
-func TestRunSinkPoll_PerRow_NonStringConverted(t *testing.T) {
+func TestRunPushPoll_PerRow_NonStringConverted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "async_poll", `

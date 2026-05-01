@@ -60,10 +60,10 @@ bugcheck-static:
 	check "fmt-pct-v-in-sql"       --include='*.go' -E 'fmt\.Sprintf.*%v.*(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|SET )' internal/ cmd/; \
 	check "removed-lib-dicts"      --include='*.go' -E '^\s*(TABLE|SINK)\s*=' internal/parser/ internal/libregistry/; \
 	check "search-path-no-escape"  --include='*.go' -E 'SET search_path.*Sprintf.*[^e]Sprintf' internal/; \
-	out=$$(grep -nE 'RunSink[A-Za-z]*\(' internal/execute/sink.go | grep -v httpConfigFromLib 2>/dev/null); \
-	if [ -n "$$out" ]; then echo "[sink-call-missing-auth] FAIL"; echo "$$out"; echo; fail=1; fi; \
-	out=$$(grep -nE '\bmodel\.Kind\b|\.Kind\b' internal/execute/sink_delta.go 2>/dev/null); \
-	if [ -n "$$out" ]; then echo "[sink-delta-kind-specific] FAIL"; echo "$$out"; echo "    createSinkDelta must be kind-agnostic — all kinds use the same table_changes() query."; echo; fail=1; fi; \
+	out=$$(grep -nE 'RunPush[A-Za-z]*\(' internal/execute/push.go | grep -v httpConfigFromLib 2>/dev/null); \
+	if [ -n "$$out" ]; then echo "[push-call-missing-auth] FAIL"; echo "$$out"; echo; fail=1; fi; \
+	out=$$(grep -nE '\bmodel\.Kind\b|\.Kind\b' internal/execute/push_delta.go 2>/dev/null); \
+	if [ -n "$$out" ]; then echo "[push-delta-kind-specific] FAIL"; echo "$$out"; echo "    createPushDelta must be kind-agnostic — all kinds use the same table_changes() query."; echo; fail=1; fi; \
 	out=$$(grep -rnE "fmt\.Sprintf\([^)]*\"ATTACH '%s'" internal/ --include='*.go' --exclude='*_test.go' 2>/dev/null | grep -v EscapeSQL); \
 	if [ -n "$$out" ]; then echo "[attach-no-escape] FAIL"; echo "$$out"; echo "    ATTACH 'connstr' interpolations must wrap the conn string with EscapeSQL(...)."; echo; fail=1; fi; \
 	if [ $$fail -eq 1 ]; then echo "bugcheck-static: failures above"; exit 1; fi; \

@@ -25,7 +25,7 @@ func writeSinkStar(t *testing.T, dir, name, code string) {
 	}
 }
 
-func TestRunSink_SyncReturnDict(t *testing.T) {
+func TestRunPush_SyncReturnDict(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "test_push", `
@@ -54,7 +54,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_SyncReturnNone(t *testing.T) {
+func TestRunPush_SyncReturnNone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "none_push", `
@@ -78,7 +78,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_SyncReturnNonDict(t *testing.T) {
+func TestRunPush_SyncReturnNonDict(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "list_push", `
@@ -99,7 +99,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_AsyncReturnJobRef(t *testing.T) {
+func TestRunPush_AsyncReturnJobRef(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "async_push", `
@@ -125,7 +125,7 @@ def poll(job_ref):
 	}
 }
 
-func TestRunSink_AtomicReturnNone(t *testing.T) {
+func TestRunPush_AtomicReturnNone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "atomic_push", `
@@ -145,7 +145,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_PushError(t *testing.T) {
+func TestRunPush_PushError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "error_push", `
@@ -162,7 +162,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_NoPushFunction(t *testing.T) {
+func TestRunPush_NoPushFunction(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "no_push", `
@@ -177,7 +177,7 @@ SINK = {"batch_size": 100}
 	}
 }
 
-func TestRunSink_EmptyRows(t *testing.T) {
+func TestRunPush_EmptyRows(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "empty_push", `
@@ -200,7 +200,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_PerRowNonStringValue(t *testing.T) {
+func TestRunPush_PerRowNonStringValue(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "nonstr_push", `
@@ -225,7 +225,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSink_BatchNumber(t *testing.T) {
+func TestRunPush_BatchNumber(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "batch_push", `
@@ -246,7 +246,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSinkFinalize_Optional(t *testing.T) {
+func TestRunPushFinalize_Optional(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "nofin_push", `
@@ -263,7 +263,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSinkFinalize_Called(t *testing.T) {
+func TestRunPushFinalize_Called(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// finalize writes to a file to prove it was called with correct args
@@ -288,7 +288,7 @@ def finalize(succeeded, failed):
 	}
 }
 
-func TestRunSinkPoll_NotDone(t *testing.T) {
+func TestRunPushPoll_NotDone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_push", `
@@ -313,7 +313,7 @@ def poll(job_ref):
 	}
 }
 
-func TestRunSinkPoll_DoneWithPerRow(t *testing.T) {
+func TestRunPushPoll_DoneWithPerRow(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_done", `
@@ -341,7 +341,7 @@ def poll(job_ref):
 	}
 }
 
-func TestRunSinkPoll_DoneStringInsteadOfBool(t *testing.T) {
+func TestRunPushPoll_DoneStringInsteadOfBool(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_str", `
@@ -360,7 +360,7 @@ def poll(job_ref):
 	}
 }
 
-func TestRunSinkPoll_NoPollFunction(t *testing.T) {
+func TestRunPushPoll_NoPollFunction(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "no_poll", `
@@ -377,7 +377,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSinkPoll_NonDictReturn(t *testing.T) {
+func TestRunPushPoll_NonDictReturn(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_list", `
@@ -396,7 +396,7 @@ def poll(job_ref):
 	}
 }
 
-func TestRunSinkPoll_MissingDoneKey(t *testing.T) {
+func TestRunPushPoll_MissingDoneKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_nodone", `
@@ -419,7 +419,7 @@ def poll(job_ref):
 
 // Regression: sync mode must nack when push returns None instead of silently
 // acking the entire batch. Previously nil PerRow fell through to ackAll.
-func TestRunSink_SyncNoneReturn_MustBeDetectable(t *testing.T) {
+func TestRunPush_SyncNoneReturn_MustBeDetectable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "sync_none", `
@@ -442,7 +442,7 @@ def push(rows=[], batch_number=1):
 
 // Regression: starlarkToGo conversion error must propagate, not be silently
 // swallowed leaving RawReturn nil.
-func TestRunSink_ConversionErrorPropagates(t *testing.T) {
+func TestRunPush_ConversionErrorPropagates(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// Return a valid dict -- conversion should succeed
@@ -468,7 +468,7 @@ def push(rows=[], batch_number=1):
 }
 
 // Regression: poll done="true" (string) must error, not be treated as truthy.
-func TestRunSinkPoll_DoneIntInsteadOfBool(t *testing.T) {
+func TestRunPushPoll_DoneIntInsteadOfBool(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_int", `
@@ -489,7 +489,7 @@ def poll(job_ref):
 
 // Regression: goToStarlark must handle []map[string]any rows correctly.
 // Previously it fell to the default case and stringified the entire list.
-func TestRunSink_RowsConvertedCorrectly(t *testing.T) {
+func TestRunPush_RowsConvertedCorrectly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "rows_push", `
@@ -519,7 +519,7 @@ def push(rows=[], batch_number=1):
 	}
 }
 
-func TestRunSinkPoll_JobRefPassedCorrectly(t *testing.T) {
+func TestRunPushPoll_JobRefPassedCorrectly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeSinkStar(t, dir, "poll_ref", `

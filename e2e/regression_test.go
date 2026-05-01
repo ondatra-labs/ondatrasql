@@ -535,14 +535,14 @@ func hasWarning(r *execute.Result, substr string) bool {
 // Multi-model sink flows
 // ---------------------------------------------------------------------------
 
-// TestE2E_MultiModel_CascadingSink runs a 2-model DAG where the upstream
+// TestE2E_MultiModel_CascadingPush runs a 2-model DAG where the upstream
 // (raw.events) has @sink and the downstream (staging.events_summary) reads
 // from raw and has no sink. Pins that:
 //   - the upstream model's sink fires on backfill
 //   - the downstream model materializes correctly using the upstream data
 //   - on the second run with new data, only new rows reach upstream's sink
 //     and the downstream sees the combined state
-func TestE2E_MultiModel_CascadingSink(t *testing.T) {
+func TestE2E_MultiModel_CascadingPush(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Source lib for raw.events: returns 2 rows on backfill, 1 new on incremental.
@@ -630,12 +630,12 @@ GROUP BY kind
 	}
 }
 
-// TestE2E_MultiModel_BothSinks runs two independent sink-enabled models in
+// TestE2E_MultiModel_BothPushes runs two independent sink-enabled models in
 // the same project (no DAG dependency between them). Pins that:
 //   - both sinks fire independently
 //   - one sink failing in a hypothetical configuration would not block the other
 //   - SyncSucceeded counts are per-model, not global
-func TestE2E_MultiModel_BothSinks(t *testing.T) {
+func TestE2E_MultiModel_BothPushes(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	testutil.WriteFile(t, p.Dir, "lib/users_src.star", `

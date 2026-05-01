@@ -747,7 +747,7 @@ func TestOutboundSync_Badger_NoDuplicateOnRetry(t *testing.T) {
 // Test 12: Sink runs on skip (pending backlog processed without new materialization)
 // ---------------------------------------------------------------------------
 
-func TestOutboundSync_SinkRunsOnSkip(t *testing.T) {
+func TestOutboundSync_PushRunsOnSkip(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Track pushes via a mock server
@@ -875,7 +875,7 @@ SELECT * FROM raw.report
 // Test 14: Sink error propagates to runner (not swallowed as warning)
 // ---------------------------------------------------------------------------
 
-func TestOutboundSync_SinkError_Propagates(t *testing.T) {
+func TestOutboundSync_PushError_Propagates(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Create a push function that always fails

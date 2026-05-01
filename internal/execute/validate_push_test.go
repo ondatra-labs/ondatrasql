@@ -179,7 +179,7 @@ func TestValidate_InvalidRateLimitPer(t *testing.T) {
 	}
 }
 
-func TestValidate_SinkNotFound(t *testing.T) {
+func TestValidate_PushNotFound(t *testing.T) {
 	t.Parallel()
 	reg := makeReg(map[string]*libregistry.LibFunc{"other_push": syncSink("sync")})
 	models := []*parser.Model{{Target: "sync.x", Kind: "merge", Push: "missing_push", UniqueKey: "id"}}
@@ -193,7 +193,7 @@ func TestValidate_SinkNotFound(t *testing.T) {
 	}
 }
 
-func TestValidate_EmptyRegistryWithSinkModel(t *testing.T) {
+func TestValidate_EmptyRegistryWithPushModel(t *testing.T) {
 	t.Parallel()
 	reg := makeReg(map[string]*libregistry.LibFunc{})
 	models := []*parser.Model{{Target: "sync.x", Kind: "merge", Push: "push", UniqueKey: "id"}}
@@ -207,7 +207,7 @@ func TestValidate_EmptyRegistryWithSinkModel(t *testing.T) {
 	}
 }
 
-func TestValidate_NilRegistryWithSinkModel(t *testing.T) {
+func TestValidate_NilRegistryWithPushModel(t *testing.T) {
 	t.Parallel()
 	models := []*parser.Model{{Target: "sync.x", Kind: "merge", Push: "push", UniqueKey: "id"}}
 
@@ -217,7 +217,7 @@ func TestValidate_NilRegistryWithSinkModel(t *testing.T) {
 	}
 }
 
-func TestValidate_NoSinkDict(t *testing.T) {
+func TestValidate_NoPushDict(t *testing.T) {
 	t.Parallel()
 	noDict := &libregistry.LibFunc{Name: "push", IsSink: true, FuncName: "push"}
 	reg := makeReg(map[string]*libregistry.LibFunc{"push": noDict})
@@ -242,7 +242,7 @@ func TestValidate_ValidConfig(t *testing.T) {
 	}
 }
 
-func TestValidate_NoSinkModels(t *testing.T) {
+func TestValidate_NoPushModels(t *testing.T) {
 	t.Parallel()
 	models := []*parser.Model{{Target: "staging.orders", Kind: "table"}}
 
@@ -261,10 +261,10 @@ func TestValidate_TableMaxConcurrentAllowed(t *testing.T) {
 	}
 }
 
-// TestValidate_SCD2SinkRejected verifies that @sink is rejected for scd2 kind
+// TestValidate_SCD2PushRejected verifies that @sink is rejected for scd2 kind
 // at the runtime validation layer (not just parser).
 // Docs claim: "All kinds except events and scd2 support @sink."
-func TestValidate_SCD2SinkRejected(t *testing.T) {
+func TestValidate_SCD2PushRejected(t *testing.T) {
 	t.Parallel()
 	reg := makeReg(map[string]*libregistry.LibFunc{"test_push": syncSink("sync")})
 	models := []*parser.Model{{Target: "sync.history", Kind: "scd2", Push: "test_push", UniqueKey: "id"}}
@@ -278,10 +278,10 @@ func TestValidate_SCD2SinkRejected(t *testing.T) {
 	}
 }
 
-// TestValidate_EventsSinkRejectedAtParser verifies that @sink is rejected for
+// TestValidate_EventsPushRejectedAtParser verifies that @sink is rejected for
 // events kind at the parser level (not at runtime validation).
 // The parser returns an error when @sink is combined with @kind: events.
-func TestValidate_EventsSinkRejectedAtParser(t *testing.T) {
+func TestValidate_EventsPushRejectedAtParser(t *testing.T) {
 	t.Parallel()
 	// Events + @sink is rejected by the parser, not ValidateModelPushCompat.
 	// Verify by trying to parse a model with both directives.
