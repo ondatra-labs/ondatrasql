@@ -308,6 +308,17 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	stepStart = time.Now()
 	astJSON, _ := r.getAST(model.SQL)
 
+	// Parse the AST once for cross-cutting validators and downstream uses.
+	// Parse failures are non-fatal here — DuckDB will surface a clearer
+	// error when the model actually executes. Validators tolerate nil AST.
+	parsedAST, _ := duckast.Parse(astJSON)
+
+	// Cross-cutting parser rule: pipeline models must not contain LIMIT or
+	// OFFSET. Applies to every kind, every directive, every nesting level.
+	if err := validateNoLimitOffset(parsedAST); err != nil {
+		return nil, fmt.Errorf("%s: %w", model.Target, err)
+	}
+
 	// Detect and execute lib function calls in FROM clause (e.g. FROM gam_fetch(...))
 	var libCalls []LibCall
 	var hasInferredStubs bool        // true when 0-row lib stubs were created from AST/column inference
@@ -355,8 +366,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 	}()
 	if r.libRegistry != nil && !r.libRegistry.Empty() {
-		parsedAST, parseErr := duckast.Parse(astJSON)
-		if parseErr == nil {
+		if parsedAST != nil {
 			libCalls = detectLibCalls(parsedAST, r.libRegistry)
 		}
 		// Also run SQL-based detection to find API dict libs hidden by
