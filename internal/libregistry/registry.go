@@ -19,9 +19,9 @@ type Column struct {
 	Type string // DuckDB type (e.g. "VARCHAR", "BIGINT")
 }
 
-// SinkConfig holds SINK-specific configuration extracted from the SINK dict.
-type SinkConfig struct {
-	Args            []string          // parameter names mapped from @sink: name('arg1', 'arg2')
+// PushConfig holds SINK-specific configuration extracted from the SINK dict.
+type PushConfig struct {
+	Args            []string          // parameter names mapped from @push: name('arg1', 'arg2')
 	SupportedKinds  []string          // optional whitelist of valid model kinds (validated at startup)
 	BatchSize    int               // rows per push call (default 1)
 	BatchMode    string            // "sync", "atomic", "async" (default "sync")
@@ -61,7 +61,7 @@ type LibFunc struct {
 	DynamicColumns bool        // if true, any column name accepted (TABLE only)
 	IsSink         bool        // true for SINK libs, false for TABLE libs
 	FuncName       string      // Starlark function name ("fetch" or "push")
-	SinkConfig     *SinkConfig // SINK-specific config (nil for TABLE libs)
+	PushConfig     *PushConfig // SINK-specific config (nil for TABLE libs)
 	APIConfig      *APIConfig  // shared API config (nil for legacy TABLE/SINK)
 	PageSize         int         // fetch pagination: rows per page (0 = single call)
 	FetchMode        string      // "sync" (default) or "async"
@@ -143,8 +143,8 @@ func (r *Registry) TableFuncs() []*LibFunc {
 	return result
 }
 
-// SinkFuncs returns all SINK lib functions.
-func (r *Registry) SinkFuncs() []*LibFunc {
+// PushFuncs returns all SINK lib functions.
+func (r *Registry) PushFuncs() []*LibFunc {
 	var result []*LibFunc
 	for _, lf := range r.funcs {
 		if lf.IsSink {
@@ -442,7 +442,7 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 	}
 
 	if pushDict != nil {
-		sinkCfg := &SinkConfig{
+		sinkCfg := &PushConfig{
 			BatchSize:     1,
 			BatchMode:     "sync",
 			MaxConcurrent: 1,
@@ -509,7 +509,7 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 			}
 		}
 
-		lf.SinkConfig = sinkCfg
+		lf.PushConfig = sinkCfg
 
 		// Validate push() function exists
 		pushFound := false
@@ -702,8 +702,8 @@ func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 		} else {
 			// SINK: validate push takes rows + optional runtime kwargs + sink args
 			validPushParams := map[string]bool{"rows": true, "batch_number": true, "kind": true, "key_columns": true, "columns": true}
-			if lf.SinkConfig != nil {
-				for _, arg := range lf.SinkConfig.Args {
+			if lf.PushConfig != nil {
+				for _, arg := range lf.PushConfig.Args {
 					validPushParams[arg] = true
 				}
 			}

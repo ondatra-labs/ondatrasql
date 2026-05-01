@@ -46,11 +46,11 @@ def push(rows):
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if lf.SinkConfig == nil {
-		t.Fatal("expected SinkConfig")
+	if lf.PushConfig == nil {
+		t.Fatal("expected PushConfig")
 	}
-	if len(lf.SinkConfig.SupportedKinds) != 2 {
-		t.Errorf("SupportedKinds = %v, want [table append]", lf.SinkConfig.SupportedKinds)
+	if len(lf.PushConfig.SupportedKinds) != 2 {
+		t.Errorf("SupportedKinds = %v, want [table append]", lf.PushConfig.SupportedKinds)
 	}
 }
 

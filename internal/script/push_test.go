@@ -39,9 +39,9 @@ def push(rows=[], batch_number=1):
 		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "name": "alice"},
 		{"__ondatra_rowid": 2.0, "__ondatra_change_type": "insert", "name": "bob"},
 	}
-	result, err := rt.RunSink(context.Background(), "test_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "test_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	if result.PerRow == nil {
 		t.Fatal("expected PerRow to be set")
@@ -65,9 +65,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "none_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "none_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// None return → PerRow is nil, RawReturn is nil
 	if result.PerRow != nil {
@@ -89,9 +89,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "list_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "list_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// Non-dict return → PerRow nil, RawReturn nil (caller handles this)
 	if result.PerRow != nil {
@@ -113,9 +113,9 @@ def poll(job_ref):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "async_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "async_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	if result.RawReturn == nil {
 		t.Fatal("expected RawReturn for async job ref")
@@ -136,9 +136,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "atomic_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "atomic_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	if result.PerRow != nil {
 		t.Errorf("expected nil PerRow for atomic None, got %v", result.PerRow)
@@ -156,7 +156,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	_, err := rt.RunSink(context.Background(), "error_push", rows, 1, "table", "", nil)
+	_, err := rt.RunPush(context.Background(), "error_push", rows, 1, "table", "", nil)
 	if err == nil {
 		t.Fatal("expected error from failing push")
 	}
@@ -171,7 +171,7 @@ SINK = {"batch_size": 100}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	_, err := rt.RunSink(context.Background(), "no_push", rows, 1, "table", "", nil)
+	_, err := rt.RunPush(context.Background(), "no_push", rows, 1, "table", "", nil)
 	if err == nil {
 		t.Fatal("expected error for missing push()")
 	}
@@ -187,9 +187,9 @@ def push(rows=[], batch_number=1):
     return {}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	result, err := rt.RunSink(context.Background(), "empty_push", []map[string]any{}, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "empty_push", []map[string]any{}, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// Empty dict return → PerRow is empty map (not nil)
 	if result.PerRow == nil {
@@ -212,9 +212,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "nonstr_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "nonstr_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// Non-string value in dict → converted via .String() in PerRow
 	if len(result.PerRow) != 1 {
@@ -237,9 +237,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "batch_push", rows, 7, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "batch_push", rows, 7, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	if result.PerRow["1.0"] != "ok:7" {
 		t.Errorf("got %q, want ok:7 (batch_number should be 7)", result.PerRow["1.0"])
@@ -257,9 +257,9 @@ def push(rows=[], batch_number=1):
 # no finalize() -- should be no-op
 `)
 	rt := NewRuntime(nil, nil, dir)
-	err := rt.RunSinkFinalize(context.Background(), "nofin_push", 10, 0)
+	err := rt.RunPushFinalize(context.Background(), "nofin_push", 10, 0)
 	if err != nil {
-		t.Fatalf("RunSinkFinalize without finalize(): %v", err)
+		t.Fatalf("RunPushFinalize without finalize(): %v", err)
 	}
 }
 
@@ -282,9 +282,9 @@ def finalize(succeeded, failed):
 `)
 	_ = outFile
 	rt := NewRuntime(nil, nil, dir)
-	err := rt.RunSinkFinalize(context.Background(), "fin_push", 5, 2)
+	err := rt.RunPushFinalize(context.Background(), "fin_push", 5, 2)
 	if err != nil {
-		t.Fatalf("RunSinkFinalize: %v", err)
+		t.Fatalf("RunPushFinalize: %v", err)
 	}
 }
 
@@ -301,9 +301,9 @@ def poll(job_ref):
     return {"done": False}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	done, perRow, err := rt.RunSinkPoll(context.Background(), "poll_push", map[string]any{"job_id": "x"})
+	done, perRow, err := rt.RunPushPoll(context.Background(), "poll_push", map[string]any{"job_id": "x"})
 	if err != nil {
-		t.Fatalf("RunSinkPoll: %v", err)
+		t.Fatalf("RunPushPoll: %v", err)
 	}
 	if done {
 		t.Error("expected done=false")
@@ -326,9 +326,9 @@ def poll(job_ref):
     return {"done": True, "per_row": {"1.0": "ok", "2.0": "error: timeout"}}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	done, perRow, err := rt.RunSinkPoll(context.Background(), "poll_done", map[string]any{"job_id": "x"})
+	done, perRow, err := rt.RunPushPoll(context.Background(), "poll_done", map[string]any{"job_id": "x"})
 	if err != nil {
-		t.Fatalf("RunSinkPoll: %v", err)
+		t.Fatalf("RunPushPoll: %v", err)
 	}
 	if !done {
 		t.Error("expected done=true")
@@ -354,7 +354,7 @@ def poll(job_ref):
     return {"done": "true"}  # string, not bool
 `)
 	rt := NewRuntime(nil, nil, dir)
-	_, _, err := rt.RunSinkPoll(context.Background(), "poll_str", map[string]any{"job_id": "x"})
+	_, _, err := rt.RunPushPoll(context.Background(), "poll_str", map[string]any{"job_id": "x"})
 	if err == nil {
 		t.Fatal("expected error for done='true' (string instead of bool)")
 	}
@@ -371,7 +371,7 @@ def push(rows=[], batch_number=1):
 # no poll() defined
 `)
 	rt := NewRuntime(nil, nil, dir)
-	_, _, err := rt.RunSinkPoll(context.Background(), "no_poll", map[string]any{"job_id": "x"})
+	_, _, err := rt.RunPushPoll(context.Background(), "no_poll", map[string]any{"job_id": "x"})
 	if err == nil {
 		t.Fatal("expected error for missing poll()")
 	}
@@ -390,7 +390,7 @@ def poll(job_ref):
     return [1, 2, 3]  # wrong type
 `)
 	rt := NewRuntime(nil, nil, dir)
-	_, _, err := rt.RunSinkPoll(context.Background(), "poll_list", map[string]any{"job_id": "x"})
+	_, _, err := rt.RunPushPoll(context.Background(), "poll_list", map[string]any{"job_id": "x"})
 	if err == nil {
 		t.Fatal("expected error for non-dict poll return")
 	}
@@ -409,7 +409,7 @@ def poll(job_ref):
     return {"status": "running"}  # no "done" key
 `)
 	rt := NewRuntime(nil, nil, dir)
-	_, _, err := rt.RunSinkPoll(context.Background(), "poll_nodone", map[string]any{"job_id": "x"})
+	_, _, err := rt.RunPushPoll(context.Background(), "poll_nodone", map[string]any{"job_id": "x"})
 	if err == nil {
 		t.Fatal("expected error for missing 'done' key")
 	}
@@ -430,9 +430,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "sync_none", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "sync_none", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink should not error (Starlark ran fine): %v", err)
+		t.Fatalf("RunPush should not error (Starlark ran fine): %v", err)
 	}
 	// PerRow must be nil so the caller (executeBatch) can detect and nack
 	if result.PerRow != nil {
@@ -454,9 +454,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunSink(context.Background(), "conv_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "conv_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// RawReturn must be populated (not nil from swallowed error)
 	if result.RawReturn == nil {
@@ -481,7 +481,7 @@ def poll(job_ref):
     return {"done": 1}  # int, not bool
 `)
 	rt := NewRuntime(nil, nil, dir)
-	_, _, err := rt.RunSinkPoll(context.Background(), "poll_int", map[string]any{"job_id": "x"})
+	_, _, err := rt.RunPushPoll(context.Background(), "poll_int", map[string]any{"job_id": "x"})
 	if err == nil {
 		t.Fatal("expected error for done=1 (int instead of bool)")
 	}
@@ -510,9 +510,9 @@ def push(rows=[], batch_number=1):
 		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "name": "alice"},
 		{"__ondatra_rowid": 2.0, "__ondatra_change_type": "insert", "name": "bob"},
 	}
-	result, err := rt.RunSink(context.Background(), "rows_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "rows_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v (rows may not have been converted correctly)", err)
+		t.Fatalf("RunPush: %v (rows may not have been converted correctly)", err)
 	}
 	if len(result.PerRow) != 2 {
 		t.Fatalf("got %d PerRow, want 2", len(result.PerRow))
@@ -534,9 +534,9 @@ def poll(job_ref):
     return {"done": True, "per_row": {"1.0": "ok"}}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	done, _, err := rt.RunSinkPoll(context.Background(), "poll_ref", map[string]any{"job_id": "test_123"})
+	done, _, err := rt.RunPushPoll(context.Background(), "poll_ref", map[string]any{"job_id": "test_123"})
 	if err != nil {
-		t.Fatalf("RunSinkPoll: %v", err)
+		t.Fatalf("RunPushPoll: %v", err)
 	}
 	if !done {
 		t.Error("expected done=true")

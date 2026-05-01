@@ -96,7 +96,7 @@ def push(rows):
 
 	// Create append model with sink
 	p.AddModel("sync/items.sql", `-- @kind: append
--- @sink: append_push
+-- @push: append_push
 
 SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)
 `)
@@ -133,7 +133,7 @@ def finalize(succeeded, failed):
 `)
 
 	p.AddModel("sync/wm_test.sql", `-- @kind: table
--- @sink: finalize_fail
+-- @push: finalize_fail
 
 SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)
 `)
@@ -388,7 +388,7 @@ def push(rows):
 	// Merge model with lib fetch + sink + detect_deletes
 	p.AddModel("sync/contacts.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: threshold_push
+-- @push: threshold_push
 
 SELECT id::BIGINT AS id, name::VARCHAR AS name FROM threshold_fetch()
 `)
@@ -581,7 +581,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 	p.AddModel("raw/events.sql", `-- @kind: append
 -- @incremental: id
 -- @incremental_initial: 0
--- @sink: casc_sink
+-- @push: casc_sink
 SELECT id::BIGINT AS id, kind::VARCHAR AS kind, amount::BIGINT AS amount FROM casc_src('events')
 `)
 
@@ -678,14 +678,14 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 	p.AddModel("sync/users.sql", `-- @kind: append
 -- @incremental: id
 -- @incremental_initial: 0
--- @sink: users_sink
+-- @push: users_sink
 SELECT id::BIGINT AS id, name::VARCHAR AS name FROM users_src('items')
 `)
 
 	p.AddModel("sync/orders.sql", `-- @kind: append
 -- @incremental: id
 -- @incremental_initial: 0
--- @sink: orders_sink
+-- @push: orders_sink
 SELECT id::BIGINT AS id, total::BIGINT AS total FROM orders_src('items')
 `)
 

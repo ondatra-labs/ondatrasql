@@ -29,7 +29,7 @@ func TestParseSinkDirective(t *testing.T) {
 
 	path := writeSinkModel(t, dir, "sync/hubspot.sql", `-- @kind: merge
 -- @unique_key: customer_id
--- @sink: hubspot_push
+-- @push: hubspot_push
 
 SELECT customer_id, email FROM mart.customers
 `)
@@ -38,8 +38,8 @@ SELECT customer_id, email FROM mart.customers
 	if err != nil {
 		t.Fatal(err)
 	}
-	if model.Sink != "hubspot_push" {
-		t.Errorf("sink = %q, want %q", model.Sink, "hubspot_push")
+	if model.Push != "hubspot_push" {
+		t.Errorf("sink = %q, want %q", model.Push, "hubspot_push")
 	}
 	if model.Kind != "merge" {
 		t.Errorf("kind = %q, want merge", model.Kind)
@@ -52,7 +52,7 @@ func TestParseSinkDetectDeletesRemoved(t *testing.T) {
 
 	path := writeSinkModel(t, dir, "sync/mirror.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: crm_push
+-- @push: crm_push
 -- @sink_detect_deletes: true
 
 SELECT id, name FROM source
@@ -73,7 +73,7 @@ func TestParseSinkDeleteThresholdRemoved(t *testing.T) {
 
 	path := writeSinkModel(t, dir, "sync/safe.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: crm_push
+-- @push: crm_push
 -- @sink_delete_threshold: 0.1
 
 SELECT id FROM source
@@ -93,7 +93,7 @@ func TestParseSinkRejectsEventsKind(t *testing.T) {
 	dir := t.TempDir()
 
 	path := writeSinkModel(t, dir, "sync/bad.sql", `-- @kind: events
--- @sink: crm_push
+-- @push: crm_push
 
 SELECT id FROM source
 `)
@@ -113,7 +113,7 @@ func TestParseSinkAllowsSCD2Syntax(t *testing.T) {
 
 	path := writeSinkModel(t, dir, "sync/scd2.sql", `-- @kind: scd2
 -- @unique_key: id
--- @sink: crm_push
+-- @push: crm_push
 
 SELECT id FROM source
 `)

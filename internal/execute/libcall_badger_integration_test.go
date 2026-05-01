@@ -879,7 +879,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 -- @unique_key: id
 -- @incremental: score
 -- @incremental_initial: 0
--- @sink: recorder
+-- @push: recorder
 SELECT id::BIGINT AS id, name::VARCHAR AS name, score::BIGINT AS score FROM mergesrc('items')
 `)
 
@@ -1622,7 +1622,7 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     return {"rows": [{"id": 1, "score": 200}], "next": None}
 `)
 
-	// Sink: asserts that preimage has the OLD value (100), postimage the NEW (200).
+	// Push: asserts that preimage has the OLD value (100), postimage the NEW (200).
 	// If readRowsByEvents reads from the wrong snapshot, the preimage row will
 	// carry score=200 (current state) and fail() will trip the test.
 	writeLib(t, p, "checker", `
@@ -1646,7 +1646,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 
 	p.AddModel("raw/items.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: checker
+-- @push: checker
 SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
 `)
 
@@ -1671,10 +1671,10 @@ SELECT id::BIGINT AS id, score::BIGINT AS score FROM updsrc('items')
 }
 
 // TestPreCommitSnapshot_AppendWithSink pins that the preCommitSnapshot
-// capture is gated by `model.Sink != ""` only — not narrowed to specific
+// capture is gated by `model.Push != ""` only — not narrowed to specific
 // kinds (merge/tracked). The bug class: someone changes the gate to
 // `if model.Kind == "merge" || ...`, breaking append + @sink. Without
-// the pre-commit snapshot, createSinkDelta would query table_changes
+// the pre-commit snapshot, createPushDelta would query table_changes
 // from snapshot 1 instead of the right range, replaying every row of
 // every previous run into the sink on every incremental run.
 //
@@ -1719,7 +1719,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 	p.AddModel("raw/scores.sql", `-- @kind: append
 -- @incremental: id
 -- @incremental_initial: 0
--- @sink: sinkrec
+-- @push: sinkrec
 SELECT id::BIGINT AS id, score::BIGINT AS score FROM appendsrc('items')
 `)
 
@@ -1796,7 +1796,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 
 	p.AddModel("raw/regional.sql", `-- @kind: tracked
 -- @group_key: region
--- @sink: trackedsink
+-- @push: trackedsink
 SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tracksrc('items')
 `)
 
@@ -1877,7 +1877,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 
 	p.AddModel("raw/groups.sql", `-- @kind: tracked
 -- @group_key: region
--- @sink: tgsink
+-- @push: tgsink
 SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tgsrc('items')
 `)
 
@@ -1970,7 +1970,7 @@ def push(rows=[], batch_number=1, kind="", key_columns=[], columns=[]):
 
 	p.AddModel("raw/regions.sql", `-- @kind: tracked
 -- @group_key: region
--- @sink: tdsink
+-- @push: tdsink
 SELECT region::VARCHAR AS region, amount::BIGINT AS amount FROM tdsrc('items')
 `)
 

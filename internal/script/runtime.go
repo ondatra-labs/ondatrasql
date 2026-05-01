@@ -922,8 +922,8 @@ func filterKwargs(fn starlark.Callable, kwargs []starlark.Tuple) []starlark.Tupl
 	return filtered
 }
 
-// SinkResult holds the return value from a push() call.
-type SinkResult struct {
+// PushResult holds the return value from a push() call.
+type PushResult struct {
 	// PerRow maps sync_key -> "ok" or "error: message" (sync mode).
 	// Nil if push returned None (atomic mode).
 	PerRow map[string]string
@@ -934,10 +934,10 @@ type SinkResult struct {
 	RawReturn map[string]any
 }
 
-// RunSink executes a SINK push function from lib/<sink>.star.
+// RunPush executes a SINK push function from lib/<sink>.star.
 // It calls push(rows, batch_number, kind, key_columns, columns, sink args...) with the given batch.
 // Optional httpCfg injects API dict defaults (base_url, headers, etc.) into http module.
-func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (*SinkResult, error) {
+func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (*PushResult, error) {
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
@@ -1046,7 +1046,7 @@ func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[strin
 	}
 
 	// Parse return value
-	result := &SinkResult{}
+	result := &PushResult{}
 	if retVal == nil || retVal == starlark.None {
 		return result, nil
 	}
@@ -1084,9 +1084,9 @@ func (r *Runtime) RunSink(ctx context.Context, sinkName string, rows []map[strin
 	return result, nil
 }
 
-// RunSinkFinalize calls the optional finalize(succeeded, failed) function after all batches.
+// RunPushFinalize calls the optional finalize(succeeded, failed) function after all batches.
 // Returns nil if finalize() is not defined (no-op).
-func (r *Runtime) RunSinkFinalize(ctx context.Context, sinkName string, succeeded, failed int64, httpCfg ...*apiHTTPConfig) error {
+func (r *Runtime) RunPushFinalize(ctx context.Context, sinkName string, succeeded, failed int64, httpCfg ...*apiHTTPConfig) error {
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
@@ -1143,8 +1143,8 @@ func (r *Runtime) RunSinkFinalize(ctx context.Context, sinkName string, succeede
 	return nil
 }
 
-// RunSinkPoll calls the poll() function for async batch mode.
-func (r *Runtime) RunSinkPoll(ctx context.Context, sinkName string, jobRef map[string]any, httpCfg ...*apiHTTPConfig) (done bool, perRow map[string]string, err error) {
+// RunPushPoll calls the poll() function for async batch mode.
+func (r *Runtime) RunPushPoll(ctx context.Context, sinkName string, jobRef map[string]any, httpCfg ...*apiHTTPConfig) (done bool, perRow map[string]string, err error) {
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
@@ -1236,7 +1236,7 @@ func (r *Runtime) RunSinkPoll(ctx context.Context, sinkName string, jobRef map[s
 		if key == "" {
 			continue
 		}
-		// Convert value to string — same logic as RunSink PerRow
+		// Convert value to string — same logic as RunPush PerRow
 		if s, ok := starlark.AsString(item[1]); ok {
 			perRow[key] = s
 		} else {

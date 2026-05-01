@@ -100,11 +100,11 @@ def push(rows):
 	if lf.FuncName != "push" {
 		t.Errorf("expected func push, got %s", lf.FuncName)
 	}
-	if lf.SinkConfig == nil {
-		t.Fatal("expected SinkConfig")
+	if lf.PushConfig == nil {
+		t.Fatal("expected PushConfig")
 	}
-	if lf.SinkConfig.BatchSize != 100 {
-		t.Errorf("batch_size = %d, want 100", lf.SinkConfig.BatchSize)
+	if lf.PushConfig.BatchSize != 100 {
+		t.Errorf("batch_size = %d, want 100", lf.PushConfig.BatchSize)
 	}
 }
 
@@ -336,7 +336,7 @@ def push(rows):
 	}
 
 	tables := reg.TableFuncs()
-	sinks := reg.SinkFuncs()
+	sinks := reg.PushFuncs()
 	if len(tables) != 1 {
 		t.Errorf("expected 1 table func, got %d", len(tables))
 	}

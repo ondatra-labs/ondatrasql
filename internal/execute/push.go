@@ -21,40 +21,40 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/script"
 )
 
-// sinkExecutor handles outbound sync after materialization.
-type sinkExecutor struct {
+// pushExecutor handles outbound sync after materialization.
+type pushExecutor struct {
 	runner             *Runner
 	model              *parser.Model
-	sinkLib            *libregistry.LibFunc
+	pushLib            *libregistry.LibFunc
 	result             *Result
 	rl                 *rateLimiter
-	sinkEvents         []collect.SyncEvent // delta from createSinkDelta (nil for table/skip)
+	sinkEvents         []collect.SyncEvent // delta from createPushDelta (nil for table/skip)
 	postCommitSnapshot int64               // for reading current state from DuckLake
 }
 
-// executeSink runs the outbound sync pipeline after materialization.
+// executePush runs the outbound sync pipeline after materialization.
 // It receives pre-computed SyncEvents (rowid + op + snapshot), batches them,
 // reads row data from DuckLake at push time, and calls push() per batch.
-func (r *Runner) executeSink(ctx context.Context, model *parser.Model, result *Result, sinkEvents []collect.SyncEvent, postCommitSnapshot int64) error {
-	if model.Sink == "" {
+func (r *Runner) executePush(ctx context.Context, model *parser.Model, result *Result, sinkEvents []collect.SyncEvent, postCommitSnapshot int64) error {
+	if model.Push == "" {
 		return nil
 	}
 
 	if r.libRegistry == nil {
-		return fmt.Errorf("sink %q: lib registry not set (call SetLibRegistry before running sink models)", model.Sink)
+		return fmt.Errorf("sink %q: lib registry not set (call SetLibRegistry before running sink models)", model.Push)
 	}
-	sinkLib := r.libRegistry.Get(model.Sink)
-	if sinkLib == nil {
-		return fmt.Errorf("sink %q not found in lib/", model.Sink)
+	pushLib := r.libRegistry.Get(model.Push)
+	if pushLib == nil {
+		return fmt.Errorf("sink %q not found in lib/", model.Push)
 	}
-	if sinkLib.SinkConfig == nil {
-		return fmt.Errorf("sink %q has no SINK dict", model.Sink)
+	if pushLib.PushConfig == nil {
+		return fmt.Errorf("sink %q has no SINK dict", model.Push)
 	}
 
-	cfg := sinkLib.SinkConfig
+	cfg := pushLib.PushConfig
 
-	// Defensive guardrail -- should have been caught by ValidateModelSinkCompat at startup
-	if err := ValidateModelSinkCompat([]*parser.Model{model}, r.libRegistry); err != nil {
+	// Defensive guardrail -- should have been caught by ValidateModelPushCompat at startup
+	if err := ValidateModelPushCompat([]*parser.Model{model}, r.libRegistry); err != nil {
 		return err
 	}
 
@@ -68,10 +68,10 @@ func (r *Runner) executeSink(ctx context.Context, model *parser.Model, result *R
 		}
 	}
 
-	se := &sinkExecutor{
+	se := &pushExecutor{
 		runner:             r,
 		model:              model,
-		sinkLib:            sinkLib,
+		pushLib:            pushLib,
 		result:             result,
 		sinkEvents:         sinkEvents,
 		postCommitSnapshot: postCommitSnapshot,
@@ -81,8 +81,8 @@ func (r *Runner) executeSink(ctx context.Context, model *parser.Model, result *R
 	return se.run(ctx)
 }
 
-func (se *sinkExecutor) run(ctx context.Context) error {
-	cfg := se.sinkLib.SinkConfig
+func (se *pushExecutor) run(ctx context.Context) error {
+	cfg := se.pushLib.PushConfig
 
 	// Open SyncStore (Badger-backed, stores only SyncEvent not full rows)
 	store, err := se.openSyncStore()
@@ -124,7 +124,7 @@ func (se *sinkExecutor) run(ctx context.Context) error {
 				"blocked by active inflight, no new delta")
 		}
 		return fmt.Errorf("sink %s: active or recent inflight claims exist. "+
-			"Will be processed when inflight resolves", se.model.Sink)
+			"Will be processed when inflight resolves", se.model.Push)
 	}
 
 	// --- No inflight: process delta and/or backlog ---
@@ -163,7 +163,7 @@ func (se *sinkExecutor) run(ctx context.Context) error {
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
-	// atomic/async with max_concurrent > 1 is rejected at startup by ValidateModelSinkCompat
+	// atomic/async with max_concurrent > 1 is rejected at startup by ValidateModelPushCompat
 
 	var (
 		mu         sync.Mutex
@@ -256,13 +256,13 @@ func (se *sinkExecutor) run(ctx context.Context) error {
 	if len(syncErrors) > 0 {
 		if failed > 0 {
 			se.result.Warnings = append(se.result.Warnings,
-				fmt.Sprintf("sink %s: %d succeeded, %d failed", se.model.Sink, succeeded, failed))
-			return fmt.Errorf("sink %s: %d of %d rows failed", se.model.Sink, failed, succeeded+failed)
+				fmt.Sprintf("sink %s: %d succeeded, %d failed", se.model.Push, succeeded, failed))
+			return fmt.Errorf("sink %s: %d of %d rows failed", se.model.Push, failed, succeeded+failed)
 		}
 		// Run-level error without row failures (cancellation, finalize, etc.)
 		se.result.Warnings = append(se.result.Warnings,
-			fmt.Sprintf("sink %s: %s", se.model.Sink, syncErrors[0]))
-		return fmt.Errorf("sink %s: %s", se.model.Sink, syncErrors[0])
+			fmt.Sprintf("sink %s: %s", se.model.Push, syncErrors[0]))
+		return fmt.Errorf("sink %s: %s", se.model.Push, syncErrors[0])
 	}
 
 	return nil
@@ -271,9 +271,9 @@ func (se *sinkExecutor) run(ctx context.Context) error {
 // callFinalize calls the optional finalize() function in the sink after all batches.
 // Sinks can define finalize(succeeded, failed) for cleanup, commits, or notifications.
 // If finalize() is not defined, this is a no-op.
-func (se *sinkExecutor) callFinalize(ctx context.Context, succeeded, failed int64) error {
+func (se *pushExecutor) callFinalize(ctx context.Context, succeeded, failed int64) error {
 	rt := script.NewRuntime(se.runner.sess, nil, se.runner.projectDir)
-	return rt.RunSinkFinalize(ctx, se.model.Sink, succeeded, failed, httpConfigFromLib(se.sinkLib.APIConfig, ctx, se.runner.projectDir))
+	return rt.RunPushFinalize(ctx, se.model.Push, succeeded, failed, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
 }
 
 // perRowResult holds the outcome of per-row status validation.
@@ -291,7 +291,7 @@ type perRowResult struct {
 // Status keys from push() must be composite: "rowid:change_type"
 // (e.g. "42:insert", "42:update_postimage"). This ensures that update_preimage
 // and update_postimage for the same rowid can have independent statuses.
-func (se *sinkExecutor) classifyPerRowStatus(perRow map[string]string, rows []map[string]any, events []collect.SyncEvent) (*perRowResult, error) {
+func (se *pushExecutor) classifyPerRowStatus(perRow map[string]string, rows []map[string]any, events []collect.SyncEvent) (*perRowResult, error) {
 	// Validate completeness: every row must have a composite key status.
 	// Push must return status keyed by "rowid:change_type".
 	var missing []string
@@ -356,7 +356,7 @@ func formatCompositeKey(rowid, changeType any) string {
 // Historical rows (delete, update_preimage) are read from the snapshot before the
 // change, so push() receives the row data as it was before modification.
 // Each row gets __ondatra_rowid and __ondatra_change_type for the Starlark push().
-func (se *sinkExecutor) readRowsByEvents(events []collect.SyncEvent) ([]map[string]any, error) {
+func (se *pushExecutor) readRowsByEvents(events []collect.SyncEvent) ([]map[string]any, error) {
 	target := quoteTarget(se.model.Target)
 
 	// Separate events into current-state (insert, update_postimage) and
@@ -445,7 +445,7 @@ type historicalEvent struct {
 //   - backfill: ClearAllAndWrite (full replace, supersedes everything incl. inflight)
 //   - incremental + inflight: WriteBatch (preserve active claims, queue for later)
 //   - incremental + no inflight: merge + ClearAllAndWrite (dedup old backlog)
-func (se *sinkExecutor) queueDelta(store *collect.SyncStore, target string, batchMode string, hasInflight bool) error {
+func (se *pushExecutor) queueDelta(store *collect.SyncStore, target string, batchMode string, hasInflight bool) error {
 	if batchMode == "async" {
 		if err := store.WriteBatch(target, se.sinkEvents); err != nil {
 			return fmt.Errorf("queue delta for async (preserving job_ref): %w", err)
@@ -485,7 +485,7 @@ func (se *sinkExecutor) queueDelta(store *collect.SyncStore, target string, batc
 
 // ackAll records the push success in DuckLake (_sync_acked), then acks Badger.
 // If Badger ack fails, _sync_acked ensures next run skips already-pushed rows.
-func (se *sinkExecutor) ackAll(store *collect.SyncStore, claimID string, batchNum int, events []collect.SyncEvent) batchOutcome {
+func (se *pushExecutor) ackAll(store *collect.SyncStore, claimID string, batchNum int, events []collect.SyncEvent) batchOutcome {
 	target := "sync:" + se.model.Target
 
 	// Step 1: Record in DuckLake (survives Badger failures)
@@ -541,8 +541,8 @@ func allOK(events []collect.SyncEvent) batchOutcome {
 }
 
 // executeBatch reads rows from DuckLake for claimed events, runs push, and handles ack/nack.
-func (se *sinkExecutor) executeBatch(ctx context.Context, events []collect.SyncEvent, claimID string, batchNum int, store *collect.SyncStore) batchOutcome {
-	cfg := se.sinkLib.SinkConfig
+func (se *pushExecutor) executeBatch(ctx context.Context, events []collect.SyncEvent, claimID string, batchNum int, store *collect.SyncStore) batchOutcome {
+	cfg := se.pushLib.PushConfig
 	target := "sync:" + se.model.Target
 
 	// Check if this claim was already pushed (crash recovery: Badger ack
@@ -591,16 +591,16 @@ func (se *sinkExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 	if se.model.Kind == "tracked" {
 		sinkKey = se.model.GroupKey
 	}
-	// Map sink args from @sink: name('arg1', 'arg2') to push.args names
-	sinkArgMap := make(map[string]string)
-	if se.sinkLib.SinkConfig != nil {
-		for i, argName := range se.sinkLib.SinkConfig.Args {
-			if i < len(se.model.SinkArgs) {
-				sinkArgMap[argName] = se.model.SinkArgs[i]
+	// Map sink args from @push: name('arg1', 'arg2') to push.args names
+	pushArgMap := make(map[string]string)
+	if se.pushLib.PushConfig != nil {
+		for i, argName := range se.pushLib.PushConfig.Args {
+			if i < len(se.model.PushArgs) {
+				pushArgMap[argName] = se.model.PushArgs[i]
 			}
 		}
 	}
-	sinkResult, err := rt.RunSink(ctx, se.model.Sink, rows, batchNum, se.model.Kind, sinkKey, sinkArgMap, httpConfigFromLib(se.sinkLib.APIConfig, ctx, se.runner.projectDir))
+	sinkResult, err := rt.RunPush(ctx, se.model.Push, rows, batchNum, se.model.Kind, sinkKey, pushArgMap, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
 
 	switch cfg.BatchMode {
 	case "sync":
@@ -656,7 +656,7 @@ func (se *sinkExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 		outcome := se.ackAll(store, claimID, batchNum, events)
 		if sinkResult.PerRow != nil || sinkResult.RawReturn != nil {
 			outcome.warnings = append(outcome.warnings,
-				fmt.Sprintf("sink %s: atomic push returned a value (expected None). Check if batch_mode should be \"sync\" instead", se.model.Sink))
+				fmt.Sprintf("sink %s: atomic push returned a value (expected None). Check if batch_mode should be \"sync\" instead", se.model.Push))
 		}
 		return outcome
 
@@ -680,8 +680,8 @@ func (se *sinkExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 
 // pollAsyncJob runs the polling loop for an async batch mode job.
 // Used both for fresh push results and for resuming after crash (saved job_ref).
-func (se *sinkExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any, rows []map[string]any, events []collect.SyncEvent, claimID string, batchNum int, store *collect.SyncStore, target string) batchOutcome {
-	cfg := se.sinkLib.SinkConfig
+func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any, rows []map[string]any, events []collect.SyncEvent, claimID string, batchNum int, store *collect.SyncStore, target string) batchOutcome {
+	cfg := se.pushLib.PushConfig
 
 	pollInterval, _ := parseDuration(cfg.PollInterval)
 	if pollInterval == 0 {
@@ -706,7 +706,7 @@ func (se *sinkExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 		}
 
 		pollRt := script.NewRuntime(se.runner.sess, nil, se.runner.projectDir)
-		done, perRow, pollErr := pollRt.RunSinkPoll(ctx, se.model.Sink, jobRef, httpConfigFromLib(se.sinkLib.APIConfig, ctx, se.runner.projectDir))
+		done, perRow, pollErr := pollRt.RunPushPoll(ctx, se.model.Push, jobRef, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
 		if pollErr != nil {
 			return nackAll(store, claimID, batchNum, events, fmt.Errorf("poll: %w", pollErr))
 		}
@@ -772,7 +772,7 @@ func httpConfigFromLib(apiCfg *libregistry.APIConfig, ctx context.Context, proje
 }
 
 // openSyncStore opens the SyncStore (Badger) for outbound sync tracking.
-func (se *sinkExecutor) openSyncStore() (*collect.SyncStore, error) {
+func (se *pushExecutor) openSyncStore() (*collect.SyncStore, error) {
 	dir := filepath.Join(se.runner.projectDir, ".ondatra", "sync")
 	return collect.OpenSyncStore(dir)
 }
@@ -781,7 +781,7 @@ func (se *sinkExecutor) openSyncStore() (*collect.SyncStore, error) {
 // Best-effort observability -- failures are logged as warnings, not hard errors.
 // Badger handles durability; _sync_log is for queryable monitoring.
 // ensureSyncLogTable creates _sync_log if it doesn't exist.
-func (se *sinkExecutor) ensureSyncLogTable() {
+func (se *pushExecutor) ensureSyncLogTable() {
 	se.runner.sess.Exec(`CREATE TABLE IF NOT EXISTS _sync_log (
 		target VARCHAR NOT NULL,
 		sync_key VARCHAR NOT NULL,
@@ -794,7 +794,7 @@ func (se *sinkExecutor) ensureSyncLogTable() {
 	)`)
 }
 
-func (se *sinkExecutor) writeSyncLog(succeeded, failed int64, syncErrors []string) {
+func (se *pushExecutor) writeSyncLog(succeeded, failed int64, syncErrors []string) {
 	se.ensureSyncLogTable()
 
 	if failed == 0 && len(syncErrors) == 0 {
@@ -821,13 +821,13 @@ func (se *sinkExecutor) writeSyncLog(succeeded, failed int64, syncErrors []strin
 }
 
 // writeSyncLogEntry writes a single entry to _sync_log, creating the table if needed.
-func (se *sinkExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
+func (se *pushExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
 	se.ensureSyncLogTable()
 	esc := func(s string) string { return strings.ReplaceAll(s, "'", "''") }
 	sql := fmt.Sprintf(`INSERT INTO _sync_log (target, sync_key, status, error_message, operation, batch_mode, dag_run_id)
 		VALUES ('%s', '%s', '%s', '%s', 'push', '%s', '%s')`,
 		esc(target), esc(syncKey), esc(status), esc(msg),
-		esc(se.sinkLib.SinkConfig.BatchMode), esc(se.runner.dagRunID))
+		esc(se.pushLib.PushConfig.BatchMode), esc(se.runner.dagRunID))
 	if err := se.runner.sess.Exec(sql); err != nil {
 		se.result.Warnings = append(se.result.Warnings,
 			fmt.Sprintf("_sync_log: failed to write entry: %v", err))
@@ -842,7 +842,7 @@ func (se *sinkExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
 //
 // Reads both evt: and inflight: because the caller uses ClearAllAndWrite which
 // clears everything. Without reading inflight events, they would be silently lost.
-func (se *sinkExecutor) mergeBacklogWithDelta(store *collect.SyncStore, target string, delta []collect.SyncEvent) ([]collect.SyncEvent, error) {
+func (se *pushExecutor) mergeBacklogWithDelta(store *collect.SyncStore, target string, delta []collect.SyncEvent) ([]collect.SyncEvent, error) {
 	backlog, err := store.ReadAllEvents(target)
 	if err != nil {
 		return nil, fmt.Errorf("read all events: %w", err)

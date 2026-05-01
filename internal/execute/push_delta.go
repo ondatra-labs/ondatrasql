@@ -13,13 +13,13 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
-// createSinkDelta computes the outbound sync delta AFTER materialization
+// createPushDelta computes the outbound sync delta AFTER materialization
 // and returns a list of SyncEvents with raw DuckLake change_types.
 // All kinds use the same table_changes() query — no filtering, no mapping.
 // The Starlark push() function receives the raw change_type and decides
 // what to do with each row.
-func (r *Runner) createSinkDelta(model *parser.Model, _ string, prevSnapshot, newSnapshot int64) ([]collect.SyncEvent, error) {
-	if model.Sink == "" {
+func (r *Runner) createPushDelta(model *parser.Model, _ string, prevSnapshot, newSnapshot int64) ([]collect.SyncEvent, error) {
+	if model.Push == "" {
 		return nil, nil
 	}
 	if newSnapshot == 0 {

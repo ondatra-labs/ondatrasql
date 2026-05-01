@@ -258,9 +258,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Skip: nothing changed, no work to do -- but check for pending sink work
 	if result.RunType == "skip" {
-		if model.Sink != "" {
+		if model.Push != "" {
 			// No delta table on skip -- only process existing Badger backlog
-			if err := r.executeSink(ctx, model, result, nil, 0); err != nil {
+			if err := r.executePush(ctx, model, result, nil, 0); err != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("sink: %v", err))
 			}
 		}
@@ -1024,7 +1024,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Capture pre-commit snapshot for sink delta (table_changes needs the range).
 	var preCommitSnapshot int64
-	if model.Sink != "" {
+	if model.Push != "" {
 		var snapErr error
 		preCommitSnapshot, snapErr = r.sess.GetCurrentSnapshot()
 		if snapErr != nil {
@@ -1092,7 +1092,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Outbound sync: compute delta AFTER commit, then push.
 	// Delta is a list of SyncEvents (rowid + operation + snapshot).
 	// Row data is read from DuckLake at push time, not stored in Badger.
-	if model.Sink != "" {
+	if model.Push != "" {
 		// Get post-commit snapshot. All sink kinds need this:
 		// All sink-enabled kinds need table_changes() range
 		var postCommitSnapshot int64
@@ -1108,7 +1108,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 
 		stepStart = time.Now()
-		sinkEvents, deltaErr := r.createSinkDelta(model, tmpTable, preCommitSnapshot, postCommitSnapshot)
+		sinkEvents, deltaErr := r.createPushDelta(model, tmpTable, preCommitSnapshot, postCommitSnapshot)
 
 		if schema != "" {
 			r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
@@ -1123,7 +1123,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 		// Run sink: processes new delta AND existing Badger backlog.
 		stepStart = time.Now()
-		if err := r.executeSink(ctx, model, result, sinkEvents, postCommitSnapshot); err != nil {
+		if err := r.executePush(ctx, model, result, sinkEvents, postCommitSnapshot); err != nil {
 			r.trace(result, "sink", stepStart, "error")
 			result.Warnings = append(result.Warnings, fmt.Sprintf("sink: %v", err))
 		} else {

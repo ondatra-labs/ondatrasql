@@ -22,13 +22,13 @@ func TestParseSinkArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := parseSinkArgs(tt.input)
+			got := parsePushArgs(tt.input)
 			if len(got) != len(tt.want) {
-				t.Fatalf("parseSinkArgs(%q) = %v, want %v", tt.input, got, tt.want)
+				t.Fatalf("parsePushArgs(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 			for i := range got {
 				if got[i] != tt.want[i] {
-					t.Errorf("parseSinkArgs(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+					t.Errorf("parsePushArgs(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
 				}
 			}
 		})

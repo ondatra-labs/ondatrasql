@@ -123,7 +123,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	}
 
 	// Validate model + sink compatibility before execution
-	if err := execute.ValidateModelSinkCompat(sortedModels, libReg); err != nil {
+	if err := execute.ValidateModelPushCompat(sortedModels, libReg); err != nil {
 		return err
 	}
 

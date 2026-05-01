@@ -118,11 +118,11 @@ type Model struct {
 
 	// Sink is the name of the push function in lib/<sink>.star for outbound sync.
 	// Set via @sink directive. When set, runtime pushes delta rows to external API after materialization.
-	Sink string
+	Push string
 
-	// SinkArgs holds positional arguments from @sink: name('arg1', 'arg2').
+	// PushArgs holds positional arguments from @push: name('arg1', 'arg2').
 	// Mapped to push.args names in the API dict.
-	SinkArgs []string
+	PushArgs []string
 
 	// FilePath is the original file path (empty for database-stored models).
 	FilePath string
@@ -228,6 +228,7 @@ var (
 	columnRe             = regexp.MustCompile(`^` + c + `\s*@column:\s*(.+)$`)
 	sortedByRe           = regexp.MustCompile(`^` + c + `\s*@sorted_by:\s*(.+)$`)
 	exposeRe                = regexp.MustCompile(`^` + c + `\s*@expose(?:\s+(.+))?$`)
+	pushRe                  = regexp.MustCompile(`^` + c + `\s*@push:\s*(.*)$`)
 	sinkRe                  = regexp.MustCompile(`^` + c + `\s*@sink:\s*(.*)$`)
 	sinkDetectDeletesRe     = regexp.MustCompile(`^` + c + `\s*@sink_detect_deletes:\s*(.+)$`)
 	sinkDeleteThresholdRe   = regexp.MustCompile(`^` + c + `\s*@sink_delete_threshold:\s*(.+)$`)
@@ -397,21 +398,24 @@ func ParseModel(path, projectDir string) (*Model, error) {
 			}
 
 		case sinkRe.MatchString(trimmed):
-			matches := sinkRe.FindStringSubmatch(trimmed)
-			sinkVal := strings.TrimSpace(matches[1])
-			if sinkVal == "" {
-				return nil, fmt.Errorf("@sink requires a lib function name (e.g. @sink: hubspot_push)")
+			return nil, fmt.Errorf("@sink was renamed to @push in v0.30.0 — update the directive (e.g. @push: hubspot_push)")
+
+		case pushRe.MatchString(trimmed):
+			matches := pushRe.FindStringSubmatch(trimmed)
+			pushVal := strings.TrimSpace(matches[1])
+			if pushVal == "" {
+				return nil, fmt.Errorf("@push requires a lib function name (e.g. @push: hubspot_push)")
 			}
-			// Parse @sink: name('arg1', 'arg2') → Sink="name", SinkArgs=["arg1", "arg2"]
-			if parenIdx := strings.Index(sinkVal, "("); parenIdx >= 0 {
-				model.Sink = strings.TrimSpace(sinkVal[:parenIdx])
-				argsStr := sinkVal[parenIdx+1:]
+			// Parse @push: name('arg1', 'arg2') → Push="name", PushArgs=["arg1", "arg2"]
+			if parenIdx := strings.Index(pushVal, "("); parenIdx >= 0 {
+				model.Push = strings.TrimSpace(pushVal[:parenIdx])
+				argsStr := pushVal[parenIdx+1:]
 				if endIdx := strings.LastIndex(argsStr, ")"); endIdx >= 0 {
 					argsStr = argsStr[:endIdx]
 				}
-				model.SinkArgs = parseSinkArgs(argsStr)
+				model.PushArgs = parsePushArgs(argsStr)
 			} else {
-				model.Sink = sinkVal
+				model.Push = pushVal
 			}
 
 		case sinkDetectDeletesRe.MatchString(trimmed):
@@ -516,6 +520,7 @@ func isDirectiveLine(trimmed string) bool {
 		columnRe.MatchString(trimmed),
 		sortedByRe.MatchString(trimmed),
 		exposeRe.MatchString(trimmed),
+		pushRe.MatchString(trimmed),
 		sinkRe.MatchString(trimmed),
 		sinkDetectDeletesRe.MatchString(trimmed),
 		sinkDeleteThresholdRe.MatchString(trimmed):
@@ -637,7 +642,7 @@ func validateModel(m *Model) error {
 	}
 
 	// Validate @sink directives
-	if m.Sink != "" && m.Kind == "events" {
+	if m.Push != "" && m.Kind == "events" {
 		return fmt.Errorf("@sink is not supported for events kind (events has its own ingest pipeline)")
 	}
 
@@ -902,10 +907,10 @@ func parseColumnDefs(body string) ([]ColumnDef, error) {
 	return cols, nil
 }
 
-// parseSinkArgs splits a sink argument string respecting quoted values.
+// parsePushArgs splits a sink argument string respecting quoted values.
 // "spreadsheet_id, 'Sheet1'" → ["spreadsheet_id", "Sheet1"]
 // "'value, with comma', 'other'" → ["value, with comma", "other"]
-func parseSinkArgs(s string) []string {
+func parsePushArgs(s string) []string {
 	var args []string
 	var current strings.Builder
 	inQuote := false

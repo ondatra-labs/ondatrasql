@@ -775,7 +775,7 @@ def push(rows):
 
 	p.AddModel("sync/items.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: skip_push
+-- @push: skip_push
 
 SELECT * FROM raw.items
 `)
@@ -830,7 +830,7 @@ def push(rows):
 	p.Sess.Exec("CREATE TABLE raw.report AS SELECT * FROM (VALUES (1,'a'),(2,'b'),(3,'c')) AS t(id,val)")
 
 	p.AddModel("sync/report.sql", `-- @kind: table
--- @sink: table_push
+-- @push: table_push
 
 SELECT * FROM raw.report
 `)
@@ -892,7 +892,7 @@ def push(rows):
 
 	p.AddModel("sync/failing.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: fail_push
+-- @push: fail_push
 
 SELECT * FROM raw.src
 `)
@@ -937,7 +937,7 @@ def finalize(succeeded, failed):
 
 	p.AddModel("sync/fin.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: fin_push
+-- @push: fin_push
 
 SELECT * FROM raw.fin_src
 `)
@@ -975,7 +975,7 @@ def push(rows):
 
 	p.AddModel("sync/nofin.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: nofin_push
+-- @push: nofin_push
 
 SELECT * FROM raw.nofin_src
 `)
@@ -1069,7 +1069,7 @@ def push(rows):
 
 	p.AddModel("sync/partial.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: partial_push
+-- @push: partial_push
 
 SELECT * FROM raw.partial
 `)
@@ -1119,7 +1119,7 @@ def push(rows):
 	p.Sess.Exec("CREATE TABLE raw.empty_src AS SELECT 1 AS id, 'a' AS val")
 
 	p.AddModel("sync/empty.sql", `-- @kind: table
--- @sink: empty_push
+-- @push: empty_push
 
 SELECT * FROM raw.empty_src
 `)
@@ -1191,7 +1191,7 @@ def push(rows):
 
 	p.AddModel("sync/fields.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: fields_push
+-- @push: fields_push
 
 SELECT * FROM raw.fields_src
 `)
@@ -1283,7 +1283,7 @@ def push(rows):
 
 	p.AddModel("sync/retry.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: retry_push
+-- @push: retry_push
 
 SELECT * FROM raw.retry_src
 `)
@@ -1364,7 +1364,7 @@ def push(rows):
 	// Use a literal SELECT (no source table dependency) so the table model
 	// can skip on re-run when the SQL hash is unchanged.
 	p.AddModel("sync/wm.sql", `-- @kind: table
--- @sink: wm_push
+-- @push: wm_push
 
 SELECT 1 AS id, 'a' AS val
 UNION ALL
@@ -1393,7 +1393,7 @@ SELECT 2, 'b'
 
 	// Run 3: change SQL -> model re-materializes -> push again
 	p.AddModel("sync/wm.sql", `-- @kind: table
--- @sink: wm_push
+-- @push: wm_push
 
 SELECT 1 AS id, 'a' AS val
 UNION ALL
@@ -1443,7 +1443,7 @@ def push(rows):
 
 	// Run 1: table with 1 row (literal SELECT, no source dep)
 	p.AddModel("sync/empty_wm.sql", `-- @kind: table
--- @sink: empty_wm_push
+-- @push: empty_wm_push
 
 SELECT 1 AS id, 'a' AS val
 `)
@@ -1459,7 +1459,7 @@ SELECT 1 AS id, 'a' AS val
 	// Run 2: change SQL to return 0 rows → TRUNCATE+INSERT(0)
 	// table_changes() produces delete events for the 1 row that was truncated
 	p.AddModel("sync/empty_wm.sql", `-- @kind: table
--- @sink: empty_wm_push
+-- @push: empty_wm_push
 
 SELECT id, val FROM (SELECT 1 AS id, 'a' AS val) WHERE 1=0
 `)
@@ -1521,7 +1521,7 @@ def push(rows):
 
 	p.AddModel("sync/del.sql", `-- @kind: tracked
 -- @group_key: id
--- @sink: del_push
+-- @push: del_push
 
 SELECT * FROM raw.del_src
 `)
@@ -1584,7 +1584,7 @@ def push(rows):
 
 	p.AddModel("sync/autodel.sql", `-- @kind: tracked
 -- @group_key: id
--- @sink: autodel_push
+-- @push: autodel_push
 
 SELECT * FROM raw.autodel_src
 `)
@@ -1634,7 +1634,7 @@ def push(rows):
 
 	p.AddModel("sync/acked.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: acked_push
+-- @push: acked_push
 
 SELECT * FROM raw.acked_src
 `)
@@ -1695,7 +1695,7 @@ def push(rows):
 
 	p.AddModel("sync/order_items.sql", `-- @kind: tracked
 -- @group_key: order_id
--- @sink: grp_push
+-- @push: grp_push
 
 SELECT * FROM raw.order_items
 `)
@@ -1772,7 +1772,7 @@ def push(rows):
 
 	p.AddModel("sync/grp_items.sql", `-- @kind: tracked
 -- @group_key: order_id
--- @sink: grpdel_push
+-- @push: grpdel_push
 
 SELECT * FROM raw.grp_items
 `)
@@ -1845,7 +1845,7 @@ def push(rows):
 	p.Sess.Exec("CREATE TABLE raw.append_src AS SELECT * FROM (VALUES (1,'a'),(2,'b')) AS t(id,val)")
 
 	p.AddModel("sync/append_test.sql", `-- @kind: append
--- @sink: append_push
+-- @push: append_push
 
 SELECT * FROM raw.append_src
 `)
@@ -1922,7 +1922,7 @@ def push(rows):
 	p.Sess.Exec("CREATE TABLE raw.bf_src AS SELECT * FROM (VALUES (1,'a'),(2,'b')) AS t(id,val)")
 
 	p.AddModel("sync/bf_append.sql", `-- @kind: append
--- @sink: bf_push
+-- @push: bf_push
 
 SELECT * FROM raw.bf_src
 `)
@@ -1944,7 +1944,7 @@ def push(rows):
 	p.Sess.Exec("INSERT INTO raw.bf_src VALUES (3, 'c')")
 
 	p.AddModel("sync/bf_append.sql", `-- @kind: append
--- @sink: bf_push
+-- @push: bf_push
 
 SELECT * FROM raw.bf_src WHERE id > 0
 `)
@@ -2005,7 +2005,7 @@ def finalize(succeeded, failed):
 
 	p.AddModel("sync/conc.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: conc_push
+-- @push: conc_push
 
 SELECT * FROM raw.conc_src
 `)
@@ -2069,7 +2069,7 @@ def push(rows):
 
 	p.AddModel("sync/mdu.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: mdu_push
+-- @push: mdu_push
 
 SELECT * FROM raw.mdu_src
 `)
@@ -2157,7 +2157,7 @@ def push(rows):
 
 	p.AddModel("sync/bug3.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: bug3_push
+-- @push: bug3_push
 
 SELECT * FROM raw.bug3_src
 `)
@@ -2298,7 +2298,7 @@ def push(rows):
 
 	p.AddModel("sync/bug3b.sql", `-- @kind: merge
 -- @unique_key: id
--- @sink: bug3b_push
+-- @push: bug3b_push
 
 SELECT * FROM raw.bug3b_src
 `)

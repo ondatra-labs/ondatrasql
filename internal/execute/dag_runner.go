@@ -47,7 +47,7 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 ) (map[string]*Result, map[string]error) {
 
 	// Validate model + sink compatibility before any execution
-	if err := ValidateModelSinkCompat(sorted, libReg); err != nil {
+	if err := ValidateModelPushCompat(sorted, libReg); err != nil {
 		errors := make(map[string]error)
 		errors["_validation"] = err
 		return nil, errors

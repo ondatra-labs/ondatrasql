@@ -157,7 +157,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	runner.SetLibRegistry(libReg)
 
 	// Validate model + sink compatibility before execution
-	if err := execute.ValidateModelSinkCompat([]*parser.Model{model}, libReg); err != nil {
+	if err := execute.ValidateModelPushCompat([]*parser.Model{model}, libReg); err != nil {
 		return err
 	}
 

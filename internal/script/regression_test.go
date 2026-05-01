@@ -189,7 +189,7 @@ func TestInjectAPIAuth_ServiceAccount_MalformedJSON(t *testing.T) {
 	}
 }
 
-// --- RunSink PerRow regression tests ---
+// --- RunPush PerRow regression tests ---
 
 func TestRunSink_PerRow_EmptyStringValue(t *testing.T) {
 	t.Parallel()
@@ -205,9 +205,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0}}
-	result, err := rt.RunSink(context.Background(), "emptyval_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "emptyval_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// Empty string value should be preserved (was dropped before fix)
 	if v, ok := result.PerRow["1.0"]; !ok {
@@ -231,9 +231,9 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0}}
-	result, err := rt.RunSink(context.Background(), "intval_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "intval_push", rows, 1, "table", "", nil)
 	if err != nil {
-		t.Fatalf("RunSink: %v", err)
+		t.Fatalf("RunPush: %v", err)
 	}
 	// Non-string values should be converted via .String() (was dropped before fix)
 	if v, ok := result.PerRow["1.0"]; !ok {
@@ -538,7 +538,7 @@ func TestGoToStarlark_Uint64(t *testing.T) {
 	}
 }
 
-// --- RunSinkPoll: per-row non-string values converted (same as RunSink) ---
+// --- RunPushPoll: per-row non-string values converted (same as RunPush) ---
 
 func TestRunSinkPoll_PerRow_NonStringConverted(t *testing.T) {
 	t.Parallel()
@@ -556,9 +556,9 @@ def poll(job_ref):
     return {"done": True, "per_row": {"1.0": True}}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	done, perRow, err := rt.RunSinkPoll(context.Background(), "async_poll", map[string]any{"job_id": "123"})
+	done, perRow, err := rt.RunPushPoll(context.Background(), "async_poll", map[string]any{"job_id": "123"})
 	if err != nil {
-		t.Fatalf("RunSinkPoll: %v", err)
+		t.Fatalf("RunPushPoll: %v", err)
 	}
 	if !done {
 		t.Fatal("expected done=true")

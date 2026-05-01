@@ -49,22 +49,41 @@ func TestParseModel_SingleStatement_OK(t *testing.T) {
 	}
 }
 
-// --- @sink: empty value rejected ---
+// --- @sink rejected with migration message (renamed to @push in v0.30.0) ---
 
-func TestParseModel_EmptySink_Rejected(t *testing.T) {
+func TestParseModel_SinkDirective_RejectedWithMigrationError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "sync")
+	os.MkdirAll(modelsDir, 0o755)
+	os.WriteFile(filepath.Join(modelsDir, "old_sink.sql"), []byte(
+		"-- @kind: merge\n-- @unique_key: id\n-- @sink: hubspot_push\nSELECT 1::BIGINT AS id"), 0o644)
+
+	_, err := ParseModel(filepath.Join(modelsDir, "old_sink.sql"), dir)
+	if err == nil {
+		t.Fatal("@sink should be rejected after rename to @push")
+	}
+	if !strings.Contains(err.Error(), "renamed to @push") {
+		t.Errorf("error should mention rename to @push, got: %v", err)
+	}
+}
+
+// --- @push: empty value rejected ---
+
+func TestParseModel_EmptyPush_Rejected(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	modelsDir := filepath.Join(dir, "models", "sync")
 	os.MkdirAll(modelsDir, 0o755)
 	os.WriteFile(filepath.Join(modelsDir, "empty.sql"), []byte(
-		"-- @kind: merge\n-- @unique_key: id\n-- @sink:   \nSELECT 1 AS id"), 0o644)
+		"-- @kind: merge\n-- @unique_key: id\n-- @push:   \nSELECT 1 AS id"), 0o644)
 
 	_, err := ParseModel(filepath.Join(modelsDir, "empty.sql"), dir)
 	if err == nil {
-		t.Fatal("empty @sink should be rejected")
+		t.Fatal("empty @push should be rejected")
 	}
-	if !strings.Contains(err.Error(), "@sink requires") {
-		t.Errorf("error should mention @sink requires a name, got: %v", err)
+	if !strings.Contains(err.Error(), "@push requires") {
+		t.Errorf("error should mention @push requires a name, got: %v", err)
 	}
 }
 
@@ -152,20 +171,20 @@ func TestParseModel_DirectiveAfterSQLBody_Rejected(t *testing.T) {
 	}
 }
 
-// Same check for sink/unique_key/incremental — every directive shape, not
-// just @kind. Picks @sink because it's a recent addition and easy to leave
+// Same check for push/unique_key/incremental — every directive shape, not
+// just @kind. Picks @push because it's a recent addition and easy to leave
 // behind when refactoring.
-func TestParseModel_SinkDirectiveAfterSQLBody_Rejected(t *testing.T) {
+func TestParseModel_PushDirectiveAfterSQLBody_Rejected(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	modelsDir := filepath.Join(dir, "models", "raw")
 	os.MkdirAll(modelsDir, 0o755)
-	os.WriteFile(filepath.Join(modelsDir, "sink_late.sql"), []byte(
-		"-- @kind: append\nSELECT 1 AS id\n-- @sink: my_push"), 0o644)
+	os.WriteFile(filepath.Join(modelsDir, "push_late.sql"), []byte(
+		"-- @kind: append\nSELECT 1 AS id\n-- @push: my_push"), 0o644)
 
-	_, err := ParseModel(filepath.Join(modelsDir, "sink_late.sql"), dir)
+	_, err := ParseModel(filepath.Join(modelsDir, "push_late.sql"), dir)
 	if err == nil {
-		t.Fatal("@sink after SQL body should be rejected")
+		t.Fatal("@push after SQL body should be rejected")
 	}
 	if !strings.Contains(err.Error(), "after SQL body") {
 		t.Errorf("error should mention 'after SQL body', got: %v", err)

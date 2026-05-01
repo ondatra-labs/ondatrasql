@@ -880,7 +880,7 @@ func TestLoadExtension_NewlineInRepo(t *testing.T) {
 
 // --- Cat 10 BLOCKER: sink delta early returns ---
 
-// TestCreateSinkDelta_NewSnapshotZero verifies that createSinkDelta returns
+// TestCreateSinkDelta_NewSnapshotZero verifies that createPushDelta returns
 // nil events (and no error) when newSnapshot == 0 — i.e. the post-commit
 // snapshot capture failed or no commit happened. Without this guard, the
 // table_changes() query would treat 0 as a real range start and replay
@@ -891,10 +891,10 @@ func TestCreateSinkDelta_NewSnapshotZero(t *testing.T) {
 	r := &Runner{} // no session needed; early return must fire first
 	model := &parser.Model{
 		Target: "mart.orders",
-		Sink:   "lib/orders_push.star",
+		Push:   "lib/orders_push.star",
 	}
 
-	events, err := r.createSinkDelta(model, "tmp_orders", 5, 0)
+	events, err := r.createPushDelta(model, "tmp_orders", 5, 0)
 	if err != nil {
 		t.Fatalf("expected no error on newSnapshot=0, got: %v", err)
 	}
@@ -912,10 +912,10 @@ func TestCreateSinkDelta_EmptySink(t *testing.T) {
 	r := &Runner{} // no session needed; early return must fire first
 	model := &parser.Model{
 		Target: "mart.orders",
-		Sink:   "",
+		Push:   "",
 	}
 
-	events, err := r.createSinkDelta(model, "tmp_orders", 5, 10)
+	events, err := r.createPushDelta(model, "tmp_orders", 5, 10)
 	if err != nil {
 		t.Fatalf("expected no error on empty sink, got: %v", err)
 	}
@@ -961,7 +961,7 @@ func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
 		{ChangeType: "insert", RowID: 4, Snapshot: 200},
 	}
 
-	se := &sinkExecutor{}
+	se := &pushExecutor{}
 	merged, err := se.mergeBacklogWithDelta(store, target, delta)
 	if err != nil {
 		t.Fatalf("mergeBacklogWithDelta: %v", err)
@@ -1009,7 +1009,7 @@ func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
 func TestClassifyPerRowStatus_RequiresCompositeKey(t *testing.T) {
 	t.Parallel()
 
-	se := &sinkExecutor{}
+	se := &pushExecutor{}
 	rows := []map[string]any{
 		{"__ondatra_rowid": int64(1), "__ondatra_change_type": "insert"},
 		{"__ondatra_rowid": int64(2), "__ondatra_change_type": "update_preimage"},
@@ -1128,7 +1128,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 		store, target := openWithBacklog(t)
 		defer store.Close()
 
-		se := &sinkExecutor{
+		se := &pushExecutor{
 			sinkEvents: delta,
 			result:     &Result{RunType: "incremental"},
 		}
@@ -1149,7 +1149,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 		store, target := openWithBacklog(t)
 		defer store.Close()
 
-		se := &sinkExecutor{
+		se := &pushExecutor{
 			sinkEvents: delta,
 			result:     &Result{RunType: "backfill"},
 		}
@@ -1170,7 +1170,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 		store, target := openWithBacklog(t)
 		defer store.Close()
 
-		se := &sinkExecutor{
+		se := &pushExecutor{
 			sinkEvents: delta,
 			result:     &Result{RunType: "incremental"},
 		}
@@ -1192,7 +1192,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 		store, target := openWithBacklog(t)
 		defer store.Close()
 
-		se := &sinkExecutor{
+		se := &pushExecutor{
 			sinkEvents: delta,
 			result:     &Result{RunType: "incremental"},
 		}
@@ -1219,7 +1219,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 func TestClassifyPerRowStatus_ExpiredSnapshotDeleteIsRejected(t *testing.T) {
 	t.Parallel()
 
-	se := &sinkExecutor{}
+	se := &pushExecutor{}
 
 	// Events include a delete that has no corresponding row read from the lake.
 	events := []collect.SyncEvent{

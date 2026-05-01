@@ -38,8 +38,8 @@ def fetch(save, resource):
 	if len(lf.Args) != 1 || lf.Args[0] != "resource" {
 		t.Errorf("Args = %v, want [resource]", lf.Args)
 	}
-	if lf.SinkConfig != nil {
-		t.Error("expected SinkConfig=nil for fetch-only API")
+	if lf.PushConfig != nil {
+		t.Error("expected PushConfig=nil for fetch-only API")
 	}
 	if lf.APIConfig == nil {
 		t.Fatal("expected APIConfig")
@@ -76,14 +76,14 @@ def push(rows):
 	if lf.FuncName != "push" {
 		t.Errorf("FuncName = %q, want push", lf.FuncName)
 	}
-	if lf.SinkConfig == nil {
-		t.Fatal("expected SinkConfig")
+	if lf.PushConfig == nil {
+		t.Fatal("expected PushConfig")
 	}
-	if lf.SinkConfig.BatchSize != 50 {
-		t.Errorf("BatchSize = %d, want 50", lf.SinkConfig.BatchSize)
+	if lf.PushConfig.BatchSize != 50 {
+		t.Errorf("BatchSize = %d, want 50", lf.PushConfig.BatchSize)
 	}
-	if lf.SinkConfig.BatchMode != "atomic" {
-		t.Errorf("BatchMode = %q, want atomic", lf.SinkConfig.BatchMode)
+	if lf.PushConfig.BatchMode != "atomic" {
+		t.Errorf("BatchMode = %q, want atomic", lf.PushConfig.BatchMode)
 	}
 	if lf.APIConfig == nil {
 		t.Fatal("expected APIConfig")
@@ -127,11 +127,11 @@ def push(rows):
 	if !lf.DynamicColumns {
 		t.Error("expected DynamicColumns=true")
 	}
-	if lf.SinkConfig == nil {
-		t.Fatal("expected SinkConfig for API with push section")
+	if lf.PushConfig == nil {
+		t.Fatal("expected PushConfig for API with push section")
 	}
-	if lf.SinkConfig.BatchSize != 100 {
-		t.Errorf("BatchSize = %d, want 100", lf.SinkConfig.BatchSize)
+	if lf.PushConfig.BatchSize != 100 {
+		t.Errorf("BatchSize = %d, want 100", lf.PushConfig.BatchSize)
 	}
 	if lf.APIConfig == nil {
 		t.Fatal("expected APIConfig")
@@ -247,19 +247,19 @@ def push(rows):
 		t.Errorf("APIConfig.RateLimit.Per = %q, want 1m", cfg.RateLimit.Per)
 	}
 
-	// Push direction: overridden rate_limit on SinkConfig
-	sink := lf.SinkConfig
+	// Push direction: overridden rate_limit on PushConfig
+	sink := lf.PushConfig
 	if sink == nil {
-		t.Fatal("expected SinkConfig")
+		t.Fatal("expected PushConfig")
 	}
 	if sink.RateLimit == nil {
-		t.Fatal("expected RateLimit on SinkConfig (push override)")
+		t.Fatal("expected RateLimit on PushConfig (push override)")
 	}
 	if sink.RateLimit.Requests != 50 {
-		t.Errorf("SinkConfig.RateLimit.Requests = %d, want 50", sink.RateLimit.Requests)
+		t.Errorf("PushConfig.RateLimit.Requests = %d, want 50", sink.RateLimit.Requests)
 	}
 	if sink.RateLimit.Per != "10s" {
-		t.Errorf("SinkConfig.RateLimit.Per = %q, want 10s", sink.RateLimit.Per)
+		t.Errorf("PushConfig.RateLimit.Per = %q, want 10s", sink.RateLimit.Per)
 	}
 }
 
@@ -298,12 +298,12 @@ def push(rows):
 	}
 
 	// Push direction: inherits top-level
-	sink := lf.SinkConfig
+	sink := lf.PushConfig
 	if sink.RateLimit == nil {
-		t.Fatal("expected inherited RateLimit on SinkConfig")
+		t.Fatal("expected inherited RateLimit on PushConfig")
 	}
 	if sink.RateLimit.Requests != 100 {
-		t.Errorf("SinkConfig.RateLimit.Requests = %d, want 100", sink.RateLimit.Requests)
+		t.Errorf("PushConfig.RateLimit.Requests = %d, want 100", sink.RateLimit.Requests)
 	}
 }
 
