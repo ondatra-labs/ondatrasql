@@ -38,7 +38,7 @@ def push(rows=[], key_columns=[]):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := rt.RunPush(ctx, "test_push", rows, 1, "tracked", "region, year", nil)
+	_, err := rt.RunPush(ctx, "test_push", rows, 1, "tracked", "region, year", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -71,7 +71,7 @@ def push(rows=[], columns=[]):
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := rt.RunPush(ctx, "sort_push", rows, 1, "table", "", nil)
+	_, err := rt.RunPush(ctx, "sort_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}

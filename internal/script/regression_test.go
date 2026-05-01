@@ -205,7 +205,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0}}
-	result, err := rt.RunPush(context.Background(), "emptyval_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "emptyval_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -231,7 +231,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0}}
-	result, err := rt.RunPush(context.Background(), "intval_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "intval_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}

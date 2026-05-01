@@ -938,7 +938,14 @@ type PushResult struct {
 // RunPush executes a SINK push function from lib/<sink>.star.
 // It calls push(rows, batch_number, kind, key_columns, columns, sink args...) with the given batch.
 // Optional httpCfg injects API dict defaults (base_url, headers, etc.) into http module.
-func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (*PushResult, error) {
+//
+// `tableColumns` carries the materialized DuckLake table's schema as
+// `[]map[string]any` with `name` (the materialized column name = the SQL
+// alias the row dicts are keyed by) and `type` (the real DuckDB type
+// from the table — DuckDB-native syntax: "VARCHAR", "DECIMAL(18,3)",
+// etc.). Pass nil to fall back to deriving names from the row dicts
+// (untyped); the caller does this only when the schema lookup fails.
+func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, tableColumns []map[string]any, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (*PushResult, error) {
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
@@ -1001,24 +1008,52 @@ func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[strin
 		return nil, fmt.Errorf("sink %q: convert rows: %w", sinkName, err)
 	}
 
-	// Build columns list from ALL rows (excluding internal fields)
-	// Sort for deterministic order — blueprints use this for header ordering
-	colSet := make(map[string]bool)
-	for _, row := range rows {
-		for k := range row {
-			if !strings.HasPrefix(k, "_") {
-				colSet[k] = true
+	// Build the columns kwarg.
+	//
+	// Preferred: a pre-built list from the materialized DuckLake table's
+	// schema (column_name + data_type). Names are the SQL aliases — the
+	// keys the blueprint sees in `rows` — and types are the real DuckDB
+	// types. Each entry is a {"name": ..., "type": ...} dict, mirroring
+	// the @fetch contract.
+	//
+	// Fallback (tableColumns == nil): derive names from the row dicts,
+	// untyped. Used only when the schema lookup failed (transient
+	// catalog hiccup) so a push attempt is still made instead of
+	// silently nacking.
+	colsList := make([]starlark.Value, 0, len(tableColumns))
+	if tableColumns != nil {
+		for _, col := range tableColumns {
+			d := starlark.NewDict(2)
+			if name, ok := col["name"].(string); ok {
+				_ = d.SetKey(starlark.String("name"), starlark.String(name))
+			}
+			if t, ok := col["type"]; ok {
+				v, convErr := goToStarlark(t)
+				if convErr == nil {
+					_ = d.SetKey(starlark.String("type"), v)
+				}
+			}
+			colsList = append(colsList, d)
+		}
+	} else {
+		colSet := make(map[string]bool)
+		for _, row := range rows {
+			for k := range row {
+				if !strings.HasPrefix(k, "_") {
+					colSet[k] = true
+				}
 			}
 		}
-	}
-	var colNames []string
-	for k := range colSet {
-		colNames = append(colNames, k)
-	}
-	sort.Strings(colNames)
-	colsList := make([]starlark.Value, len(colNames))
-	for i, name := range colNames {
-		colsList[i] = starlark.String(name)
+		var colNames []string
+		for k := range colSet {
+			colNames = append(colNames, k)
+		}
+		sort.Strings(colNames)
+		for _, name := range colNames {
+			d := starlark.NewDict(1)
+			_ = d.SetKey(starlark.String("name"), starlark.String(name))
+			colsList = append(colsList, d)
+		}
 	}
 
 	// Build unique_key as list (handles composite keys like "region, year")

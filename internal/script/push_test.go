@@ -39,7 +39,7 @@ def push(rows=[], batch_number=1):
 		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "name": "alice"},
 		{"__ondatra_rowid": 2.0, "__ondatra_change_type": "insert", "name": "bob"},
 	}
-	result, err := rt.RunPush(context.Background(), "test_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "test_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -65,7 +65,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "none_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "none_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -89,7 +89,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "list_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "list_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -113,7 +113,7 @@ def poll(job_ref):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "async_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "async_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -136,7 +136,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "atomic_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "atomic_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -156,7 +156,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	_, err := rt.RunPush(context.Background(), "error_push", rows, 1, "table", "", nil)
+	_, err := rt.RunPush(context.Background(), "error_push", rows, 1, "table", "", nil, nil)
 	if err == nil {
 		t.Fatal("expected error from failing push")
 	}
@@ -171,7 +171,7 @@ SINK = {"batch_size": 100}
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	_, err := rt.RunPush(context.Background(), "no_push", rows, 1, "table", "", nil)
+	_, err := rt.RunPush(context.Background(), "no_push", rows, 1, "table", "", nil, nil)
 	if err == nil {
 		t.Fatal("expected error for missing push()")
 	}
@@ -187,7 +187,7 @@ def push(rows=[], batch_number=1):
     return {}
 `)
 	rt := NewRuntime(nil, nil, dir)
-	result, err := rt.RunPush(context.Background(), "empty_push", []map[string]any{}, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "empty_push", []map[string]any{}, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -212,7 +212,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "nonstr_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "nonstr_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -237,12 +237,90 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "batch_push", rows, 7, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "batch_push", rows, 7, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
 	if result.PerRow["1.0"] != "ok:7" {
 		t.Errorf("got %q, want ok:7 (batch_number should be 7)", result.PerRow["1.0"])
+	}
+}
+
+// v0.30.0 fas 10: the columns kwarg is a list of dicts with `name` and
+// `type`. `name` is the materialized column name (= the SQL alias the
+// blueprint sees in `rows`) and `type` is the DuckDB-native type from
+// the materialized table. When the caller passes nil tableColumns, the
+// runtime falls back to deriving names from the rows themselves
+// (untyped — used only when the schema lookup hiccups).
+func TestRunPush_ColumnsKwargShape_FromTableSchema(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeSinkStar(t, dir, "shape_push", `
+SINK = {"batch_size": 100}
+
+def push(rows=[], columns=[]):
+    # Encode the columns kwarg back into the per-row status dict so the
+    # test can assert on its shape. Format: <idx>:<name>:<type>.
+    parts = []
+    for i, c in enumerate(columns):
+        parts.append(str(i) + ":" + c.get("name", "") + ":" + str(c.get("type", "")))
+    out = {}
+    for r in rows:
+        out[str(r["__ondatra_rowid"]) + ":" + r["__ondatra_change_type"]] = ",".join(parts)
+    return out
+`)
+	rt := NewRuntime(nil, nil, dir)
+	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
+	tableColumns := []map[string]any{
+		{"name": "id", "type": "BIGINT"},
+		{"name": "Email__c", "type": "VARCHAR"},
+		{"name": "amount", "type": "DECIMAL(18,3)"},
+	}
+	result, err := rt.RunPush(context.Background(), "shape_push", rows, 1, "merge", "id", tableColumns, nil)
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	got := result.PerRow["1.0:insert"]
+	want := "0:id:BIGINT,1:Email__c:VARCHAR,2:amount:DECIMAL(18,3)"
+	if got != want {
+		t.Errorf("columns shape:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestRunPush_ColumnsKwargShape_FallbackFromRows(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeSinkStar(t, dir, "fallback_push", `
+SINK = {"batch_size": 100}
+
+def push(rows=[], columns=[]):
+    # When tableColumns is nil, the runtime derives names from the rows
+    # themselves. Each entry has a name but no type.
+    parts = []
+    for c in columns:
+        if "type" in c:
+            parts.append(c["name"] + "=" + str(c["type"]))
+        else:
+            parts.append(c["name"] + "=untyped")
+    parts = sorted(parts)
+    out = {}
+    for r in rows:
+        out[str(r["__ondatra_rowid"]) + ":" + r["__ondatra_change_type"]] = ",".join(parts)
+    return out
+`)
+	rt := NewRuntime(nil, nil, dir)
+	rows := []map[string]any{
+		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "id": 1.0, "name": "alice"},
+	}
+	// Pass nil tableColumns to exercise the fallback path.
+	result, err := rt.RunPush(context.Background(), "fallback_push", rows, 1, "table", "", nil, nil)
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	got := result.PerRow["1.0:insert"]
+	want := "id=untyped,name=untyped"
+	if got != want {
+		t.Errorf("fallback shape:\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -430,7 +508,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "sync_none", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "sync_none", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush should not error (Starlark ran fine): %v", err)
 	}
@@ -454,7 +532,7 @@ def push(rows=[], batch_number=1):
 `)
 	rt := NewRuntime(nil, nil, dir)
 	rows := []map[string]any{{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert"}}
-	result, err := rt.RunPush(context.Background(), "conv_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "conv_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -510,7 +588,7 @@ def push(rows=[], batch_number=1):
 		{"__ondatra_rowid": 1.0, "__ondatra_change_type": "insert", "name": "alice"},
 		{"__ondatra_rowid": 2.0, "__ondatra_change_type": "insert", "name": "bob"},
 	}
-	result, err := rt.RunPush(context.Background(), "rows_push", rows, 1, "table", "", nil)
+	result, err := rt.RunPush(context.Background(), "rows_push", rows, 1, "table", "", nil, nil)
 	if err != nil {
 		t.Fatalf("RunPush: %v (rows may not have been converted correctly)", err)
 	}

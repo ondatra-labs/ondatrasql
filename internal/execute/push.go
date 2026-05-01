@@ -600,7 +600,14 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 			}
 		}
 	}
-	sinkResult, err := rt.RunPush(ctx, se.model.Push, rows, batchNum, se.model.Kind, sinkKey, pushArgMap, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
+	// Build the columns kwarg from the materialized DuckLake table — its
+	// column names are the SQL aliases the push blueprint will see in
+	// `rows`, and its data_types are the real DuckDB types. Falls back to
+	// nil if the lookup fails; RunPush then derives names from the rows
+	// themselves (untyped) so a transient catalog hiccup never silently
+	// nacks rows.
+	pushColumns := loadPushColumnsFromTable(se.runner.sess, se.model.Target)
+	sinkResult, err := rt.RunPush(ctx, se.model.Push, rows, batchNum, se.model.Kind, sinkKey, pushColumns, pushArgMap, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
 
 	switch cfg.BatchMode {
 	case "sync":
@@ -909,6 +916,53 @@ func quoteTarget(target string) string {
 		return duckdb.QuoteIdentifier(parts[0]) + "." + duckdb.QuoteIdentifier(parts[1])
 	}
 	return duckdb.QuoteIdentifier(target)
+}
+
+// loadPushColumnsFromTable returns the materialized DuckLake table's
+// schema as `[]map[string]any` with `name` (the actual column name in
+// DuckLake = the SQL alias the row dicts are keyed by) and `type` (the
+// real DuckDB type, in DuckDB-native syntax). The column order matches
+// `ordinal_position` so blueprints get a deterministic header order.
+//
+// Returns nil on any catalog error so the caller can fall back to
+// untyped row-derived columns rather than fail the push attempt.
+func loadPushColumnsFromTable(sess sessionLike, target string) []map[string]any {
+	parts := strings.SplitN(target, ".", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	schema, table := parts[0], parts[1]
+
+	rows, err := sess.QueryRowsMap(fmt.Sprintf(
+		"SELECT column_name, data_type FROM information_schema.columns "+
+			"WHERE table_schema = '%s' AND table_name = '%s' "+
+			"ORDER BY ordinal_position",
+		escapeSQL(schema), escapeSQL(table),
+	))
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		name := r["column_name"]
+		typ := r["data_type"]
+		if name == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"name": name,
+			"type": typ,
+		})
+	}
+	return out
+}
+
+// sessionLike captures the small subset of *duckdb.Session that
+// loadPushColumnsFromTable uses, so it stays unit-testable with a
+// stub instead of needing a full DuckDB.
+type sessionLike interface {
+	QueryRowsMap(sql string) ([]map[string]string, error)
 }
 
 
