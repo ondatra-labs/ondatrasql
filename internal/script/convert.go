@@ -5,11 +5,128 @@
 package script
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
+
+// MarshalStarlarkJSON encodes a Starlark value as JSON, preserving dict
+// insertion order. Go's json.Marshal sorts map keys alphabetically and
+// Starlark's stdlib json.encode does the same — both break APIs that
+// are sensitive to JSON Schema key order (e.g. Mistral OCR's
+// document_annotation_format silently echoes the schema verbatim when
+// `properties` arrives before `type`). Use this instead of json.Marshal
+// when the caller's dict order is part of the contract with the remote.
+func MarshalStarlarkJSON(v starlark.Value) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := emitStarlarkJSON(&buf, v); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func emitStarlarkJSON(buf *bytes.Buffer, v starlark.Value) error {
+	switch x := v.(type) {
+	case nil:
+		buf.WriteString("null")
+	case starlark.NoneType:
+		buf.WriteString("null")
+	case starlark.Bool:
+		if bool(x) {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case starlark.Int:
+		buf.WriteString(x.String())
+	case starlark.Float:
+		f := float64(x)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return fmt.Errorf("cannot encode non-finite float %v", x)
+		}
+		buf.WriteString(strconv.FormatFloat(f, 'g', -1, 64))
+	case starlark.String:
+		data, err := json.Marshal(string(x))
+		if err != nil {
+			return err
+		}
+		buf.Write(data)
+	case *starlark.Dict:
+		buf.WriteByte('{')
+		for i, item := range x.Items() {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			k, ok := starlark.AsString(item[0])
+			if !ok {
+				return fmt.Errorf("dict key must be string, got %s", item[0].Type())
+			}
+			data, err := json.Marshal(k)
+			if err != nil {
+				return err
+			}
+			buf.Write(data)
+			buf.WriteByte(':')
+			if err := emitStarlarkJSON(buf, item[1]); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte('}')
+	case *starlark.List:
+		buf.WriteByte('[')
+		for i := 0; i < x.Len(); i++ {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			if err := emitStarlarkJSON(buf, x.Index(i)); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(']')
+	case starlark.Tuple:
+		buf.WriteByte('[')
+		for i, elem := range x {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			if err := emitStarlarkJSON(buf, elem); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(']')
+	case *starlarkstruct.Struct:
+		buf.WriteByte('{')
+		first := true
+		for _, name := range x.AttrNames() {
+			attr, err := x.Attr(name)
+			if err != nil {
+				return err
+			}
+			if !first {
+				buf.WriteByte(',')
+			}
+			first = false
+			data, err := json.Marshal(name)
+			if err != nil {
+				return err
+			}
+			buf.Write(data)
+			buf.WriteByte(':')
+			if err := emitStarlarkJSON(buf, attr); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte('}')
+	default:
+		return fmt.Errorf("cannot encode %s as JSON", v.Type())
+	}
+	return nil
+}
 
 // starlarkDictToGo converts a Starlark dict to a Go map.
 func starlarkDictToGo(d *starlark.Dict) (map[string]interface{}, error) {

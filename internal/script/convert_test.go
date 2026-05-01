@@ -399,3 +399,76 @@ func TestRoundtripGoStarlarkGo(t *testing.T) {
 		t.Errorf("nested = %v", m["nested"])
 	}
 }
+
+// TestMarshalStarlarkJSON_PreservesInsertionOrder pins the contract that
+// HTTP request bodies retain Starlark dict insertion order — a regression
+// would silently break Mistral OCR (it echoes the schema verbatim when
+// `properties` arrives before `type` in document_annotation_format) and
+// other order-sensitive APIs. Both Go's json.Marshal and Starlark's
+// stdlib json.encode sort map keys alphabetically, so a custom encoder
+// is required.
+func TestMarshalStarlarkJSON_PreservesInsertionOrder(t *testing.T) {
+	t.Parallel()
+	d := starlark.NewDict(3)
+	_ = d.SetKey(starlark.String("type"), starlark.String("object"))
+	props := starlark.NewDict(1)
+	_ = props.SetKey(starlark.String("total"), starlark.String("number"))
+	_ = d.SetKey(starlark.String("properties"), props)
+	_ = d.SetKey(starlark.String("name"), starlark.String("extraction"))
+
+	got, err := MarshalStarlarkJSON(d)
+	if err != nil {
+		t.Fatalf("MarshalStarlarkJSON: %v", err)
+	}
+	want := `{"type":"object","properties":{"total":"number"},"name":"extraction"}`
+	if string(got) != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestMarshalStarlarkJSON_Primitives(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		v    starlark.Value
+		want string
+	}{
+		{"none", starlark.None, "null"},
+		{"true", starlark.Bool(true), "true"},
+		{"false", starlark.Bool(false), "false"},
+		{"int", starlark.MakeInt(42), "42"},
+		{"float", starlark.Float(3.14), "3.14"},
+		{"string", starlark.String("hello"), `"hello"`},
+		{"string with quote", starlark.String(`a"b`), `"a\"b"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := MarshalStarlarkJSON(c.v)
+			if err != nil {
+				t.Fatalf("MarshalStarlarkJSON: %v", err)
+			}
+			if string(got) != c.want {
+				t.Errorf("got %s, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMarshalStarlarkJSON_NestedDictAndList(t *testing.T) {
+	t.Parallel()
+	inner := starlark.NewDict(2)
+	_ = inner.SetKey(starlark.String("a"), starlark.MakeInt(1))
+	_ = inner.SetKey(starlark.String("b"), starlark.MakeInt(2))
+	list := starlark.NewList([]starlark.Value{inner, starlark.MakeInt(3)})
+	outer := starlark.NewDict(1)
+	_ = outer.SetKey(starlark.String("items"), list)
+
+	got, err := MarshalStarlarkJSON(outer)
+	if err != nil {
+		t.Fatalf("MarshalStarlarkJSON: %v", err)
+	}
+	want := `{"items":[{"a":1,"b":2},3]}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}

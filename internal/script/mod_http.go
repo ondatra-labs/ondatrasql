@@ -316,28 +316,19 @@ func httpRequest(ctx context.Context, method string, apiCfg *apiHTTPConfig) func
 			}
 		}
 
-		// Build body
+		// Build body. Use MarshalStarlarkJSON instead of json.Marshal so
+		// that dict insertion order survives the boundary — APIs like
+		// Mistral OCR's document_annotation_format are sensitive to JSON
+		// Schema key order even though the JSON spec says they shouldn't be.
 		var body []byte
 		if jsonBody != nil && jsonBody != starlark.None {
 			switch jb := jsonBody.(type) {
-			case *starlark.Dict:
-				goVal, err := starlarkToGo(jb)
-				if err != nil {
-					return nil, err
-				}
-				body, err = json.Marshal(goVal)
+			case *starlark.Dict, *starlark.List:
+				marshaled, err := MarshalStarlarkJSON(jb)
 				if err != nil {
 					return nil, fmt.Errorf("%s: marshal json body: %w", fn.Name(), err)
 				}
-			case *starlark.List:
-				goVal, err := starlarkToGo(jb)
-				if err != nil {
-					return nil, err
-				}
-				body, err = json.Marshal(goVal)
-				if err != nil {
-					return nil, fmt.Errorf("%s: marshal json body: %w", fn.Name(), err)
-				}
+				body = marshaled
 			case starlark.String:
 				body = []byte(string(jb))
 			default:
