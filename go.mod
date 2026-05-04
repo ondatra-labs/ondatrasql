@@ -3,7 +3,6 @@ module github.com/ondatra-labs/ondatrasql
 go 1.25.0
 
 require (
-	github.com/CiscoM31/godata v1.0.11
 	github.com/clbanning/mxj/v2 v2.7.0
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/duckdb/duckdb-go/v2 v2.10502.0
@@ -12,6 +11,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.41.0
 	go.starlark.net v0.0.0-20260210143700-b62fd896b91b
+	golang.org/x/tools v0.41.0
 	pgregory.net/rapid v1.2.0
 )
 
@@ -87,7 +87,6 @@ require (
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260116145544-c6413dc483f5 // indirect
-	golang.org/x/tools v0.41.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

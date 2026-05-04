@@ -14,7 +14,6 @@ Single binary. All commands listed below.
 | [`sandbox`](#sandbox) | Preview changes before committing |
 | [`schedule`](#schedule) | Install OS-native scheduler |
 | [`events`](#events) | Start event collection endpoint |
-| [`odata`](#odata) | Start OData v4.01 server |
 | [`init`](#init) | Create a new project |
 | [`new`](#new) | Create a model file |
 | [`edit`](#edit) | Open file in $EDITOR |
@@ -80,20 +79,6 @@ ondatrasql events 8080            # Public on 8080, admin on 8081
 Admin endpoint runs on `port + 1` (localhost-only).
 
 See [Collect Events](/guides/collect-events/).
-
-## odata
-
-```bash
-ondatrasql odata 8090
-```
-
-Serves `@expose` models at `http://127.0.0.1:<port>/odata`.
-
-**Request timeouts.** Each request has a 60-second budget that covers both the HTTP read/write and the underlying DuckDB query. A request that exceeds the budget is cancelled at the database layer and returns an OData error envelope (HTTP 5xx with `application/json` body containing `{"error":{"code":"InternalError","message":"..."}}`) rather than a partial response. Client retries should treat the response the same as any other 5xx — the server is in a healthy state, but the specific request was too slow to complete in budget.
-
-`ReadHeaderTimeout` is 5s, `IdleTimeout` (keep-alive) is 120s. These are not configurable in v0.31.
-
-See [Serve Data via OData](/guides/serve-data-via-odata/).
 
 ---
 
@@ -291,7 +276,7 @@ Machine-readable output on stdout. Human output (status banners, progress, warni
 ondatrasql run --json 2>/dev/null | jq -s '.'
 ```
 
-**Stream separation is required.** `--json` only guarantees clean JSON on **stdout**; stderr may contain unstructured warnings (e.g. "badger: nack claim X failed", "odata: parseCount(...)"). Tooling that merges streams (`2>&1`, default systemd `StandardOutput=journal` + `StandardError=journal`) WILL produce non-JSON lines mixed into the stream. For service units, redirect stderr to a separate sink:
+**Stream separation is required.** `--json` only guarantees clean JSON on **stdout**; stderr may contain unstructured warnings (e.g. "badger: nack claim X failed"). Tooling that merges streams (`2>&1`, default systemd `StandardOutput=journal` + `StandardError=journal`) WILL produce non-JSON lines mixed into the stream. For service units, redirect stderr to a separate sink:
 
 ```ini
 [Service]
@@ -332,7 +317,7 @@ Exit codes follow the eslint/ruff convention and apply to **every** subcommand, 
 
 `validate.*` WARN findings always trigger exit 1 regardless of `--strict` because they signal validate's own analysis was incomplete — CI consumers can't treat a degraded run as a clean one.
 
-The exit-2 contract is enforced for the following surfaces (regression-tested in `cli_contract_test.go`): `version`, `init`, `stats`, `lineage`, `history`, `query`, `sql`, `describe`, `describe blueprint`, `edit`, `new`, `events`, `odata`, `auth`, `schedule`, `validate`, plus the `unknown_command` fallthrough. CI scripts that gate on exit code can rely on `1` vs `2` to distinguish "real failure" from "you typed it wrong".
+The exit-2 contract is enforced for the following surfaces (regression-tested in `cli_contract_test.go`): `version`, `init`, `stats`, `lineage`, `history`, `query`, `sql`, `describe`, `describe blueprint`, `edit`, `new`, `events`, `auth`, `schedule`, `validate`, plus the `unknown_command` fallthrough. CI scripts that gate on exit code can rely on `1` vs `2` to distinguish "real failure" from "you typed it wrong".
 
 ---
 

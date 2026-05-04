@@ -625,7 +625,6 @@ SELECT 1 AS id`)
 		{"edit_extra", []string{"edit", "staging.x", "extra"}, "extra args"},
 		{"new_extra", []string{"new", "staging.y", "extra"}, "extra args"},
 		{"events_extra", []string{"events", "8080", "extra"}, "extra args"},
-		{"odata_extra", []string{"odata", "8081", "extra"}, "extra args"},
 		{"auth_extra", []string{"auth", "google", "extra"}, "extra args"},
 		{"lineage_extra", []string{"lineage", "staging.x", "extra"}, "extra args"},
 		{"sql_extra_positional", []string{"sql", "SELECT 1", "extra"}, "unexpected argument"},

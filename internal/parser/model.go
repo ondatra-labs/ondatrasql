@@ -99,13 +99,6 @@ type Model struct {
 	// Set via @sorted_by directive. Applied as ALTER TABLE SET SORTED BY after materialization.
 	SortedBy []string
 
-	// Expose marks the model for OData serving via `ondatrasql odata <port>`.
-	Expose bool
-
-	// ExposeKey is the required primary key column for OData EntityType Key.
-	// Set via @expose <column>.
-	ExposeKey string
-
 	// Columns holds column definitions for @kind: events models.
 	// Parsed from the model body (DDL-style column definitions instead of SQL).
 	Columns []ColumnDef
@@ -221,27 +214,26 @@ func splitStatements(sql string) []string {
 const c = `(?:--|//|#)`
 
 var (
-	kindRe               = regexp.MustCompile(`^` + c + `\s*@kind:\s*(.+)$`)
-	scriptRe             = regexp.MustCompile(`^` + c + `\s*@script\s*$`)
-	uniqueKeyRe          = regexp.MustCompile(`^` + c + `\s*@unique_key:\s*(.+)$`)
-	groupKeyRe           = regexp.MustCompile(`^` + c + `\s*@group_key:\s*(.+)$`)
-	partitionedByRe      = regexp.MustCompile(`^` + c + `\s*@partitioned_by:\s*(.+)$`)
-	incrementalRe        = regexp.MustCompile(`^` + c + `\s*@incremental:\s*(.+)$`)
-	incrementalInitialRe = regexp.MustCompile(`^` + c + `\s*@incremental_initial:\s*(.+)$`)
-	constraintRe         = regexp.MustCompile(`^` + c + `\s*@constraint:\s*(.+)$`)
-	auditRe              = regexp.MustCompile(`^` + c + `\s*@audit:\s*(.+)$`)
-	warningRe            = regexp.MustCompile(`^` + c + `\s*@warning:\s*(.+)$`)
-	extensionRe          = regexp.MustCompile(`^` + c + `\s*@extension:\s*(.+)$`)
-	descriptionRe        = regexp.MustCompile(`^` + c + `\s*@description:\s*(.+)$`)
-	columnRe             = regexp.MustCompile(`^` + c + `\s*@column:\s*(.+)$`)
-	sortedByRe           = regexp.MustCompile(`^` + c + `\s*@sorted_by:\s*(.+)$`)
-	exposeRe                = regexp.MustCompile(`^` + c + `\s*@expose(?:\s+(.+))?$`)
-	pushRe                  = regexp.MustCompile(`^` + c + `\s*@push:\s*(.*)$`)
-	sinkRe                  = regexp.MustCompile(`^` + c + `\s*@sink:\s*(.*)$`)
-	sinkDetectDeletesRe     = regexp.MustCompile(`^` + c + `\s*@sink_detect_deletes:\s*(.+)$`)
-	sinkDeleteThresholdRe   = regexp.MustCompile(`^` + c + `\s*@sink_delete_threshold:\s*(.+)$`)
-	fetchRe                 = regexp.MustCompile(`^` + c + `\s*@fetch\s*$`)
-	fetchAnyRe              = regexp.MustCompile(`^` + c + `\s*@fetch\b`)
+	kindRe                = regexp.MustCompile(`^` + c + `\s*@kind:\s*(.+)$`)
+	scriptRe              = regexp.MustCompile(`^` + c + `\s*@script\s*$`)
+	uniqueKeyRe           = regexp.MustCompile(`^` + c + `\s*@unique_key:\s*(.+)$`)
+	groupKeyRe            = regexp.MustCompile(`^` + c + `\s*@group_key:\s*(.+)$`)
+	partitionedByRe       = regexp.MustCompile(`^` + c + `\s*@partitioned_by:\s*(.+)$`)
+	incrementalRe         = regexp.MustCompile(`^` + c + `\s*@incremental:\s*(.+)$`)
+	incrementalInitialRe  = regexp.MustCompile(`^` + c + `\s*@incremental_initial:\s*(.+)$`)
+	constraintRe          = regexp.MustCompile(`^` + c + `\s*@constraint:\s*(.+)$`)
+	auditRe               = regexp.MustCompile(`^` + c + `\s*@audit:\s*(.+)$`)
+	warningRe             = regexp.MustCompile(`^` + c + `\s*@warning:\s*(.+)$`)
+	extensionRe           = regexp.MustCompile(`^` + c + `\s*@extension:\s*(.+)$`)
+	descriptionRe         = regexp.MustCompile(`^` + c + `\s*@description:\s*(.+)$`)
+	columnRe              = regexp.MustCompile(`^` + c + `\s*@column:\s*(.+)$`)
+	sortedByRe            = regexp.MustCompile(`^` + c + `\s*@sorted_by:\s*(.+)$`)
+	pushRe                = regexp.MustCompile(`^` + c + `\s*@push:\s*(.*)$`)
+	sinkRe                = regexp.MustCompile(`^` + c + `\s*@sink:\s*(.*)$`)
+	sinkDetectDeletesRe   = regexp.MustCompile(`^` + c + `\s*@sink_detect_deletes:\s*(.+)$`)
+	sinkDeleteThresholdRe = regexp.MustCompile(`^` + c + `\s*@sink_delete_threshold:\s*(.+)$`)
+	fetchRe               = regexp.MustCompile(`^` + c + `\s*@fetch\s*$`)
+	fetchAnyRe            = regexp.MustCompile(`^` + c + `\s*@fetch\b`)
 	// commentRe matches line-comment prefixes (`--`, `//`, `#`).
 	// Block comments are handled separately by stripBlockComments
 	// before this regex sees the line — that approach handles
@@ -447,12 +439,6 @@ func ParseModel(path, projectDir string) (*Model, error) {
 				}
 			}
 
-		case exposeRe.MatchString(trimmed):
-			model.Expose = true
-			if matches := exposeRe.FindStringSubmatch(trimmed); matches[1] != "" {
-				model.ExposeKey = strings.TrimSpace(matches[1])
-			}
-
 		case fetchRe.MatchString(trimmed):
 			model.Fetch = true
 
@@ -608,7 +594,6 @@ func isDirectiveLine(trimmed string) bool {
 		descriptionRe.MatchString(trimmed),
 		columnRe.MatchString(trimmed),
 		sortedByRe.MatchString(trimmed),
-		exposeRe.MatchString(trimmed),
 		pushRe.MatchString(trimmed),
 		sinkRe.MatchString(trimmed),
 		fetchRe.MatchString(trimmed),
@@ -688,8 +673,8 @@ func lineLooksLikeComment(line string) bool {
 // content, and mixed-line block-comment cases all classify uniformly:
 //
 //   - inOpen=false, line=`/* foo */ bar`        → out=` bar`,        outOpen=false
-//   - inOpen=false, line=`/* foo`               → out=``,            outOpen=true
-//   - inOpen=true,  line=`bar`                  → out=``,            outOpen=true
+//   - inOpen=false, line=`/* foo`               → out=“,            outOpen=true
+//   - inOpen=true,  line=`bar`                  → out=“,            outOpen=true
 //   - inOpen=true,  line=`bar */ baz`           → out=` baz`,        outOpen=false
 //   - inOpen=false, line=`/* @ftech */ -- @kind: table` → out=` -- @kind: table`, outOpen=false
 //
@@ -761,25 +746,6 @@ func validateModel(m *Model) error {
 	// Validate target
 	if err := ValidateIdentifier(m.Target); err != nil {
 		return fmt.Errorf("invalid target: %w", err)
-	}
-
-	// @expose is only allowed on materialized SQL models
-	if m.Expose {
-		if m.ScriptType != "" {
-			return fmt.Errorf("@expose is only supported for SQL models (not scripts)")
-		}
-		switch m.Kind {
-		case "table", "merge", "scd2", "append", "tracked":
-			// OK — materialized with fixed schema
-		default:
-			return fmt.Errorf("@expose is not supported for %s kind (only table, merge, scd2, append, tracked)", m.Kind)
-		}
-		if m.ExposeKey == "" {
-			return fmt.Errorf("@expose requires a key column (e.g. @expose id)")
-		}
-		if err := ValidateColumnName(m.ExposeKey); err != nil {
-			return fmt.Errorf("invalid @expose key: %w", err)
-		}
 	}
 
 	// Events models have restricted directives — only @description is allowed

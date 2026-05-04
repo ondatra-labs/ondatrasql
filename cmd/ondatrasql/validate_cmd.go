@@ -1149,8 +1149,6 @@ func mapParserError(path string, err error) validate.Finding {
 		id = validate.RuleParserInvalidSortedBy
 	case strings.Contains(msg, "@partitioned_by"):
 		id = validate.RuleParserInvalidPartitioned
-	case strings.Contains(msg, "@expose"):
-		id = validate.RuleParserExposeOnNonTable
 	case strings.Contains(msg, "events") && strings.Contains(msg, "@column"):
 		id = validate.RuleParserEventsMissingCols
 	case strings.Contains(msg, "directive"):

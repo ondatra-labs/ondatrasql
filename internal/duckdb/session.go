@@ -52,12 +52,6 @@ type Session struct {
 	// files) before tearing down. This requires knowing the absolute data
 	// path so we can resolve the relative paths the catalog stores.
 	sandboxDataPath string // absolute prod/sandbox shared data path
-
-	// readPool is a fixed-size pool of read-only conns initialized after the
-	// catalog is attached. Used by OData (and any other parallel read path) so
-	// concurrent requests don't serialise on the writer's per-statement mutex.
-	// nil if InitReadPool was never called.
-	readPool *ReadPool
 }
 
 // NewSession creates a new embedded DuckDB session.
@@ -641,13 +635,6 @@ func (s *Session) Close() error {
 		return nil
 	}
 	s.closed = true
-
-	// Drain the read pool before tearing down the writer's conn — pool conns
-	// share s.db and would block s.db.Close otherwise.
-	if s.readPool != nil {
-		_ = s.readPool.Close()
-		s.readPool = nil
-	}
 
 	// Capture sandbox-only parquet files BEFORE detaching/dropping anything,
 	// while the duckdb session and both catalogs are still attached.
@@ -1265,8 +1252,8 @@ func (s *Session) forkDuckDBCatalog(prodConnStr, sandboxCatalog string) (string,
 //
 // This helper assumes the prod catalog has no concurrent writer
 // during the copy. Sandbox is normally invoked interactively when
-// no `ondatrasql run` / `ondatrasql events` / `ondatrasql odata`
-// process is active, which satisfies that assumption.
+// no `ondatrasql run` / `ondatrasql events` process is active,
+// which satisfies that assumption.
 //
 // SQLite-docs explicitly call out that a clean filesystem-level copy
 // of a WAL-mode database under concurrent writers requires holding a
@@ -2018,8 +2005,7 @@ func JSONValue(v any) any {
 	case duckdbdriver.Decimal:
 		// Use the exact decimal string via json.Number — converting to
 		// float64 silently rounds large/precise decimals (e.g. 18-digit
-		// monetary amounts) and is a regression we already avoid in the
-		// OData path. (Review finding 2)
+		// monetary amounts).
 		return json.Number(val.String())
 	case *big.Int:
 		// HUGEINT (int128) doesn't fit in any native JSON number type;

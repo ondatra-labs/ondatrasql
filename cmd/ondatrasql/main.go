@@ -19,7 +19,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.31.0"
+var version = "0.32.0"
 
 // exitCoder is implemented by errors that map to a specific process exit
 // code. Used by main() to honour the validate-style 0/1/2 contract.
@@ -266,15 +266,6 @@ func run(args []string) error {
 		}
 		return runEvents(ctx, cfg, args[1])
 
-	case "odata":
-		if len(args) < 2 {
-			return &invocationErr{fmt.Errorf("usage: ondatrasql odata <port>")}
-		}
-		if len(args) > 2 {
-			return &invocationErr{fmt.Errorf("usage: ondatrasql odata <port> (got %d extra args)", len(args)-2)}
-		}
-		return runOData(ctx, cfg, args[1])
-
 	case "auth":
 		if len(args) < 2 {
 			return runAuthList(ctx)
@@ -339,7 +330,6 @@ Run:
   sandbox [model]         Preview changes without affecting data
   schedule [cron]         Install/show/remove OS scheduler (no args = show)
   events <port>           Start event collection (admin = port+1)
-  odata <port>            Start OData server for @expose models
 
 Introspection:
   stats                          Project overview and all models

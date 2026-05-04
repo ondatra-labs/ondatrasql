@@ -81,7 +81,6 @@ A `@push` model produces the shape sent to the API. The strict-push validator on
 |---|---|
 | `@description` | Table comment in DuckLake catalog |
 | `@column` | Column comment + masking tags. See [Mask Sensitive Columns](/guides/mask-sensitive-columns/) |
-| `@expose <column>` | Serve via OData v4.01. Key column required. See [Serve Data via OData](/guides/serve-data-via-odata/) |
 | `@extension` | Load a DuckDB extension before execution |
 
 ## Example
@@ -117,7 +116,6 @@ WHERE active = true
 | `@audit` | Yes | Yes | Yes | Yes | Yes | -- |
 | `@warning` | Yes | Yes | Yes | Yes | Yes | -- |
 | `@extension` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@expose` | Yes | Yes | Yes | Yes | Yes | -- |
 | `@description` | Yes | Yes | Yes | Yes | Yes | Yes |
 
 `@fetch` and `@push` cannot be combined on the same model — split into a `@fetch` model that materializes raw API data and a downstream `@push` model that reads from it.

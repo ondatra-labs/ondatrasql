@@ -7,8 +7,8 @@
 // concrete categories (ErrSyntax, ErrRange) where Sscanf's error
 // is opaque, and Sscanf silently falls back to the destination's
 // zero value when parsing fails — a pattern that has produced real
-// bugs in this codebase (sandbox row counts, OData @odata.count,
-// tracked-model change-detection fast-path).
+// bugs in this codebase (sandbox row counts, tracked-model
+// change-detection fast-path).
 //
 // The analyzer is intentionally narrow: it only flags numeric
 // formats (`%d`, `%i`, `%f`, `%g`, `%e`, `%x`, `%o`, `%b`). String

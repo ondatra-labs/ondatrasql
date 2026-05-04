@@ -9,9 +9,9 @@
 // http.ErrServerClosed is the documented "graceful shutdown" sentinel
 // returned by both functions when Server.Shutdown was the cause.
 // Callers that propagate the error verbatim turn a normal SIGINT into
-// an apparent failure (Codex round 4 finding: odata_cmd's runOData
-// surfaced ListenAndServe results to its supervisor without checking,
-// so a clean stop looked like an error).
+// an apparent failure: a server that surfaces ListenAndServe's result
+// to its supervisor without filtering ErrServerClosed makes every
+// clean stop look like a crash.
 //
 // Allowed shapes (any of these makes the call safe):
 //

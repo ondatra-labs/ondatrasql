@@ -146,7 +146,6 @@ All models execute in the same pipeline and share the same dependency graph.
 | Schema evolution | Automatic via ALTER TABLE (metadata-only in DuckLake) |
 | Sandbox preview | Full DAG simulation before committing |
 | Scheduling | OS-native cron via systemd (Linux) or launchd (macOS) |
-| OData serving | Built-in OData v4.01 server for Power BI, Excel, Grafana |
 | Column lineage | Extracted from SQL AST |
 
 ## Design
@@ -159,7 +158,6 @@ OndatraSQL executes on a single machine using DuckDB. It is not a distributed sy
 run [model]          Execute pipeline or specific model
 sandbox [model]      Preview changes before committing
 schedule [cron]      Install OS-native scheduler
-odata <port>         Start OData v4.01 server
 events <port>        Start event collection endpoint
 auth [provider]      Authenticate with OAuth2 providers
 new <model>          Create a model file

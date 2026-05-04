@@ -22,7 +22,8 @@ package validate
 //   - 2: added validate.* environmental diagnostics
 //     (validate.extensions_load_failed, validate.blueprint_load_failed,
 //     validate.builtin_introspection_failed)
-const SchemaVersion = 2
+//   - 3: removed parser.expose_on_non_table (OData support removed in v0.32)
+const SchemaVersion = 3
 
 // Severity classifies a Finding by how much attention it demands.
 type Severity string

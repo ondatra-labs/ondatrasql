@@ -78,7 +78,7 @@ SELECT 1 AS id`)
 		{"query_unknown_flag", []string{"query", "raw.customers", "--bogus"}, 2, "unknown flag"},
 		{"query_bad_format", []string{"query", "raw.customers", "--format=xml"}, 2, "invalid --format"},
 
-		// auth/sql/edit/new/init/events/odata/schedule strict-args.
+		// auth/sql/edit/new/init/events/schedule strict-args.
 		// (R9 #9) Pre-fix the cli.md docs claimed all these surfaces
 		// were regression-tested here, but only validate/version/
 		// stats/lineage/history/query had explicit cases. The wider
@@ -93,7 +93,6 @@ SELECT 1 AS id`)
 		{"new_no_target", []string{"new"}, 2, "usage:"},
 		{"init_extra_arg", []string{"init", "extra"}, 2, "unexpected args"},
 		{"events_no_port", []string{"events"}, 2, "usage:"},
-		{"odata_no_port", []string{"odata"}, 2, "usage:"},
 		{"schedule_extra_arg", []string{"schedule", "*/5 * * * *", "extra"}, 2, "extra args"},
 	}
 
