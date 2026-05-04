@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/collect"
+	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -428,7 +429,7 @@ func TestRewriteLibCallsByString_IgnoresStringLiterals(t *testing.T) {
 
 	sql := "SELECT * FROM t WHERE label = 'my_api(fake)' AND x IN (SELECT * FROM my_api('real'))"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -449,7 +450,7 @@ func TestRewriteLibCallsByString_IgnoresComments(t *testing.T) {
 
 	sql := "SELECT * FROM my_api('users') -- my_api('commented')"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -469,8 +470,8 @@ func TestRewriteLibCallsByString_MultipleOccurrences(t *testing.T) {
 
 	sql := "SELECT * FROM my_api('first') UNION ALL SELECT * FROM my_api('second')"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
-		{FuncName: "my_api", TempTable: "tmp_my_api_2"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_2"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -493,7 +494,7 @@ func TestRewriteLibCallsByString_ParensInStringLiteral(t *testing.T) {
 
 	sql := "SELECT * FROM my_api('x)')"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -512,7 +513,7 @@ func TestRewriteLibCallsByString_DoubleQuotedIdentifier(t *testing.T) {
 
 	sql := `SELECT * FROM my_api('arg', "col(name)")`
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -531,7 +532,7 @@ func TestRewriteLibCallsByString_LineComment(t *testing.T) {
 
 	sql := "SELECT * FROM my_api('arg' -- has paren )\n)"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -547,7 +548,7 @@ func TestRewriteLibCallsByString_BlockComment(t *testing.T) {
 
 	sql := "SELECT * FROM my_api('arg' /* ) */ )"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -563,7 +564,7 @@ func TestRewriteLibCallsByString_NestedParens(t *testing.T) {
 
 	sql := "SELECT * FROM my_api(json('{\"key\":\"val\"}'))"
 	calls := []LibCall{
-		{FuncName: "my_api", TempTable: "tmp_my_api_1"},
+		{Call: libcall.Call{FuncName: "my_api"}, TempTable: "tmp_my_api_1"},
 	}
 
 	result := rewriteLibCallsByString(sql, calls)
@@ -677,8 +678,8 @@ func TestRewriteLibCallsByString_OccurrenceSkipEmpty(t *testing.T) {
 	// The second call should rewrite the SECOND occurrence, not the first.
 	sql := "SELECT * FROM myapi('a') UNION ALL SELECT * FROM myapi('b')"
 	calls := []LibCall{
-		{FuncName: "myapi", CallIndex: 0, TempTable: ""},           // empty — skip rewrite
-		{FuncName: "myapi", CallIndex: 1, TempTable: "tmp_myapi_1"}, // has data
+		{Call: libcall.Call{FuncName: "myapi", CallIndex: 0}, TempTable: ""},            // empty — skip rewrite
+		{Call: libcall.Call{FuncName: "myapi", CallIndex: 1}, TempTable: "tmp_myapi_1"}, // has data
 	}
 
 	result := rewriteLibCallsByString(sql, calls)

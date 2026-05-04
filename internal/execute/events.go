@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	duckdbdriver "github.com/duckdb/duckdb-go/v2"
+
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
@@ -101,12 +103,14 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 		// Insert into temp table via Appender
 		stepStart = time.Now()
 		tmpTable := "tmp_evt_" + sanitizeTarget(model.Target)
-		r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+		_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 
 		insertErr := r.insertEventsToTemp(model, claimResp.Events, tmpTable)
 		if insertErr != nil {
 			r.trace(result, "insert_temp", stepStart, "error")
-			nackEvents(ctx, r.adminPort, schema, table, claimResp.ClaimID)
+			if nackErr := nackEvents(ctx, r.adminPort, schema, table, claimResp.ClaimID); nackErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: nack claim %s after insert-temp failure: %v\n", claimResp.ClaimID, nackErr)
+			}
 			return nil, fmt.Errorf("insert events to temp: %w", insertErr)
 		}
 		r.trace(result, "insert_temp", stepStart, "ok")
@@ -119,9 +123,11 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 
 		if err := r.sess.Exec(txnSQL); err != nil {
 			r.trace(result, "commit_batch", stepStart, "error")
-			r.sess.Exec("ROLLBACK") // clear aborted transaction state
-			nackEvents(ctx, r.adminPort, schema, table, claimResp.ClaimID)
-			r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+			_ = r.sess.Exec("ROLLBACK") // clear aborted transaction state — session in error from upstream Exec
+			if nackErr := nackEvents(ctx, r.adminPort, schema, table, claimResp.ClaimID); nackErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: nack claim %s after commit failure: %v\n", claimResp.ClaimID, nackErr)
+			}
+			_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 			return nil, fmt.Errorf("commit events batch: %w", err)
 		}
 		r.trace(result, "commit_batch", stepStart, "ok")
@@ -139,10 +145,12 @@ func (r *Runner) runEvents(ctx context.Context, model *parser.Model, result *Res
 		} else {
 			r.trace(result, "ack", stepStart, "ok")
 			// Daemon acked — crash window closed, delete ack record.
-			script.DeleteAck(r.sess, claimResp.ClaimID)
+			if err := script.DeleteAck(r.sess, claimResp.ClaimID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: delete ack record: %v\n", err)
+			}
 		}
 
-		r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+		_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 		totalRows += int64(len(claimResp.Events))
 	}
 
@@ -187,7 +195,9 @@ func (r *Runner) recoverInflightEvents(ctx context.Context, schema, table string
 				errs = append(errs, fmt.Sprintf("daemon ack for committed claim %s: %v", claimID, err))
 			} else {
 				// Clean up the ack record — crash window is closed
-				script.DeleteAck(r.sess, claimID)
+				if err := script.DeleteAck(r.sess, claimID); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: delete ack record: %v\n", err)
+				}
 			}
 		}
 		// Uncommitted claims: left in inflight. The daemon's Claim() will
@@ -254,7 +264,7 @@ func (r *Runner) insertEventsToTemp(model *parser.Model, events []map[string]any
 				}
 			}
 			if err := appender.AppendRow(row...); err != nil {
-				appender.Close()
+				_ = appender.Close() // appender already flushed; close error secondary
 				return fmt.Errorf("append row: %w", err)
 			}
 		}
@@ -383,7 +393,7 @@ func isDaemonRunning(ctx context.Context, adminPort string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close() // read-only HTTP body close
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -398,7 +408,7 @@ func claimEvents(ctx context.Context, adminPort, schema, table string, limit int
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -423,7 +433,7 @@ func getInflightClaims(ctx context.Context, adminPort, schema, table string) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -450,7 +460,7 @@ func ackEvents(ctx context.Context, adminPort, schema, table, claimID string) er
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close() // read-only HTTP body close
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ack returned %d", resp.StatusCode)
 	}
@@ -458,20 +468,24 @@ func ackEvents(ctx context.Context, adminPort, schema, table, claimID string) er
 }
 
 // nackEvents returns events to the queue after a failed insertion.
-// Best-effort: errors are ignored since the main operation already failed.
-func nackEvents(ctx context.Context, adminPort, schema, table, claimID string) {
+// Returns the error so the caller can surface it — silently dropping
+// nack failures leaves the claim stranded inflight in the daemon
+// until normal recovery kicks in (next claim cycle), which can hide
+// real network/daemon issues from operators.
+func nackEvents(ctx context.Context, adminPort, schema, table, claimID string) error {
 	url := fmt.Sprintf("http://127.0.0.1:%s/flush/%s/%s/nack", adminPort, schema, table)
 	body, _ := json.Marshal(map[string]string{"claim_id": claimID}) //nolint:errcheck // map[string]string cannot fail
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 	if err != nil {
-		return
+		return fmt.Errorf("build nack request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return
+		return fmt.Errorf("post nack to daemon: %w", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close() // read-only HTTP body close
+	return nil
 }
 
 // formatTarget splits a schema.table target into schema and table parts.

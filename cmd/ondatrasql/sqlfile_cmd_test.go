@@ -203,3 +203,32 @@ func TestIsOnlyComments(t *testing.T) {
 		})
 	}
 }
+
+// TestTitleCase regression-tests the ASCII-only replacement for the
+// deprecated strings.Title call site in sqlfile_cmd.go. Inputs are
+// always sql/<cmd>.sql command names that we control (single-word
+// ASCII like "flush", "merge", "checkpoint"), but the helper handles
+// underscore/hyphen/space separators too in case a future command
+// name uses them.
+func TestTitleCase(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"flush", "Flush"},
+		{"merge", "Merge"},
+		{"checkpoint", "Checkpoint"},
+		{"two words", "Two Words"},
+		{"snake_case", "Snake_Case"},
+		{"kebab-case", "Kebab-Case"},
+		{"already-Capital", "Already-Capital"},
+		{"123abc", "123abc"},  // leading digit, first letter not capitalised
+	}
+	for _, tc := range cases {
+		got := titleCase(tc.in)
+		if got != tc.want {
+			t.Errorf("titleCase(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

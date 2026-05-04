@@ -186,14 +186,29 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		if len(colNames) == 0 {
 			break
 		}
+		// DuckDB emits ColumnNames in the order
+		//   [column], [tableAlias, column], [schema, table, column],
+		//   [catalog, schema, table, column].
+		// The right-most token is always the column; the token immediately
+		// before it is the table alias (when present). Anything earlier
+		// is schema/catalog and is dropped here — primary-table lookup
+		// happens via the alias map. Without this, a 3-part reference
+		// silently corrupted the column to "schema" and the table to "".
 		var table, col, tableAlias string
-		if len(colNames) == 2 {
-			tableAlias = colNames[0]
-			col = colNames[1]
-			table = info.aliases[tableAlias]
-		} else {
+		switch {
+		case len(colNames) == 1:
 			col = colNames[0]
 			table = info.primaryTable
+		case len(colNames) >= 2:
+			col = colNames[len(colNames)-1]
+			tableAlias = colNames[len(colNames)-2]
+			table = info.aliases[tableAlias]
+			if table == "" {
+				// 3-/4-part reference where the alias map didn't resolve:
+				// fall back to the literal table name. The schema/catalog
+				// prefix is intentionally not preserved on SourceColumn.
+				table = tableAlias
+			}
 		}
 
 		// Subquery alias: resolve via the subquery's own select list.
@@ -626,6 +641,9 @@ func collectTablesScoped(n *duckast.Node, parentScope map[string]bool, primaryPt
 		fullName := name
 		if schema != "" {
 			fullName = schema + "." + name
+		}
+		if catalog != "" {
+			fullName = catalog + "." + fullName
 		}
 		isPrimary := primaryPtr != 0 && reflect.ValueOf(n.Raw()).Pointer() == primaryPtr
 		*out = append(*out, TableRef{

@@ -308,7 +308,7 @@ func writeDeltaResponse(
 		return
 	}
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }
 
 // loadDeltaKeyset parses ONDATRA_ODATA_DELTA_KEY into a Keyset.

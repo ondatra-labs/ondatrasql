@@ -1,6 +1,7 @@
 # Binary
 /ondatrasql
 *.exe
+*.test
 bin/
 dist/
 
@@ -10,6 +11,7 @@ dist/
 .obsidian/
 .claude/
 .codex/
+CLAUDE.md
 
 # Temp
 *.log

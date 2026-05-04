@@ -9,7 +9,7 @@ RAPID_PKGS = ./internal/backfill ./internal/dag ./internal/duckdb \
 OTHER_PKGS = ./cmd/... ./internal/config ./internal/git \
              ./internal/sql ./internal/testutil
 
-.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover lint bugcheck-static build
+.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover lint bugcheck-static build install-tools
 
 # Unit tests only (no integration build tag)
 test:
@@ -40,34 +40,40 @@ test-cover:
 	go test -p 1 -race -timeout 30m -tags "integration e2e" -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
 
-lint:
+# Strict gate. Runs go vet (default analyzers, which is the same set as
+# `-all` since Go 1.10), staticcheck, errcheck across the whole repo,
+# and the bug-pattern greps. CI and the pre-commit hook should call
+# this target.
+lint: bugcheck-static
 	go vet ./...
 	staticcheck ./...
+	errcheck -exclude .errcheck-excludes.txt -ignoretests ./...
+	go run ./cmd/ondatrachecks ./...
 
-# Mechanical bug-pattern greps. Mirrors the static layer of /bugcheck.
-# Only BLOCKER-class patterns belong here (false positives expensive,
-# false negatives critical). Soft / INFO patterns belong in the skill.
-# Each pattern returns 0 matches when clean. Any match exits 1.
+# One-shot dev tool installer. CI and contributors run this once to
+# get the static-analysis tools the lint target depends on.
+install-tools:
+	go install honnef.co/go/tools/cmd/staticcheck@latest
+	go install github.com/kisielk/errcheck@latest
+
+# Mechanical bug-pattern greps — incubator for new patterns BEFORE
+# they graduate to a proper analyzer in internal/lintcheck/.
+#
+# Policy: a pattern lives here only as long as it's still unstable
+# (false positives still being worked out) or hasn't justified the
+# analyzer effort yet. Once a grep has fired in real code at least
+# once and proven its signal is clean, migrate it to a go/analysis
+# Analyzer via the `add-analyzer` skill and remove it from here.
+#
+# Currently retired patterns (now enforced by ondatrachecks):
+#   - fmt-pct-v-in-sql       → internal/lintcheck/sqlfmtcheck
+#   - attach-no-escape       → internal/lintcheck/escapesqlcheck
+#   - search-path-no-escape  → internal/lintcheck/escapesqlcheck
+#   - push-delta-kind-specific → internal/lintcheck/pushdeltacheck
+#   - push-call-missing-auth → internal/lintcheck/pushauthcheck
+#   - removed-lib-dicts      → internal/lintcheck/removedlibdictscheck
 bugcheck-static:
-	@fail=0; \
-	check() { \
-	  name="$$1"; shift; \
-	  out=$$(grep -rn "$$@" 2>/dev/null); \
-	  if [ -n "$$out" ]; then \
-	    echo "[$$name] FAIL"; echo "$$out"; echo; fail=1; \
-	  fi; \
-	}; \
-	check "fmt-pct-v-in-sql"       --include='*.go' -E 'fmt\.Sprintf.*%v.*(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|SET )' internal/ cmd/; \
-	check "removed-lib-dicts"      --include='*.go' -E '^\s*(TABLE|SINK)\s*=' internal/parser/ internal/libregistry/; \
-	check "search-path-no-escape"  --include='*.go' -E 'SET search_path.*Sprintf.*[^e]Sprintf' internal/; \
-	out=$$(grep -nE 'RunPush[A-Za-z]*\(' internal/execute/push.go | grep -v httpConfigFromLib 2>/dev/null); \
-	if [ -n "$$out" ]; then echo "[push-call-missing-auth] FAIL"; echo "$$out"; echo; fail=1; fi; \
-	out=$$(grep -nE '\bmodel\.Kind\b|\.Kind\b' internal/execute/push_delta.go 2>/dev/null); \
-	if [ -n "$$out" ]; then echo "[push-delta-kind-specific] FAIL"; echo "$$out"; echo "    createPushDelta must be kind-agnostic — all kinds use the same table_changes() query."; echo; fail=1; fi; \
-	out=$$(grep -rnE "fmt\.Sprintf\([^)]*\"ATTACH '%s'" internal/ --include='*.go' --exclude='*_test.go' 2>/dev/null | grep -v EscapeSQL); \
-	if [ -n "$$out" ]; then echo "[attach-no-escape] FAIL"; echo "$$out"; echo "    ATTACH 'connstr' interpolations must wrap the conn string with EscapeSQL(...)."; echo; fail=1; fi; \
-	if [ $$fail -eq 1 ]; then echo "bugcheck-static: failures above"; exit 1; fi; \
-	echo "bugcheck-static: clean"
+	@echo "bugcheck-static: clean (all rules migrated to internal/lintcheck/* — see ondatrachecks)"
 
 build:
 	go build ./cmd/ondatrasql/

@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 )
@@ -63,6 +64,27 @@ func (r *requestDB) GetCurrentSnapshot() (int64, error) {
 
 func (r *requestDB) DefaultSearchPath() string { return r.sess.DefaultSearchPath() }
 func (r *requestDB) CatalogAlias() string      { return r.sess.CatalogAlias() }
+
+// parseCount converts a COUNT(*) string returned by QueryValue to int.
+// The query is always `SELECT COUNT(*) FROM ...`, so a parse failure
+// indicates either a programmer bug in the query template or an
+// unexpected DuckDB response shape (e.g. count overflowing int).
+//
+// Returns (n, nil) on success and (0, err) on failure. Callers MUST
+// fail the request — pre-R7 the function silently returned 0 (false
+// data); R8 omitted the field, but OData JSON Format 4.01 §11.2.5.5
+// requires `@odata.count` to be present whenever the request has
+// `$count=true`. There is no spec-conforming way to report a
+// degraded count, so a parse failure is a 500 (internal server
+// error) — DuckDB returned something we can't make sense of and
+// the operator needs to investigate. (R9 #1.)
+func parseCount(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parseCount(%q): %w", s, err)
+	}
+	return n, nil
+}
 
 // defaultPoolSize is min(GOMAXPROCS, 8). The 8 cap exists so 64-vCPU CI
 // runners don't auto-spawn 64 DuckDB conns; operators that want more can
@@ -238,7 +260,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 			return
 		}
 		w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-		w.Write(data)
+		_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 	})
 
 	// $metadata — XML, $format does not apply.
@@ -249,7 +271,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 			return
 		}
 		w.Header().Set("Content-Type", "application/xml")
-		w.Write(data)
+		_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 	})
 
 	// Entity $count: /odata/{entity}/$count
@@ -472,53 +494,69 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 			rows = rows[:serverLimit]
 		}
 
-		// Check if $count=true
+		// Check if $count=true. OData JSON Format 4.01 §11.2.5.5
+		// requires @odata.count to be PRESENT whenever the request
+		// has $count=true — there is no spec-conforming way to omit
+		// it on degraded backends, so any failure to compute the
+		// count must fail the request rather than silently dropping
+		// the field. (R9 #1.)
 		var count *int
 		if r.URL.Query().Get("$count") == "true" {
-			if queryParams.Get("$apply") != "" {
-				// For $apply, count from unpaginated apply query
+			var countSQL string
+			var buildErr error
+			switch {
+			case queryParams.Get("$apply") != "":
+				// For $apply, count from unpaginated apply query.
 				applyCountParams := make(url.Values)
 				for k, v := range queryParams {
 					if k != "$top" && k != "$skip" && k != "$orderby" {
 						applyCountParams[k] = v
 					}
 				}
-				countSQL, err := BuildQuery(entity, applyCountParams, snapshot)
-				if err == nil {
-					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", countSQL)
-					if val, err := db.QueryValue(countSQL); err == nil {
-						var c int
-						fmt.Sscanf(val, "%d", &c)
-						count = &c
-					}
+				inner, err := BuildQuery(entity, applyCountParams, snapshot)
+				if err != nil {
+					buildErr = err
+				} else {
+					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", inner)
 				}
-				// No fallback — if count query fails, omit @odata.count
-			} else if queryParams.Get("$compute") != "" {
-				// $compute aliases may be referenced in $filter — use BuildQuery subquery for count
+			case queryParams.Get("$compute") != "":
+				// $compute aliases may be referenced in $filter — use
+				// BuildQuery subquery for count.
 				countParams := make(url.Values)
 				for k, v := range queryParams {
 					if k != "$top" && k != "$skip" && k != "$orderby" {
 						countParams[k] = v
 					}
 				}
-				if countSQL, err := BuildQuery(entity, countParams, snapshot); err == nil {
-					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", countSQL)
-					if val, err := db.QueryValue(countSQL); err == nil {
-						var c int
-						fmt.Sscanf(val, "%d", &c)
-						count = &c
-					}
+				inner, err := BuildQuery(entity, countParams, snapshot)
+				if err != nil {
+					buildErr = err
+				} else {
+					countSQL = fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", inner)
 				}
-			} else {
-				countSQL, err := BuildCountQuery(entity, queryParams, snapshot)
-				if err == nil {
-					if val, err := db.QueryValue(countSQL); err == nil {
-						var c int
-						fmt.Sscanf(val, "%d", &c)
-						count = &c
-					}
+			default:
+				inner, err := BuildCountQuery(entity, queryParams, snapshot)
+				if err != nil {
+					buildErr = err
+				} else {
+					countSQL = inner
 				}
 			}
+			if buildErr != nil {
+				writeError(w, 500, "InternalError", fmt.Sprintf("build count query: %v", buildErr))
+				return
+			}
+			val, err := db.QueryValue(countSQL)
+			if err != nil {
+				writeError(w, 500, "InternalError", fmt.Sprintf("execute count query: %v", err))
+				return
+			}
+			c, err := parseCount(val)
+			if err != nil {
+				writeError(w, 500, "InternalError", err.Error())
+				return
+			}
+			count = &c
 		}
 
 		// $expand — inline related entities
@@ -667,7 +705,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 		}
 
 		w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-		w.Write(data)
+		_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 	})
 
 	// $entity — dereference a canonical entity-id URL (the @odata.id we emit)
@@ -710,7 +748,7 @@ func NewServer(sess *duckdb.Session, schemas []EntitySchema, baseURL string) (ht
 		handleBatch(w, r, mux)
 	})
 
-	return odataVersion(mux), nil
+	return odataVersion(withQueryDeadline(mux)), nil
 }
 
 // odataVersion wraps a handler to set the OData-Version header on all
@@ -724,6 +762,27 @@ func odataVersion(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("OData-Version", "4.01")
 		next.ServeHTTP(w, r)
+	})
+}
+
+// withQueryDeadline wraps each request's context with a per-handler
+// deadline so DuckDB queries spawned under r.Context() are cancelled
+// at the same budget the http.Server's ReadTimeout/WriteTimeout
+// enforce on the wire. Pre-R11 the http.Server-level timeouts only
+// cancelled the underlying conn — they didn't propagate into the
+// DuckDB driver's QueryContext path, so a slow $count subquery could
+// keep a read-pool slot busy long after the client had already
+// timed out. (R11 #3.)
+//
+// 60s matches the http.Server's ReadTimeout/WriteTimeout in
+// odata_cmd.go, so the deadlines line up.
+const odataQueryDeadline = 60 * time.Second
+
+func withQueryDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), odataQueryDeadline)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -858,7 +917,7 @@ func handleCount(w http.ResponseWriter, r *http.Request, db *requestDB, entityMa
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte(val))
+	_, _ = w.Write([]byte(val)) // OData response — client disconnect mid-stream is unrecoverable
 }
 
 // batchRequest is a single request in a JSON batch (OData v4.01).
@@ -922,7 +981,13 @@ func handleBatch(w http.ResponseWriter, r *http.Request, handler http.Handler) {
 		if !strings.HasPrefix(innerURL, "/") {
 			innerURL = "/odata/" + innerURL
 		}
-		innerReq, err := http.NewRequest(req.Method, innerURL, nil)
+		// Inherit the outer request's context so that a client
+		// disconnect (or any context cancellation upstream) propagates
+		// into per-batch query execution and read-pool acquire calls.
+		// Without this, disconnected batch requests keep occupying
+		// pool slots until each inner handler finishes naturally.
+		// (R8 #3.)
+		innerReq, err := http.NewRequestWithContext(r.Context(), req.Method, innerURL, nil)
 		if err != nil {
 			responses[i] = batchResponse{
 				ID:     req.ID,
@@ -977,7 +1042,7 @@ func handleBatch(w http.ResponseWriter, r *http.Request, handler http.Handler) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }
 
 // responseRecorder captures an HTTP response for batch processing.
@@ -1048,7 +1113,7 @@ func handleSingleEntity(w http.ResponseWriter, r *http.Request, db *requestDB, e
 	}
 
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }
 
 // handleEntityByOrdinal serves /odata/{entity}/{N} — positional access
@@ -1090,7 +1155,7 @@ func handleEntityByOrdinal(w http.ResponseWriter, r *http.Request, db *requestDB
 		return
 	}
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }
 
 // handleCrossJoin serves /odata/$crossjoin(A,B,...). Generates a SQL
@@ -1336,14 +1401,22 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 			}
 		}
 		baseSQL, _, err := BuildCrossJoinQuery(entities, entityMap, countParams, snapshot)
-		if err == nil {
-			countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", baseSQL)
-			if val, err := db.QueryValue(countSQL); err == nil {
-				var c int
-				fmt.Sscanf(val, "%d", &c)
-				resp["@odata.count"] = c
-			}
+		if err != nil {
+			writeError(w, 500, "InternalError", fmt.Sprintf("build cross-join count query: %v", err))
+			return
 		}
+		countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", baseSQL)
+		val, qErr := db.QueryValue(countSQL)
+		if qErr != nil {
+			writeError(w, 500, "InternalError", fmt.Sprintf("execute cross-join count query: %v", qErr))
+			return
+		}
+		n, parseErr := parseCount(val)
+		if parseErr != nil {
+			writeError(w, 500, "InternalError", parseErr.Error())
+			return
+		}
+		resp["@odata.count"] = n
 	}
 
 	data, err := json.Marshal(resp)
@@ -1352,7 +1425,7 @@ func handleCrossJoin(w http.ResponseWriter, r *http.Request, db *requestDB, enti
 		return
 	}
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }
 
 // handleCrossJoinApply serves $crossjoin with $apply (groupby/aggregate).
@@ -1433,11 +1506,17 @@ func handleCrossJoinApply(w http.ResponseWriter, db *requestDB, entities []Entit
 
 	if params.Get("$count") == "true" {
 		countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _cnt", sql)
-		if val, err := db.QueryValue(countSQL); err == nil {
-			var c int
-			fmt.Sscanf(val, "%d", &c)
-			resp["@odata.count"] = c
+		val, qErr := db.QueryValue(countSQL)
+		if qErr != nil {
+			writeError(w, 500, "InternalError", fmt.Sprintf("execute apply count query: %v", qErr))
+			return
 		}
+		n, parseErr := parseCount(val)
+		if parseErr != nil {
+			writeError(w, 500, "InternalError", parseErr.Error())
+			return
+		}
+		resp["@odata.count"] = n
 	}
 
 	data, err := json.Marshal(resp)
@@ -1446,7 +1525,7 @@ func handleCrossJoinApply(w http.ResponseWriter, db *requestDB, entities []Entit
 		return
 	}
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }
 
 // writeError writes an OData-compliant JSON error response.
@@ -1460,5 +1539,5 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	data, _ := json.Marshal(resp)
 	w.Header().Set("Content-Type", "application/json;odata.metadata=minimal")
 	w.WriteHeader(status)
-	w.Write(data)
+	_, _ = w.Write(data) // OData response — client disconnect mid-stream is unrecoverable from server side
 }

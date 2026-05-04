@@ -376,6 +376,21 @@ curl "http://localhost:8090/odata/mart_revenue?\$apply=groupby((customer),aggreg
 
 NULL values are JSON `null`. Empty strings are preserved as `""`.
 
+## Request budget
+
+Each request has a 60-second budget that covers BOTH the HTTP read/write AND the underlying DuckDB query. A request exceeding the budget is cancelled at the database layer (the in-flight query receives `context.Canceled`) and the response is an OData error envelope:
+
+```http
+HTTP/1.1 500 Internal Server Error
+Content-Type: application/json
+
+{"error":{"code":"InternalError","message":"execute count query: context deadline exceeded"}}
+```
+
+Clients should treat this the same as any other 5xx — the server is healthy, but the specific request was too slow for the budget. Retries are appropriate; a follow-up `$top=N` to bound the result set typically resolves it.
+
+`ReadHeaderTimeout` is 5s, `IdleTimeout` (keep-alive) is 120s. None of these are configurable in v0.31.
+
 ## Security
 
 - **Read-only**: only SELECT queries, no writes

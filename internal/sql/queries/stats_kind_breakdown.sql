@@ -7,4 +7,7 @@ SELECT
 FROM snapshots()
 WHERE commit_extra_info->>'model' IS NOT NULL
 GROUP BY 1
-ORDER BY 2 DESC
+-- Tiebreak on kind name so equal-count rows render in a stable order
+-- across runs; without this, --json stats reshuffles the breakdown
+-- and breaks consumers that diff successive runs.
+ORDER BY 2 DESC, 1 ASC

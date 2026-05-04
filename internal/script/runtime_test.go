@@ -22,6 +22,87 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// TestRecoverScriptPanic_ConvertsToError pins R7 #11 + R8 #6:
+// a panic in a Go-side builtin called from Starlark (or anywhere
+// inside a Runtime.Run* / RunPush* method) must surface as a normal
+// error, not crash the host process. The error message has a STABLE
+// format (R8 #6): `starlark execution panicked: <value>` — no stack
+// trace embedded in the error string. Stack lands on stderr instead.
+func TestRecoverScriptPanic_ConvertsToError(t *testing.T) {
+	t.Parallel()
+	var got error
+	func() {
+		defer recoverScriptPanic(&got)
+		panic("simulated builtin panic")
+	}()
+	if got == nil {
+		t.Fatal("expected error from recovered panic, got nil")
+	}
+	if !strings.Contains(got.Error(), "starlark execution panicked") {
+		t.Errorf("error %q must mention 'starlark execution panicked'", got)
+	}
+	if !strings.Contains(got.Error(), "simulated builtin panic") {
+		t.Errorf("error %q must include the panic value", got)
+	}
+	// R8 #6: error message must NOT include debug.Stack output —
+	// stack frame formatting drifts across Go versions, embedding
+	// it in the error baked an unstable format into the public
+	// contract. Stack goes to stderr instead.
+	if strings.Contains(got.Error(), "goroutine ") {
+		t.Errorf("error %q must NOT include debug.Stack output (unstable across Go versions)", got)
+	}
+	if strings.Contains(got.Error(), ".go:") {
+		t.Errorf("error %q must NOT include file:line frames (leaks build paths)", got)
+	}
+}
+
+// TestRecoverScriptPanic_NoPanicLeavesErrUntouched asserts the
+// recover helper does not stomp on a non-nil error already set by
+// the function body.
+func TestRecoverScriptPanic_NoPanicLeavesErrUntouched(t *testing.T) {
+	t.Parallel()
+	preexisting := errors.New("legitimate failure")
+	got := preexisting
+	func() {
+		defer recoverScriptPanic(&got)
+	}()
+	if got != preexisting {
+		t.Errorf("recover with no panic must not modify err, got %v", got)
+	}
+}
+
+// TestRecoverScriptPanic_StableNonStringRendering pins R9 #7: panic
+// values that aren't strings (errors, structs, maps) must render
+// deterministically, not via Go's default %v which embeds
+// non-canonical braces, quotes, and field-order-dependent text.
+func TestRecoverScriptPanic_StableNonStringRendering(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		panicVal  any
+		wantInErr string
+	}{
+		{"error_panic", errors.New("boom"), "starlark execution panicked: boom"},
+		{"string_panic", "boom", "starlark execution panicked: boom"},
+		{"struct_panic", struct{ X int }{42}, "starlark execution panicked: struct { X int }:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got error
+			func() {
+				defer recoverScriptPanic(&got)
+				panic(tc.panicVal)
+			}()
+			if got == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(got.Error(), tc.wantInErr) {
+				t.Errorf("error %q must contain %q", got, tc.wantInErr)
+			}
+		})
+	}
+}
+
 func TestRuntimeSimpleScript(t *testing.T) {
 	t.Parallel()
 	rt := NewRuntime(nil, nil)

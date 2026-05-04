@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -48,7 +49,7 @@ func runOData(ctx context.Context, cfg *config.Config, port string) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
@@ -73,7 +74,26 @@ func runOData(ctx context.Context, cfg *config.Config, port string) error {
 	if err != nil {
 		return fmt.Errorf("create odata server: %w", err)
 	}
-	httpSrv := &http.Server{Addr: addr, Handler: handler}
+	// Timeouts bound the worst-case time a single request can hold a
+	// goroutine + read-pool connection. ReadHeaderTimeout protects
+	// against slow-loris-style attacks that drip request bytes
+	// forever; ReadTimeout/WriteTimeout cap the full request/response
+	// budget; IdleTimeout closes idle keep-alive sockets. Without
+	// these, a slow `$count` subquery could hold a read-pool slot
+	// indefinitely because acquireDB only honours r.Context() and the
+	// bare http.Server has no deadline of its own. (R10 #7.)
+	//
+	// 60s read/write is generous enough for legitimate analytical
+	// queries on cold caches but short enough that a wedged backend
+	// can't drain the pool by accumulating stuck requests.
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	// Output
 	output.Fprintf("OData server starting...\n")
@@ -82,9 +102,19 @@ func runOData(ctx context.Context, cfg *config.Config, port string) error {
 		output.Fprintf("  %s (%d columns)\n", s.Target, len(s.Columns))
 	}
 
-	// Start server
+	// Start server. http.ErrServerClosed is the documented "graceful
+	// shutdown" sentinel from Shutdown below; surface anything else.
+	// Without this filter SIGINT/SIGTERM looked like a real error to
+	// any supervisor watching the daemon's exit code (Codex round 4
+	// finding).
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.ListenAndServe() }()
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		} else {
+			errCh <- nil
+		}
+	}()
 
 	// Graceful shutdown (same pattern as daemon)
 	select {

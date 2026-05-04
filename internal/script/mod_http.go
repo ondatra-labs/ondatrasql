@@ -643,13 +643,13 @@ func httpResponseToStarlark(resp *HTTPResponse) *starlarkstruct.Struct {
 	headersDict := starlark.NewDict(len(resp.Headers))
 	for k, v := range resp.Headers {
 		if len(v) == 1 {
-			headersDict.SetKey(starlark.String(k), starlark.String(v[0]))
+			_ = headersDict.SetKey(starlark.String(k), starlark.String(v[0])) // SetKey only fails on unhashable keys; starlark.String is hashable
 		} else {
 			elems := make([]starlark.Value, len(v))
 			for i, val := range v {
 				elems[i] = starlark.String(val)
 			}
-			headersDict.SetKey(starlark.String(k), starlark.NewList(elems))
+			_ = headersDict.SetKey(starlark.String(k), starlark.NewList(elems)) // SetKey only fails on unhashable keys; starlark.String is hashable
 		}
 	}
 
@@ -657,9 +657,9 @@ func httpResponseToStarlark(resp *HTTPResponse) *starlarkstruct.Struct {
 	if len(resp.Links) > 0 {
 		linkDict := starlark.NewDict(len(resp.Links))
 		for rel, u := range resp.Links {
-			linkDict.SetKey(starlark.String(rel), starlark.String(u))
+			_ = linkDict.SetKey(starlark.String(rel), starlark.String(u)) // SetKey only fails on unhashable keys; starlark.String is hashable
 		}
-		headersDict.SetKey(starlark.String("_links"), linkDict)
+		_ = headersDict.SetKey(starlark.String("_links"), linkDict) // SetKey only fails on unhashable keys; starlark.String is hashable
 	}
 
 	ok := resp.StatusCode >= 200 && resp.StatusCode < 300

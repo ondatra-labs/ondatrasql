@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // ScriptType indicates the type of script for a model.
@@ -241,7 +242,21 @@ var (
 	sinkDeleteThresholdRe   = regexp.MustCompile(`^` + c + `\s*@sink_delete_threshold:\s*(.+)$`)
 	fetchRe                 = regexp.MustCompile(`^` + c + `\s*@fetch\s*$`)
 	fetchAnyRe              = regexp.MustCompile(`^` + c + `\s*@fetch\b`)
+	// commentRe matches line-comment prefixes (`--`, `//`, `#`).
+	// Block comments are handled separately by stripBlockComments
+	// before this regex sees the line — that approach handles
+	// multi-line, trailing-content, and mixed-line cases (R9 #3-#5)
+	// uniformly without regex contortions.
 	commentRe = regexp.MustCompile(`^(?:--|//|#)`)
+	// unknownDirectiveRe matches a line-comment whose first non-space
+	// content is `@<identifier>`. Used in the header-parsing loop to
+	// detect typos like `-- @ftech` that would otherwise fall through
+	// the generic comment branch and parse as if the directive were
+	// absent. Block comments don't reach this regex — content inside
+	// `/* ... */` is stripped before classification, so `/* @ftech */`
+	// is treated as a regular comment (intent: a comment about a
+	// directive, not a typoed directive).
+	unknownDirectiveRe = regexp.MustCompile(`^(?:--|//|#)\s*@([A-Za-z_][A-Za-z0-9_]*)`)
 )
 
 // ParseModel reads a SQL file and extracts all directives.
@@ -252,7 +267,7 @@ func ParseModel(path, projectDir string) (*Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open model file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // read-only handle, no flush needed
 
 	// Get absolute path for internal use
 	absPath, err := filepath.Abs(path)
@@ -323,10 +338,42 @@ func ParseModel(path, projectDir string) (*Model, error) {
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024) // 1MB initial, 10MB max
 	var sqlLines []string
 	inHeader := true
+	inBlockComment := false // tracks open `/* ... */` across multiple lines
+	lineNum := 0
 
 	for scanner.Scan() {
-		line := scanner.Text()
+		lineNum++
+		rawLine := scanner.Text()
+		// Block-comment stripping applies ONLY to header lines that
+		// LOOK like comments (start with --, //, #, /*) or that are
+		// continuations of a previously-opened multi-line `/* */`.
+		// Lines that begin with SQL (SELECT, WITH, INSERT, ...) flip
+		// inHeader=false WITHOUT stripping — pre-R10 the stripper
+		// also ran on lines like `SELECT '/* x */' -- @kind: table`
+		// and incorrectly removed `/* x */` from inside a string
+		// literal. (R10 #3.)
+		//
+		// Stripping in the header still handles the three R9 cases:
+		//
+		//   - multi-line `/* foo\nbar */` (#3): inner lines strip to
+		//     "" so they don't flip inHeader=false.
+		//   - trailing content `/* foo */ bar` (#4): strips to ` bar`
+		//     so `bar` is correctly classified.
+		//   - mixed line `/* @ftech */ -- @kind: table` (#5): strips
+		//     to ` -- @kind: table` so @kind is parsed.
+		//
+		// inBlockComment carries open-block state across iterations.
+		line := rawLine
+		if inHeader && (inBlockComment || lineLooksLikeComment(rawLine)) {
+			line, inBlockComment = stripBlockComments(rawLine, inBlockComment)
+		}
 		trimmed := strings.TrimSpace(line)
+		if inHeader && trimmed == "" && (inBlockComment || strings.TrimSpace(rawLine) != "") {
+			// Pure block-comment content (or the line was made empty
+			// by stripping). Treat as header comment and skip — must
+			// NOT flip inHeader=false.
+			continue
+		}
 
 		// Directives belong in the header (before any SQL line). If a
 		// directive-shaped comment appears after SQL has started, that's
@@ -468,15 +515,42 @@ func ParseModel(path, projectDir string) (*Model, error) {
 			}
 
 		case commentRe.MatchString(trimmed) && inHeader:
-			// Header comment - ignore
+			// Header comment. Reject `@unknown_directive` typos
+			// outright — pre-R7 these silently fell through and the
+			// model parsed as if the directive were absent (e.g.
+			// `-- @ftech: ...` was a no-op). The closed directive set
+			// in isDirectiveLine is the source of truth; anything else
+			// shaped like `@<word>` is a typo or removed directive.
+			if m := unknownDirectiveRe.FindStringSubmatch(trimmed); m != nil && !isDirectiveLine(trimmed) {
+				return nil, fmt.Errorf("unknown directive @%s on line %d (typo, or directive was removed)", m[1], lineNum)
+			}
 
 		default:
-			// SQL code
+			// SQL code. Append the ORIGINAL line, not the stripped
+			// view used for classification — block comments inside
+			// SQL must reach DuckDB unchanged. Once we hit the SQL
+			// body, future lines no longer go through the stripper.
 			inHeader = false
-			sqlLines = append(sqlLines, line)
+			sqlLines = append(sqlLines, rawLine)
 		}
 	}
 
+	// Order matters: check inBlockComment BEFORE scanner.Err() so
+	// the targeted unterminated-/* diagnostic wins over the generic
+	// "read model file" error in cases where the unterminated
+	// comment ALSO trips bufio.Scanner's buffer limit (a 10MB+
+	// comment with no closing */). Pre-R11 a giant unterminated
+	// comment hit the scanner-err first, hiding the actionable
+	// message. (R11 #10.)
+	//
+	// An unterminated `/*` in the header silently consumed the rest
+	// of the file pre-R10 — with `@kind: events` already parsed,
+	// the model would be accepted with empty SQL because events-kind
+	// is exempt from the empty-SQL check. Surface the broken comment
+	// loudly instead. (R10 #6.)
+	if inBlockComment {
+		return nil, fmt.Errorf("unterminated `/*` block comment in header — add a closing `*/`")
+	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read model file: %w", err)
 	}
@@ -575,6 +649,93 @@ func extractColumnTags(desc string) (string, []string) {
 		tags[i], tags[j] = tags[j], tags[i]
 	}
 	return desc, tags
+}
+
+// lineLooksLikeComment reports whether the trimmed line begins with
+// a comment prefix recognised by the header parser (`--`, `//`, `#`,
+// `/*`). Used to gate stripBlockComments so we never strip inside SQL
+// lines that contain `/* ... */` as part of a string literal — pre-R10
+// the stripper ran on every header line, which incorrectly removed
+// block-comment-shaped content from inside `SELECT '/* x */' ...`.
+//
+// Pure-whitespace and empty lines are not "comments" but they're also
+// safe to pass through the stripper (no `/*` to strip), so this
+// returns false and the surrounding code falls through to the
+// default path.
+func lineLooksLikeComment(line string) bool {
+	// Trim ALL Unicode whitespace, not just space/tab. Pre-R11
+	// `TrimLeft(line, " \t")` missed NBSP (` `), zero-width
+	// space, and other Unicode space characters — a line starting
+	// with ` /* ... */` would slip past this gate, fall into
+	// the SQL-body branch, and silently flip inHeader=false even
+	// though the user wrote what looks like a comment. (R11 #4.)
+	trimmed := strings.TrimLeftFunc(line, unicode.IsSpace)
+	switch {
+	case strings.HasPrefix(trimmed, "--"),
+		strings.HasPrefix(trimmed, "//"),
+		strings.HasPrefix(trimmed, "#"),
+		strings.HasPrefix(trimmed, "/*"):
+		return true
+	}
+	return false
+}
+
+// stripBlockComments removes any `/* ... */` ranges from line, with
+// inOpen carrying open-block state from a previous line. Returns the
+// stripped line and whether the line ENDS with an open block comment.
+//
+// Used by ParseModel's header-parsing loop so multi-line, trailing-
+// content, and mixed-line block-comment cases all classify uniformly:
+//
+//   - inOpen=false, line=`/* foo */ bar`        → out=` bar`,        outOpen=false
+//   - inOpen=false, line=`/* foo`               → out=``,            outOpen=true
+//   - inOpen=true,  line=`bar`                  → out=``,            outOpen=true
+//   - inOpen=true,  line=`bar */ baz`           → out=` baz`,        outOpen=false
+//   - inOpen=false, line=`/* @ftech */ -- @kind: table` → out=` -- @kind: table`, outOpen=false
+//
+// Behaviour contract (intentional limitations):
+//
+//   - Block comments are NOT nested. `/* outer /* inner */ outer */`
+//     terminates at the first `*/`, leaving ` outer */` as output;
+//     the trailing `*/` is treated as literal text. This matches
+//     standard SQL-92 / DuckDB semantics — only PostgreSQL allows
+//     nested `/* */`. If a model author wants a literal `*/` in a
+//     comment, they must use a line-comment (`-- ... */`) instead.
+//     (R10 #8 contract clarification.)
+//   - Quoted-string content is NOT respected. The caller (ParseModel)
+//     gates this stripper to lines that look like comments AND
+//     header-position multi-line continuations, so a SQL line like
+//     `SELECT '/* x */' ...` never reaches the stripper. (R10 #3.)
+//   - An unterminated `/* ... <EOF>` is detected by the caller via
+//     the returned outOpen flag; ParseModel surfaces it as an
+//     explicit error rather than silently consuming the rest of the
+//     file. (R10 #6.)
+func stripBlockComments(line string, inOpen bool) (string, bool) {
+	var b strings.Builder
+	i := 0
+	for i < len(line) {
+		if inOpen {
+			// Looking for the closing `*/`.
+			j := strings.Index(line[i:], "*/")
+			if j < 0 {
+				// Block comment continues past end of line.
+				return b.String(), true
+			}
+			i += j + 2
+			inOpen = false
+			continue
+		}
+		// Looking for the opening `/*`.
+		j := strings.Index(line[i:], "/*")
+		if j < 0 {
+			b.WriteString(line[i:])
+			return b.String(), false
+		}
+		b.WriteString(line[i : i+j])
+		i += j + 2
+		inOpen = true
+	}
+	return b.String(), inOpen
 }
 
 // validateModel checks that the model has valid values.

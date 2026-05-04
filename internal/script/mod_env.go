@@ -5,6 +5,7 @@
 package script
 
 import (
+	"fmt"
 	"os"
 
 	"go.starlark.net/starlark"
@@ -42,7 +43,9 @@ func envModule() *starlarkstruct.Module {
 					return nil, err
 				}
 
-				os.Setenv(name, value)
+				if err := os.Setenv(name, value); err != nil {
+					return nil, fmt.Errorf("env.set(%q): %w", name, err)
+				}
 				return starlark.None, nil
 			}),
 		},

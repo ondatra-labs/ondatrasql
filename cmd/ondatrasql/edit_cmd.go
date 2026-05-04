@@ -105,7 +105,7 @@ func findModelSourceFile(cfg *config.Config, target string) (string, error) {
 	// First try to get from DuckLake metadata
 	sess, err := duckdb.NewSession("")
 	if err == nil {
-		defer sess.Close()
+		defer closeSessionOrLog(sess)
 
 		if err := sess.InitWithCatalog(cfg.ConfigPath); err == nil {
 			commitInfo, err := backfill.GetModelCommitInfo(sess, target)

@@ -85,3 +85,40 @@ func TestTableExistsIn_InvalidTargetShape(t *testing.T) {
 		t.Errorf("error should mention expected format, got: %v", err)
 	}
 }
+
+// TestParseSandboxCount regression-tests the helper that replaced 11
+// fmt.Sscanf("%d") sites in sandbox.go. The earlier Sscanf calls
+// silently dropped parse failures, leaving the destination int64 at 0
+// — Codex round 3 flagged this as an actual bug risk because a
+// malformed COUNT() result (NULL, empty, non-numeric) would corrupt
+// the sandbox diff display.
+//
+// Contract: returns the parsed value on success; returns 0 on parse
+// failure rather than the previous undefined behaviour. The query
+// templates that feed this all produce numeric strings so a parse
+// failure indicates a programmer bug in the SQL template — falling
+// back to 0 keeps the diff rendering instead of crashing the summary.
+func TestParseSandboxCount(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"0", 0},
+		{"42", 42},
+		{"9223372036854775807", 9223372036854775807}, // max int64
+		{"-1", -1},
+		{"", 0},          // empty → 0
+		{"   ", 0},       // whitespace → 0
+		{"abc", 0},       // non-numeric → 0
+		{"12abc", 0},     // partially numeric → 0 (strconv stricter than Sscanf)
+		{"1.5", 0},       // float → 0
+		{"NULL", 0},      // SQL NULL string representation → 0
+	}
+	for _, tc := range cases {
+		got := parseSandboxCount(tc.in)
+		if got != tc.want {
+			t.Errorf("parseSandboxCount(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}

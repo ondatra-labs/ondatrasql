@@ -54,7 +54,12 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	}
 
 	cfgHash := backfill.ConfigHash(filepath.Join(projectDir, "config"))
-	decisions, _ := ComputeRunTypeDecisions(sess, sorted, cfgHash)
+	decisions, decisionErr := ComputeRunTypeDecisions(sess, sorted, cfgHash)
+	if decisionErr != nil {
+		errors := make(map[string]error)
+		errors["_validation"] = decisionErr
+		return nil, errors
+	}
 
 	results := make(map[string]*Result, len(sorted))
 	errors := make(map[string]error, len(sorted))

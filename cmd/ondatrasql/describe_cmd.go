@@ -12,7 +12,11 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/libcall"
+	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
+	"github.com/ondatra-labs/ondatrasql/internal/lineage"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -33,74 +37,116 @@ const (
 	bottomT     = "╩"
 )
 
+// describeModelSchemaVersion is the JSON schema version for the
+// `describe <model>` output. Bump on breaking changes (field renames,
+// type changes, removed fields).
+//
+// Version history:
+//   - 1: initial release with snake_case fields, blueprint cross-link,
+//     blueprint_error degradation field
+const describeModelSchemaVersion = 1
+
 // ModelInfo holds all information about a model for display.
+//
+// JSON field names use snake_case for consistency with the rest of the
+// CLI's machine-readable output (validate, describe blueprint).
 type ModelInfo struct {
+	// SchemaVersion lets typed clients detect breaking changes to the
+	// describe output. Always emitted, never omitempty.
+	SchemaVersion int `json:"schema_version"`
+
 	// Basic info
-	Target          string
-	Kind            string
-	Schema          string
-	Materialization string
-	SourceFile      string
-	ScriptType      parser.ScriptType
+	Target          string             `json:"target"`
+	Kind            string             `json:"kind"`
+	Schema          string             `json:"schema,omitempty"`
+	Materialization string             `json:"materialization,omitempty"`
+	SourceFile      string             `json:"source_file,omitempty"`
+	ScriptType      parser.ScriptType  `json:"script_type,omitempty"`
+
+	// Blueprint cross-link: name of the lib function this model fetches
+	// from (e.g. "mistral_ocr") so agents can follow up with
+	// `describe blueprint <name>`. Empty for models without a lib call.
+	Blueprint string `json:"blueprint,omitempty"`
+
+	// BlueprintError captures why blueprint detection couldn't run for
+	// a model that may have a lib call. Empty when detection ran cleanly
+	// (which includes "no lib call detected" and "blueprint resolved").
+	// Populated when ScanLenient saw the project's libs as broken or
+	// AST serialization for the model SQL failed — the user gets a
+	// structured signal that the cross-link is unverified rather than
+	// a silent missing field.
+	BlueprintError string `json:"blueprint_error,omitempty"`
 
 	// Statistics
-	TotalRuns    int
-	AvgDuration  int64
-	TotalRows    int64
-	TableSize    string
-	SuccessRate  int
-	LastRun      string
-	FirstRun     string
+	TotalRuns   int    `json:"total_runs,omitempty"`
+	AvgDuration int64  `json:"avg_duration_ms,omitempty"`
+	TotalRows   int64  `json:"total_rows,omitempty"`
+	TableSize   string `json:"table_size,omitempty"`
+	SuccessRate int    `json:"success_rate,omitempty"`
+	LastRun     string `json:"last_run,omitempty"`
+	FirstRun    string `json:"first_run,omitempty"`
 
 	// Dependencies
-	Dependencies []string
-	Downstream   []string
+	Dependencies []string `json:"dependencies,omitempty"`
+	Downstream   []string `json:"downstream,omitempty"`
 
 	// Columns
-	Columns []ColumnInfo
+	Columns []ColumnInfo `json:"columns,omitempty"`
 
 	// Recent runs
-	RecentRuns []RunInfo
+	RecentRuns []RunInfo `json:"recent_runs,omitempty"`
 
 	// Definition (SQL or Starlark code)
-	Definition string
+	Definition string `json:"definition,omitempty"`
 
 	// Description is the table-level comment from @description directive.
-	Description string
+	Description string `json:"description,omitempty"`
 
 	// Data Quality Rules
-	Constraints []string
-	Audits      []string
-	Warnings    []string
+	Constraints []string `json:"constraints,omitempty"`
+	Audits      []string `json:"audits,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
 
 	// Execution profile (from last run)
-	Steps     []StepInfo
-	DuckDBVer string
-	GitCommit string
+	Steps     []StepInfo `json:"steps,omitempty"`
+	DuckDBVer string     `json:"duckdb_version,omitempty"`
+	GitCommit string     `json:"git_commit,omitempty"`
+
+	// GatherWarnings surfaces non-fatal failures encountered while
+	// collecting the descriptive payload (a stats query failed, a
+	// numeric column failed to parse). Distinct from the user-defined
+	// @warning directive list above.
+	GatherWarnings []string `json:"gather_warnings,omitempty"`
 }
 
 // ColumnInfo represents a column with its metadata.
+//
+//lintcheck:nojsonversion nested under ModelInfo; the wrapping payload's SchemaVersion versions this field too.
 type ColumnInfo struct {
-	Name        string
-	Type        string
-	Nullable    string
-	Constraint  string
-	Description string
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Nullable    string `json:"nullable,omitempty"`
+	Constraint  string `json:"constraint,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // RunInfo represents a single run.
+//
+//lintcheck:nojsonversion nested under ModelInfo.RecentRuns; versioned via the wrapping payload.
 type RunInfo struct {
-	Timestamp  string
-	Duration   int64
-	Rows       int64
-	Success    bool
+	Timestamp string `json:"timestamp"`
+	Duration  int64  `json:"duration_ms"`
+	Rows      int64  `json:"rows"`
+	Success   bool   `json:"success"`
 }
 
 // StepInfo represents an execution step.
+//
+//lintcheck:nojsonversion nested under ModelInfo.Steps; versioned via the wrapping payload.
 type StepInfo struct {
-	Name       string
-	DurationMs int64
-	Status     string
+	Name       string `json:"name"`
+	DurationMs int64  `json:"duration_ms"`
+	Status     string `json:"status"`
 }
 
 // runDescribe executes the describe command for a model.
@@ -109,7 +155,7 @@ func runDescribe(cfg *config.Config, target string) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
@@ -141,8 +187,8 @@ func runDescribe(cfg *config.Config, target string) error {
 func printSuggestedCommands(target string) {
 	output.Println()
 	output.Println("Commands:")
-	output.Fprintf("  ondatrasql %s              # Run this model\n", target)
-	output.Fprintf("  ondatrasql --sandbox %s    # Run in sandbox (diff + impact)\n", target)
+	output.Fprintf("  ondatrasql run %s          # Run this model\n", target)
+	output.Fprintf("  ondatrasql sandbox %s      # Run in sandbox (diff + impact)\n", target)
 	output.Fprintf("  ondatrasql edit %s         # Edit in $EDITOR\n", target)
 	output.Fprintf("  ondatrasql lineage %s      # Show column lineage\n", target)
 }
@@ -150,7 +196,8 @@ func printSuggestedCommands(target string) {
 // gatherModelInfo collects all information about a model.
 func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*ModelInfo, error) {
 	info := &ModelInfo{
-		Target: target,
+		SchemaVersion: describeModelSchemaVersion,
+		Target:        target,
 	}
 
 	// Parse schema from target
@@ -186,15 +233,25 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 		})
 	}
 
-	// Read and parse source file for definition and quality rules
+	// Read and parse source file for definition and quality rules.
+	// Surface ParseModel failures via BlueprintError so machine-readable
+	// callers know the live source no longer parses (rather than silently
+	// emitting an empty Definition / Constraints / Audits / Warnings set).
 	if info.SourceFile != "" {
 		sourceFilePath := filepath.Join(cfg.ProjectDir, info.SourceFile)
-		if model, parseErr := parser.ParseModel(sourceFilePath, cfg.ProjectDir); parseErr == nil {
+		model, parseErr := parser.ParseModel(sourceFilePath, cfg.ProjectDir)
+		if parseErr != nil {
+			info.BlueprintError = fmt.Sprintf("source file %s no longer parses: %v", info.SourceFile, parseErr)
+		} else {
 			info.Definition = model.SQL
 			info.ScriptType = model.ScriptType
 			info.Constraints = model.Constraints
 			info.Audits = model.Audits
 			info.Warnings = model.Warnings
+			// Cross-link to blueprint via AST walk (M2). Uses the same
+			// session that's already attached to the catalog — only
+			// json_serialize_sql is needed, no catalog reads.
+			info.Blueprint, info.BlueprintError = detectModelBlueprint(sess, cfg.ProjectDir, model.SQL)
 		}
 	}
 
@@ -212,15 +269,32 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 	`, duckdb.EscapeSQL(target))
 
 	rows, err := sess.QueryRowsMap(statsQuery)
-	if err == nil && len(rows) > 0 {
+	if err != nil {
+		info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("stats query: %v", err))
+	} else if len(rows) > 0 {
 		row := rows[0]
-		info.TotalRuns, _ = strconv.Atoi(row["total_runs"])
-		avgDur, _ := strconv.ParseFloat(row["avg_duration"], 64)
-		info.AvgDuration = int64(avgDur)
-		info.TotalRows, _ = strconv.ParseInt(row["total_rows"], 10, 64)
+		if v, perr := strconv.Atoi(row["total_runs"]); perr == nil {
+			info.TotalRuns = v
+		} else if row["total_runs"] != "" {
+			info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("parse total_runs: %v", perr))
+		}
+		if v, perr := strconv.ParseFloat(row["avg_duration"], 64); perr == nil {
+			info.AvgDuration = int64(v)
+		} else if row["avg_duration"] != "" {
+			info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("parse avg_duration: %v", perr))
+		}
+		if v, perr := strconv.ParseInt(row["total_rows"], 10, 64); perr == nil {
+			info.TotalRows = v
+		} else if row["total_rows"] != "" {
+			info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("parse total_rows: %v", perr))
+		}
 		info.FirstRun = row["first_run"]
 		info.LastRun = row["last_run"]
-		info.SuccessRate, _ = strconv.Atoi(row["success_rate"])
+		if v, perr := strconv.Atoi(row["success_rate"]); perr == nil {
+			info.SuccessRate = v
+		} else if row["success_rate"] != "" {
+			info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("parse success_rate: %v", perr))
+		}
 	}
 
 	// Get table size
@@ -231,7 +305,9 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 		WHERE schema_name || '.' || table_name = '%s'
 	`, duckdb.EscapeSQL(target))
 	sizeRows, err := sess.QueryRowsMap(sizeQuery)
-	if err == nil && len(sizeRows) > 0 {
+	if err != nil {
+		info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("table size: %v", err))
+	} else if len(sizeRows) > 0 {
 		info.TableSize = sizeRows[0]["size"]
 	}
 	if info.TableSize == "" {
@@ -261,10 +337,18 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 		LIMIT 3
 	`, duckdb.EscapeSQL(target))
 	recentRows, err := sess.QueryRowsMap(recentQuery)
-	if err == nil {
+	if err != nil {
+		info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("recent runs: %v", err))
+	} else {
 		for _, row := range recentRows {
-			dur, _ := strconv.ParseInt(row["duration"], 10, 64)
-			rowCount, _ := strconv.ParseInt(row["rows"], 10, 64)
+			dur, derr := strconv.ParseInt(row["duration"], 10, 64)
+			if derr != nil && row["duration"] != "" {
+				info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("parse recent duration: %v", derr))
+			}
+			rowCount, rerr := strconv.ParseInt(row["rows"], 10, 64)
+			if rerr != nil && row["rows"] != "" {
+				info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("parse recent rows: %v", rerr))
+			}
 			info.RecentRuns = append(info.RecentRuns, RunInfo{
 				Timestamp: row["timestamp"],
 				Duration:  dur,
@@ -279,7 +363,9 @@ func gatherModelInfo(sess *duckdb.Session, cfg *config.Config, target string) (*
 
 	// Get downstream models
 	downstream, err := backfill.GetDownstreamModels(sess, target)
-	if err == nil {
+	if err != nil {
+		info.GatherWarnings = append(info.GatherWarnings, fmt.Sprintf("downstream models: %v", err))
+	} else {
 		info.Downstream = downstream
 	}
 
@@ -512,6 +598,15 @@ func printModelBox(info *ModelInfo) {
 	// If nothing closed the dual section, close it now
 	if !hasRules && !hasDefinition && !hasColumns {
 		printDualToSectionBorder("")
+	}
+
+	if len(info.GatherWarnings) > 0 {
+		printSectionBorder("Gather Warnings")
+		printEmptyLine()
+		for _, w := range info.GatherWarnings {
+			printPaddedLine("  " + w)
+		}
+		printEmptyLine()
 	}
 
 	// Bottom border
@@ -764,4 +859,61 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// detectModelBlueprint walks the model SQL's AST for a TABLE_FUNCTION node
+// matching a registered blueprint and returns its name.
+//
+// Returns (name, "") when detection succeeded — name is empty if no
+// blueprint is referenced. Returns ("", reason) when detection couldn't
+// run or couldn't be verified; callers should surface the reason rather
+// than silently dropping the cross-link. Reasons include:
+//   - registry empty due to parse errors in lib/
+//   - AST serialization failed for the model SQL
+//   - the model's TABLE_FUNCTION call references a blueprint that's in
+//     the project's lib/ tree but failed to parse (so libcall.Detect
+//     filtered the call out as "unknown")
+//
+// AST-based detection (no string fallback) — false positives from lib
+// names appearing in string literals or comments are not possible.
+func detectModelBlueprint(sess *duckdb.Session, projectDir, sql string) (string, string) {
+	reg, scanErrs := libregistry.ScanLenient(projectDir)
+	if reg.Empty() && len(scanErrs) > 0 {
+		return "", fmt.Sprintf("blueprint registry empty due to parse errors in lib/ (%d files failed)", len(scanErrs))
+	}
+
+	// Always serialize SQL → AST first. Walking the AST gives us the
+	// full set of TABLE_FUNCTION names, which we need to detect the
+	// "model uses a broken blueprint" case below.
+	if sess == nil || sql == "" {
+		return "", ""
+	}
+	astJSON, err := lineage.GetAST(sess, sql)
+	if err != nil {
+		return "", fmt.Sprintf("AST serialization failed: %v", err)
+	}
+	ast, err := duckast.Parse(astJSON)
+	if err != nil {
+		return "", fmt.Sprintf("AST parse failed: %v", err)
+	}
+
+	// Resolve registered TABLE_FUNCTION calls.
+	calls := libcall.Detect(ast, reg)
+	if len(calls) > 0 {
+		return calls[0].FuncName, ""
+	}
+
+	// No registered call matched. Check whether the AST has a
+	// TABLE_FUNCTION whose name corresponds to a blueprint that
+	// ScanLenient failed to parse — that's a verification gap, not a
+	// "no blueprint used" outcome.
+	if reg.Empty() {
+		return "", ""
+	}
+	for _, name := range libcall.AllTableFunctionNames(ast) {
+		if _, broken := scanErrs[name+".star"]; broken {
+			return "", fmt.Sprintf("model uses blueprint %q which failed to parse — cross-link unverified", name)
+		}
+	}
+	return "", ""
 }

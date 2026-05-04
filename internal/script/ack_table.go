@@ -40,9 +40,13 @@ func IsAcked(sess *duckdb.Session, claimID string) (bool, error) {
 }
 
 // DeleteAck removes an ack record after Badger has confirmed the ack.
-// At that point the crash-recovery window is closed and the record is no longer needed.
-func DeleteAck(sess *duckdb.Session, claimID string) {
-	sess.Exec(fmt.Sprintf(
+// At that point the crash-recovery window is closed and the record is
+// no longer needed. Returns the DELETE error so the caller can decide
+// whether to surface it as a warning — leaving stale rows in
+// _ondatra_acks isn't fatal but observers should know cleanup didn't
+// run (mirrors deleteSyncAck in internal/execute/sync_ack.go).
+func DeleteAck(sess *duckdb.Session, claimID string) error {
+	return sess.Exec(fmt.Sprintf(
 		"DELETE FROM _ondatra_acks WHERE claim_id = '%s'",
 		escapeAckSQL(claimID)))
 }

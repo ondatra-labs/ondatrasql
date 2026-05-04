@@ -45,7 +45,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		// Defer cleanup so the sandbox directory is removed on every exit
 		// path — including failures during InitSandbox or model execution.
 		// Defers are LIFO, so this runs AFTER the sess.Close() defer below.
-		defer os.RemoveAll(sandboxDir)
+		defer func() { _ = os.RemoveAll(sandboxDir) }() // ignored: best-effort temp-dir cleanup
 	}
 
 	// Generate a single dag_run_id for the entire DAG run
@@ -57,7 +57,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	// Scan lib/ for TABLE/SINK functions and register dummy macros
 	// so json_serialize_sql() accepts FROM lib_func(...) syntax
@@ -92,7 +92,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 			if !output.JSONEnabled {
 				fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
 				var answer string
-				fmt.Scanln(&answer)
+				_, _ = fmt.Scanln(&answer) // empty input falls through to safety default below
 				if answer != "y" && answer != "Y" {
 					return fmt.Errorf("sandbox cancelled by user")
 				}
@@ -139,7 +139,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	var totalRows int64
 	dagStart := time.Now()
 
-	execute.RunDAG(ctx, sess, sortedModels, dependents, dagRunID,
+	_, dagErrs := execute.RunDAG(ctx, sess, sortedModels, dependents, dagRunID,
 		gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL,
 		adminPort,
 		cfg.ProjectDir,
@@ -174,6 +174,23 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 			}
 		},
 	)
+
+	// Surface batch-level errors that aren't tied to a specific model
+	// (e.g. ComputeRunTypeDecisions failure under the _validation key).
+	// These are caught here rather than per-callback because the
+	// callback only fires per model that the runner actually attempted.
+	if validationErr, ok := dagErrs["_validation"]; ok {
+		return fmt.Errorf("dag pre-flight: %w", validationErr)
+	}
+
+	// Honour ctx cancellation. RunDAG returns partial results on SIGINT
+	// without a per-target error, so without this check the run would
+	// exit 0 even though only a prefix of the DAG committed. Surface
+	// the cancellation so the caller's exit code reflects an aborted
+	// run, not a clean one.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("dag run interrupted: %w", err)
+	}
 
 	// Print compact summary for non-sandbox runs
 	if !sandboxMode && !output.JSONEnabled {

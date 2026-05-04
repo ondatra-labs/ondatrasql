@@ -39,7 +39,7 @@ func loadModelsFromDir(cfg *config.Config) ([]*parser.Model, error) {
 
 	err := filepath.Walk(modelsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("walk %s: %w", path, err)
 		}
 
 		if info.IsDir() || !parser.IsModelFile(path) {
@@ -54,11 +54,18 @@ func loadModelsFromDir(cfg *config.Config) ([]*parser.Model, error) {
 		models = append(models, model)
 		return nil
 	})
-
-	return models, err
+	if err != nil {
+		return nil, fmt.Errorf("load models from %s: %w", modelsDir, err)
+	}
+	return models, nil
 }
 
 // findModel finds a model by target name or file path.
+//
+// Resilient to broken sibling models: a parse error in models/foo.sql
+// doesn't prevent looking up models/bar.sql. Only when the broken file
+// is itself the requested target does the parse error surface — that's
+// the only case where the caller cares.
 func findModel(cfg *config.Config, target string) (*parser.Model, error) {
 	// Check if it's a file path with a model extension (.sql)
 	if parser.IsModelFile(target) {
@@ -67,19 +74,72 @@ func findModel(cfg *config.Config, target string) (*parser.Model, error) {
 		}
 	}
 
-	// Load all models and find by target
-	models, err := loadModelsFromDir(cfg)
-	if err != nil {
-		return nil, err
+	modelsDir := cfg.ModelsPath
+	if _, err := os.Stat(modelsDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("models directory not found: %s", modelsDir)
 	}
 
-	for _, m := range models {
-		if m.Target == target {
-			return m, nil
+	var match *parser.Model
+	walkErr := filepath.Walk(modelsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("walk %s: %w", path, err)
 		}
+		if info.IsDir() || !parser.IsModelFile(path) {
+			return nil
+		}
+		model, parseErr := parser.ParseModel(path, cfg.ProjectDir)
+		if parseErr != nil {
+			// Tolerate a broken sibling — only surface its parse error if
+			// it happens to be the requested target. derivedTarget mirrors
+			// parser.ParseModel's deterministic schema.table mapping for
+			// SQL files: the on-disk path determines the target.
+			if derivedTargetFromPath(modelsDir, path) == target {
+				return fmt.Errorf("parse %s: %w", path, parseErr)
+			}
+			return nil
+		}
+		if model.Target == target {
+			match = model
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, filepath.SkipAll) {
+		return nil, fmt.Errorf("find model %q under %s: %w", target, modelsDir, walkErr)
 	}
-
+	if match != nil {
+		return match, nil
+	}
 	return nil, fmt.Errorf("model not found: %s", target)
+}
+
+// derivedTargetFromPath mirrors parser.ParseModel's schema.table mapping
+// from a file path under modelsDir, so findModel can decide whether a
+// broken file is the requested target without parsing it. The mapping
+// rules must stay in sync with parser.ParseModel:
+//
+//	models/orders.sql           → main.orders
+//	models/staging/orders.sql   → staging.orders
+//	models/raw/api/orders.sql   → raw.api__orders   (3+ deep folds with __)
+//
+// Directives can override the target via @target, but a broken file
+// that can't parse can't have a parsed directive either, so the
+// path-derived name is the only signal available for fail-routing.
+func derivedTargetFromPath(modelsDir, path string) string {
+	rel, err := filepath.Rel(modelsDir, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	rel = strings.TrimSuffix(rel, filepath.Ext(rel))
+	parts := strings.Split(rel, string(filepath.Separator))
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return "main." + parts[0]
+	default:
+		return parts[0] + "." + strings.Join(parts[1:], "__")
+	}
 }
 
 func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMode bool) error {
@@ -100,7 +160,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 		// path — including failures during InitSandbox or model execution.
 		// Without this, a failed run leaves a stale .sandbox/<pid>-<rand>
 		// subdir behind. Defers are LIFO, so this runs AFTER sess.Close().
-		defer os.RemoveAll(sandboxDir)
+		defer func() { _ = os.RemoveAll(sandboxDir) }() // ignored: best-effort temp-dir cleanup
 	}
 
 	// Generate dag_run_id
@@ -111,7 +171,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	// Scan lib/ and register dummy macros for FROM lib_func() syntax
 	libReg, err := libregistry.Scan(cfg.ProjectDir)
@@ -129,7 +189,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 			if !output.JSONEnabled {
 				fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
 				var answer string
-				fmt.Scanln(&answer)
+				_, _ = fmt.Scanln(&answer) // empty input falls through to safety default below
 				if answer != "y" && answer != "Y" {
 					return fmt.Errorf("sandbox cancelled by user")
 				}
@@ -215,22 +275,6 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	return nil
 }
 
-// runModelInSession executes a model using an existing shared session.
-// Used by run_all for efficient single-session DAG execution.
-func runModelInSession(ctx context.Context, cfg *config.Config, sess *duckdb.Session, model *parser.Model,
-	dagRunID string, runTypeDecisions execute.RunTypeDecisions) (*execute.Result, error) {
-
-	gitInfo := git.GetInfo(cfg.ProjectDir)
-
-	runner := execute.NewRunner(sess, execute.ModeRun, dagRunID)
-	runner.SetGitInfo(gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL)
-	runner.SetRunTypeDecisions(runTypeDecisions) // Use pre-computed decisions
-	runner.SetProjectDir(cfg.ProjectDir)
-
-	result, err := runner.Run(ctx, model)
-	return result, err
-}
-
 func printResult(result *execute.Result) {
 	if result == nil {
 		return
@@ -307,24 +351,33 @@ func emitModelResultJSON(result *execute.Result, dagRunID string, sandbox bool) 
 	case result.RunType == "skip":
 		status = "skip"
 	}
-	// Clean error messages for JSON too (strip DuckDB internal prefixes)
-	var cleanErrors []string
+	// Clean error messages for JSON too (strip DuckDB internal
+	// prefixes). Initialise non-nil slices for both Errors AND
+	// Warnings so the resulting JSON emits `[]` instead of `null`
+	// for the clean-run case (R10 #1 — Warnings/Errors are part of
+	// the documented "always emitted" envelope shape).
+	cleanErrors := []string{}
 	for _, e := range result.Errors {
 		cleanErrors = append(cleanErrors, cleanErrorMessage(e))
 	}
+	warnings := result.Warnings
+	if warnings == nil {
+		warnings = []string{}
+	}
 
 	output.EmitJSON(output.ModelResult{
-		Model:        result.Target,
-		Kind:         result.Kind,
-		RunType:      result.RunType,
-		RunReason:    result.RunReason,
-		RowsAffected: result.RowsAffected,
-		DurationMs:   result.Duration.Milliseconds(),
-		Status:       status,
-		Errors:       cleanErrors,
-		Warnings:     result.Warnings,
-		DagRunID:     dagRunID,
-		Sandbox:      sandbox,
+		SchemaVersion: output.ModelResultSchemaVersion,
+		Model:         result.Target,
+		Kind:          result.Kind,
+		RunType:       result.RunType,
+		RunReason:     result.RunReason,
+		RowsAffected:  result.RowsAffected,
+		DurationMs:    result.Duration.Milliseconds(),
+		Status:        status,
+		Errors:        cleanErrors,
+		Warnings:      warnings,
+		DagRunID:      dagRunID,
+		Sandbox:       sandbox,
 	})
 }
 
@@ -358,7 +411,7 @@ func showSandboxImpact(cfg *config.Config, target string) {
 		printEmptyLine()
 		return
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		printPaddedLine("(unable to analyze)")
@@ -371,6 +424,18 @@ func showSandboxImpact(cfg *config.Config, target string) {
 		printPaddedLine("(unable to analyze)")
 		printEmptyLine()
 		return
+	}
+
+	// Surface per-downstream lookup failures so the impact set isn't
+	// silently presented as exhaustive when some downstreams couldn't
+	// be classified. The "No downstream models affected" message below
+	// would otherwise be misleading when every downstream skipped.
+	if len(analysis.SkippedDownstreams) > 0 {
+		printPaddedLine(fmt.Sprintf("%d downstream lookup(s) failed:", len(analysis.SkippedDownstreams)))
+		for tgt, e := range analysis.SkippedDownstreams {
+			printPaddedLine(fmt.Sprintf("  ! %s: %s", tgt, truncateStr(e.Error(), 48)))
+		}
+		printEmptyLine()
 	}
 
 	if len(analysis.Impacts) == 0 {

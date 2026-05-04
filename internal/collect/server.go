@@ -18,6 +18,39 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
+// writeClaimError translates a typed Store error from
+// AckForTarget/NackForTarget into the appropriate HTTP response.
+//
+// ErrClaimNotFound and ErrClaimWrongTarget are client errors (400)
+// — the URL path doesn't match the claim's actual state. Anything
+// else is a backend failure (500).
+func writeClaimError(w http.ResponseWriter, err error) {
+	var wrong *ErrClaimWrongTarget
+	switch {
+	case errors.Is(err, ErrClaimNotFound):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	case errors.As(err, &wrong):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("ack/nack failed: %v", err))
+	}
+}
+
+// writeJSONError emits a structured error response with stable shape:
+//
+//	{"error": "<message>"}
+//
+// Both admin and public endpoints route ALL non-2xx responses through
+// this helper so callers see one Content-Type and one envelope shape
+// regardless of error class. (R8 #12 — pre-fix /claim returned JSON
+// on success but text/plain via http.Error on 4xx/5xx, mixing two
+// undocumented response contracts in the same endpoint.)
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg}) // HTTP write — client disconnect not actionable
+}
+
 // Server handles event collection (public) and flush operations (admin).
 // Two separate HTTP listeners:
 //   - Public: receives events from browsers/clients (port set via `ondatrasql events <port>`)
@@ -159,24 +192,24 @@ func (s *Server) resolveTarget(r *http.Request) (string, *parser.Model, error) {
 func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	target, model, err := s.resolveTarget(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {
-		http.Error(w, "read body failed", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "read body failed")
 		return
 	}
 
 	var event map[string]any
 	if err := json.Unmarshal(body, &event); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
 	if err := validateEvent(event, model); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -184,7 +217,7 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	addReceivedAt(event, model)
 
 	if err := s.store.Write(target, event); err != nil {
-		http.Error(w, "store failed", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "store failed")
 		return
 	}
 
@@ -196,26 +229,26 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCollectBatch(w http.ResponseWriter, r *http.Request) {
 	target, model, err := s.resolveTarget(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10MB limit
 	if err != nil {
-		http.Error(w, "read body failed", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "read body failed")
 		return
 	}
 
 	var events []map[string]any
 	if err := json.Unmarshal(body, &events); err != nil {
-		http.Error(w, "invalid JSON array", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON array")
 		return
 	}
 
 	// Validate all events before writing any (avoid partial writes)
 	for _, event := range events {
 		if err := validateEvent(event, model); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		addReceivedAt(event, model)
@@ -223,7 +256,7 @@ func (s *Server) handleCollectBatch(w http.ResponseWriter, r *http.Request) {
 
 	// Write all validated events
 	if err := s.store.WriteBatch(target, events); err != nil {
-		http.Error(w, "store failed", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "store failed")
 		return
 	}
 
@@ -233,7 +266,7 @@ func (s *Server) handleCollectBatch(w http.ResponseWriter, r *http.Request) {
 // handleHealth returns 200 OK.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok")) // health response — client disconnect not actionable
 }
 
 // handleClaim claims events for flushing to DuckLake.
@@ -241,20 +274,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	target, _, err := s.resolveTarget(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
 	limit := defaultLimit
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
+	// Distinguish `?limit=` (explicit empty value, programmer error) from
+	// no `?limit` parameter at all (legitimate, falls through to default).
+	// `URL.Query().Get` returns "" for both cases, so check the underlying
+	// map for presence. (R8 #10 — pre-fix `?limit=` bypassed the validator
+	// because Get returned "" and the empty-string short-circuit fell
+	// through to defaultLimit alongside the "no param" case.)
+	if l, present := r.URL.Query()["limit"]; present {
+		if len(l) == 0 || l[0] == "" {
+			writeJSONError(w, http.StatusBadRequest, "invalid limit \"\" (must be positive integer)")
+			return
 		}
+		// Reject `limit=abc`, `limit=0`, `limit=-5` etc. with 400.
+		// Pre-R7 these silently fell back to defaultLimit, hiding
+		// client bugs. The admin endpoint is a closed input contract.
+		parsed, err := strconv.Atoi(l[0])
+		if err != nil || parsed <= 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit %q (must be positive integer)", l[0]))
+			return
+		}
+		limit = parsed
 	}
 
 	claimID, events, err := s.store.Claim(target, limit)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("claim failed: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("claim failed: %v", err))
 		return
 	}
 
@@ -267,22 +316,30 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp) // HTTP write — client disconnect not actionable
 }
 
 // handleAck acknowledges a successful flush.
 // POST /flush/{schema}/{table}/ack  body: {"claim_id": "..."}
+//
+// Validation + delete are done atomically by Store.AckForTarget so a
+// reap between "does this claim exist" and "delete it" can't leave
+// the request returning 200 with no actual mutation. (R12 #3.)
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
+	target, _, err := s.resolveTarget(r)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var body struct {
 		ClaimID string `json:"claim_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ClaimID == "" {
-		http.Error(w, "missing claim_id", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing claim_id")
 		return
 	}
-
-	if err := s.store.Ack(body.ClaimID); err != nil {
-		http.Error(w, fmt.Sprintf("ack failed: %v", err), http.StatusInternalServerError)
+	if err := s.store.AckForTarget(body.ClaimID, target); err != nil {
+		writeClaimError(w, err)
 		return
 	}
 
@@ -292,16 +349,20 @@ func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
 // handleNack returns events to the queue after a failed flush.
 // POST /flush/{schema}/{table}/nack  body: {"claim_id": "..."}
 func (s *Server) handleNack(w http.ResponseWriter, r *http.Request) {
+	target, _, err := s.resolveTarget(r)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var body struct {
 		ClaimID string `json:"claim_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ClaimID == "" {
-		http.Error(w, "missing claim_id", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing claim_id")
 		return
 	}
-
-	if err := s.store.Nack(body.ClaimID); err != nil {
-		http.Error(w, fmt.Sprintf("nack failed: %v", err), http.StatusInternalServerError)
+	if err := s.store.NackForTarget(body.ClaimID, target); err != nil {
+		writeClaimError(w, err)
 		return
 	}
 
@@ -313,13 +374,13 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleInflight(w http.ResponseWriter, r *http.Request) {
 	target, _, err := s.resolveTarget(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
 	claimIDs, err := s.store.FindInflightClaims(target)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("find inflight: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("find inflight: %v", err))
 		return
 	}
 
@@ -329,7 +390,7 @@ func (s *Server) handleInflight(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp) // HTTP write — client disconnect not actionable
 }
 
 // validateEvent checks that required (NOT NULL) columns are present.

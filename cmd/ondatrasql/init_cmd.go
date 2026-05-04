@@ -337,7 +337,6 @@ CALL ducklake_flush_inlined_data('lake');
 func initMerge() string {
 	return `-- merge.sql - Merge small files for better performance
 -- Run with: ondatrasql merge
--- Preview with: ondatrasql merge sandbox
 --
 -- Merge small adjacent files into larger ones for better query performance.
 -- Preserves time travel and change data feed functionality.
@@ -351,7 +350,6 @@ CALL ducklake_merge_adjacent_files('lake');
 func initExpire() string {
 	return `-- expire.sql - Expire old snapshots
 -- Run with: ondatrasql expire
--- Preview with: ondatrasql expire sandbox
 --
 -- Expire old snapshots (removes metadata).
 -- Default: 30 days retention.
@@ -363,7 +361,6 @@ CALL ducklake_expire_snapshots('lake', older_than => now() - INTERVAL '30 days')
 func initCleanup() string {
 	return `-- cleanup.sql - Delete old files from expired snapshots
 -- Run with: ondatrasql cleanup
--- Preview with: ondatrasql cleanup sandbox
 --
 -- Delete data files from expired snapshots.
 -- Only removes files that are no longer referenced by any snapshot.
@@ -376,7 +373,6 @@ CALL ducklake_cleanup_old_files('lake', older_than => now() - INTERVAL '7 days')
 func initOrphaned() string {
 	return `-- orphaned.sql - Delete orphaned files
 -- Run with: ondatrasql orphaned
--- Preview with: ondatrasql orphaned sandbox
 --
 -- Delete orphaned files (files not referenced by any snapshot).
 -- Useful after failed writes or interrupted operations.
@@ -388,7 +384,6 @@ CALL ducklake_delete_orphaned_files('lake', older_than => now() - INTERVAL '7 da
 func initRewrite() string {
 	return `-- rewrite.sql - Rewrite data files with many deletes
 -- Run with: ondatrasql rewrite
--- Preview with: ondatrasql rewrite sandbox
 --
 -- Rewrites Parquet files that contain a high proportion of deleted rows.
 -- Improves read performance by physically removing deleted data.
@@ -402,7 +397,6 @@ CALL ducklake_rewrite_data_files('lake');
 func initCheckpoint() string {
 	return `-- checkpoint.sql - Run all maintenance in order
 -- Run with: ondatrasql checkpoint
--- Preview with: ondatrasql checkpoint sandbox
 --
 -- Runs all maintenance operations in the correct order:
 -- 1. Flush inlined data to Parquet files

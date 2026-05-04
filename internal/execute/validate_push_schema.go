@@ -39,7 +39,7 @@ import (
 // any expression (CONCAT, CASE, function call, arithmetic), JOIN, WHERE,
 // GROUP BY, aggregates, DISTINCT, ORDER BY, CTEs, subqueries — all
 // allowed. LIMIT/OFFSET is rejected by the cross-cutting validator.
-func validateStrictPushSchema(ast *duckast.AST, libCalls []LibCall) error {
+func validateStrictPushSchema(ast *duckast.AST, hasLibCalls bool) error {
 	if ast == nil {
 		return nil
 	}
@@ -54,14 +54,14 @@ func validateStrictPushSchema(ast *duckast.AST, libCalls []LibCall) error {
 	// (Note: phase 5's relationship rule already requires `@fetch` for
 	// any model with lib calls. The check here is the inverse: a model
 	// declared as `@push` cannot also be `@fetch`. Phase 3's parser
-	// rejects @fetch + @push, so libCalls being present on a @push
+	// rejects @fetch + @push, so a lib call being present on a @push
 	// model means lib detection found a registered lib in FROM but
 	// neither @fetch nor @push was set... which phase 5 already
 	// rejected. This belt-and-braces check makes the error attributable
 	// to @push rather than the relationship rule.)
-	if len(libCalls) > 0 {
+	if hasLibCalls {
 		return fmt.Errorf(
-			"@push models cannot have lib calls in FROM — that would be a @fetch model. Use a downstream @push model that reads from the @fetch-materialized table.",
+			"@push models cannot have lib calls in FROM — that would be a @fetch model. Use a downstream @push model that reads from the @fetch-materialized table",
 		)
 	}
 

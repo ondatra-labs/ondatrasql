@@ -1099,7 +1099,10 @@ func TestSession_InitSandbox_MissingProdCatalog(t *testing.T) {
 	// v0.12.1 (Bug S15 fix): friendly actionable error replaces the low-level
 	// "fork prod catalog: read ..." chain when the prod catalog file doesn't
 	// exist. The new message tells the user to run `ondatrasql run` first.
-	if !strings.Contains(err.Error(), "Run `ondatrasql run`") {
+	// Match case-insensitively because the SQLite-path message starts with
+	// lowercase "run" while the postgres-path message starts with uppercase
+	// "Run" — both refer to the same action.
+	if !strings.Contains(strings.ToLower(err.Error()), "run `ondatrasql run`") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

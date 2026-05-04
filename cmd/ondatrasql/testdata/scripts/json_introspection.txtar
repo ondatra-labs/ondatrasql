@@ -9,20 +9,23 @@ mkdir models/staging
 cp m.sql models/staging/orders.sql
 exec ondatrasql run staging.orders
 
-# --json stats — structured output on stdout
+# --json stats — structured output on stdout (snake_case + schema_version)
 exec ondatrasql --json stats
-stdout '"ModelCount":'
-stdout '"AllModels":'
-stdout '"Name":"staging.orders"'
+stdout '"schema_version":'
+stdout '"model_count":'
+stdout '"all_models":'
+stdout '"name":"staging.orders"'
 
-# --json history — structured output on stdout
+# --json history — structured output on stdout (snake_case keys + schema_version)
 exec ondatrasql --json history
 stdout '"runs":'
+stdout '"schema_version":'
 stdout 'staging.orders'
 
-# --json describe — structured output on stdout
+# --json describe — structured output on stdout (snake_case + schema_version)
 exec ondatrasql --json describe staging.orders
-stdout '"Target":"staging.orders"'
+stdout '"schema_version":'
+stdout '"target":"staging.orders"'
 
 -- m.sql --
 -- @kind: table

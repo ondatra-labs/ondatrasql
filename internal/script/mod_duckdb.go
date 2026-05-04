@@ -244,7 +244,7 @@ func lookupBuiltin(sess *duckdb.Session) *starlark.Builtin {
 			if err != nil {
 				continue
 			}
-			result.SetKey(sk, sv)
+			_ = result.SetKey(sk, sv) // SetKey only fails on unhashable keys; sk is starlark.String which is hashable
 		}
 
 		return result, nil

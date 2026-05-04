@@ -11,54 +11,38 @@ import (
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
+	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
 )
 
-// LibCall represents a detected lib function call in a SQL model's FROM clause.
+// LibCall is a detected lib function call augmented with runtime state.
+//
+// The static-analysis view (FuncName, CallIndex, Lib, ArgNodes, ASTNode)
+// lives in libcall.Call and is shared with the validate/describe paths.
+// Runtime-only fields (TempTable, ScriptResult) live here because they
+// are populated during materialize/Badger claim lifecycle.
 type LibCall struct {
-	FuncName     string               // lib function name (e.g. "gam_fetch")
-	CallIndex    int                  // unique index per call (0, 1, 2...) for dedup
-	Lib          *libregistry.LibFunc // registry entry
-	ArgNodes     []*duckast.Node      // raw AST arg expressions
-	ASTNode      *duckast.Node        // the TABLE_FUNCTION AST node (for identity matching in rewrite)
-	TempTable    string               // set after execution, used for AST rewrite
-	ScriptResult *script.Result       // set after execution, for Badger claim lifecycle
+	libcall.Call
+	TempTable    string         // set after execution, used for AST rewrite
+	ScriptResult *script.Result // set after execution, for Badger claim lifecycle
 }
 
-// detectLibCalls walks the AST and finds TABLE_FUNCTION nodes that match
-// registered lib functions. Returns a list of calls to execute.
+// detectLibCalls walks the AST for TABLE_FUNCTION nodes matching registered
+// lib functions and returns runtime-augmentable LibCall values. Thin
+// wrapper around libcall.Detect — the actual AST walk lives in the
+// libcall package so it can be reused by validate/describe without
+// pulling in the runtime.
 func detectLibCalls(ast *duckast.AST, reg *libregistry.Registry) []LibCall {
-	if ast == nil || reg == nil || reg.Empty() {
+	calls := libcall.Detect(ast, reg)
+	if len(calls) == 0 {
 		return nil
 	}
-
-	var calls []LibCall
-	callIndex := 0
-	ast.Walk(func(n *duckast.Node) bool {
-		if !n.IsTableFunction() {
-			return true
-		}
-		name := n.TableFunctionName()
-		if name == "" {
-			return true
-		}
-		lf := reg.Get(name)
-		if lf == nil || lf.IsSink {
-			return true // not a lib function or is a sink
-		}
-		calls = append(calls, LibCall{
-			FuncName:  name,
-			CallIndex: callIndex,
-			Lib:       lf,
-			ArgNodes:  n.TableFunctionArgs(),
-			ASTNode:   n,
-		})
-		callIndex++
-		return true
-	})
-
-	return calls
+	out := make([]LibCall, len(calls))
+	for i, c := range calls {
+		out[i] = LibCall{Call: c}
+	}
+	return out
 }
 
 // detectLibCallsFromSQL detects lib function calls by scanning raw SQL text.
@@ -70,6 +54,9 @@ func detectLibCalls(ast *duckast.AST, reg *libregistry.Registry) []LibCall {
 // acceptable because AST-based detection is the primary path; this fallback
 // only activates when the AST is unavailable, and false positives result in
 // a benign "lib function returned no data" rather than incorrect results.
+//
+// This fallback is bound to runtime: validate/describe paths must use
+// libcall.Detect or libcall.DetectInSQL, which never fall back to strings.
 func detectLibCallsFromSQL(sql string, reg *libregistry.Registry) []LibCall {
 	if reg == nil || reg.Empty() {
 		return nil
@@ -91,11 +78,11 @@ func detectLibCallsFromSQL(sql string, reg *libregistry.Registry) []LibCall {
 			if idx < 0 {
 				break
 			}
-			calls = append(calls, LibCall{
+			calls = append(calls, LibCall{Call: libcall.Call{
 				FuncName:  lf.Name,
 				CallIndex: callIndex,
 				Lib:       lf,
-			})
+			}})
 			callIndex++
 			search = search[idx+len(pattern):]
 		}
@@ -791,15 +778,15 @@ func validateFetchTopLevel(root *duckast.Node) error {
 		switch {
 		case from.IsJoin():
 			return fmt.Errorf(
-				"@fetch models must have exactly one lib call in FROM — JOIN is not allowed. Materialize the lib first, then JOIN in a downstream model.",
+				"@fetch models must have exactly one lib call in FROM — JOIN is not allowed; materialize the lib first, then JOIN in a downstream model",
 			)
 		case from.NodeType() == "BASE_TABLE":
 			return fmt.Errorf(
-				"@fetch models must have exactly one lib call in FROM — `FROM <table>` is not allowed. Lib functions live in lib/*.star and are called as `FROM lib_name(...)`.",
+				"@fetch models must have exactly one lib call in FROM — `FROM <table>` is not allowed; lib functions live in lib/*.star and are called as `FROM lib_name(...)`",
 			)
 		case from.NodeType() == "SUBQUERY":
 			return fmt.Errorf(
-				"@fetch models must have exactly one lib call in FROM — subqueries in FROM are not allowed. Move the subquery to a downstream model.",
+				"@fetch models must have exactly one lib call in FROM — subqueries in FROM are not allowed; move the subquery to a downstream model",
 			)
 		case from.NodeType() == "EMPTY":
 			return fmt.Errorf(
@@ -904,7 +891,7 @@ func validateSelectProjections(selectNode *duckast.Node, fetchMode bool) error {
 			child := item.Field("child")
 			if child == nil || child.Class() != "COLUMN_REF" {
 				return fmt.Errorf(
-					"@fetch projection %q must be `<col>::TYPE AS alias` — derived expressions, function calls, and arithmetic are not allowed in a @fetch model. Push the transformation to a downstream model that reads from this @fetch table.",
+					"@fetch projection %q must be `<col>::TYPE AS alias` — derived expressions, function calls, and arithmetic are not allowed in a @fetch model. Push the transformation to a downstream model that reads from this @fetch table",
 					alias,
 				)
 			}

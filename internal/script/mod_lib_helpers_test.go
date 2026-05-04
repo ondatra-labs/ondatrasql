@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"go.starlark.net/starlark"
+	"go.starlark.net/syntax"
 )
 
 // runStarlark evaluates `expr` in a thread that has lib_helpers
@@ -20,7 +21,7 @@ func runStarlark(t *testing.T, expr string) starlark.Value {
 	predeclared := starlark.StringDict{
 		"lib_helpers": libHelpersModule(),
 	}
-	v, err := starlark.Eval(thread, "test.star", expr, predeclared)
+	v, err := starlark.EvalOptions(&syntax.FileOptions{}, thread, "test.star", expr, predeclared)
 	if err != nil {
 		t.Fatalf("eval %q: %v", expr, err)
 	}
@@ -202,7 +203,7 @@ func TestToJSONSchema_RejectsBadInput(t *testing.T) {
 	t.Parallel()
 	thread := &starlark.Thread{Name: "test"}
 	predeclared := starlark.StringDict{"lib_helpers": libHelpersModule()}
-	_, err := starlark.Eval(thread, "test.star", `lib_helpers.to_json_schema(42)`, predeclared)
+	_, err := starlark.EvalOptions(&syntax.FileOptions{}, thread, "test.star", `lib_helpers.to_json_schema(42)`, predeclared)
 	if err == nil {
 		t.Fatal("expected error for int input")
 	}

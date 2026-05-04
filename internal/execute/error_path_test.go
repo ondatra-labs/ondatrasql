@@ -6,6 +6,8 @@ package execute
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,6 +241,92 @@ func TestRapid_ExtractLineage_ClosedSession(t *testing.T) {
 			rt.Fatal("expected error on closed session")
 		}
 	})
+}
+
+// TestRunDAG_PropagatesDecisionError regression-tests the dag_runner.go
+// fix that surfaces ComputeRunTypeDecisions failures via the
+// `_validation` errors-map slot. Previously the error was silently
+// dropped (`decisions, _ := ...`) so the DAG would proceed with an
+// empty decision map, causing every model to recompute via the
+// fall-back path even though the batch query was broken.
+func TestRunDAG_PropagatesDecisionError(t *testing.T) {
+	sess := mustClosedSession()
+
+	models := []*parser.Model{
+		{Target: "staging.x", Kind: "table", SQL: "SELECT 1 AS id"},
+	}
+	results, errors := RunDAG(context.Background(), sess, models, nil, "test-dag",
+		"", "", "", "", "", nil, nil)
+
+	if results != nil {
+		t.Errorf("results = %v, want nil when decisions failed", results)
+	}
+	if errors == nil || errors["_validation"] == nil {
+		t.Fatalf("expected _validation error key, got %v", errors)
+	}
+}
+
+// TestRunner_Run_PropagatesRunTypeError regression-tests the runner.go
+// fix that aborts on a failed ComputeSingleRunType instead of silently
+// falling back to a destructive `backfill` decision. The previous code
+// appended the error to result.Errors but kept executing — letting a
+// transient DB hiccup force a full re-fetch.
+func TestRunner_Run_PropagatesRunTypeError(t *testing.T) {
+	sess := mustClosedSession()
+	runner := NewRunner(sess, ModeRun, "test-runtype-abort")
+	model := &parser.Model{Target: "staging.x", Kind: "table", SQL: "SELECT 1 AS id"}
+
+	result, err := runner.Run(context.Background(), model)
+	if err == nil {
+		t.Fatal("expected error from Run() with closed session, got nil")
+	}
+	// The result should carry the error message rather than be a
+	// successful "backfill" run that hides the failure.
+	if result == nil || len(result.Errors) == 0 {
+		t.Errorf("expected result.Errors populated, got result=%+v", result)
+	}
+}
+
+// TestDeleteSyncAck_ReturnsError regression-tests the sync_ack.go fix
+// that promotes deleteSyncAck from a side-effect-only helper to one
+// that returns its DELETE error so the caller can surface a warning.
+// Previously a closed-session DELETE silently no-op'd.
+func TestDeleteSyncAck_ReturnsError(t *testing.T) {
+	sess := mustClosedSession()
+	if err := deleteSyncAck(sess, "claim-123"); err == nil {
+		t.Fatal("expected error from deleteSyncAck on closed session, got nil")
+	}
+}
+
+// TestRecordSyncAckCleanupWarning_SuccessNoOp asserts the warning
+// helper extracted from ackAll does nothing when deleteSyncAck
+// succeeded — the previous (inlined) code already had this behaviour
+// but the extraction must preserve it.
+func TestRecordSyncAckCleanupWarning_SuccessNoOp(t *testing.T) {
+	r := &Result{}
+	recordSyncAckCleanupWarning(r, nil)
+	if len(r.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want empty when err == nil", r.Warnings)
+	}
+}
+
+// TestRecordSyncAckCleanupWarning_AppendsOnFailure regression-tests
+// the push.go fix that promotes a swallowed deleteSyncAck failure to
+// a result.Warning. Pre-fix `deleteSyncAck(...)` was called for side
+// effects and any error was lost; ackAll therefore silently leaked
+// stale _sync_acked rows whenever the cleanup DELETE failed.
+func TestRecordSyncAckCleanupWarning_AppendsOnFailure(t *testing.T) {
+	r := &Result{}
+	recordSyncAckCleanupWarning(r, errors.New("disk full"))
+	if len(r.Warnings) != 1 {
+		t.Fatalf("Warnings = %d, want 1", len(r.Warnings))
+	}
+	if !strings.Contains(r.Warnings[0], "_sync_acked cleanup failed") {
+		t.Errorf("warning %q missing '_sync_acked cleanup failed' phrase", r.Warnings[0])
+	}
+	if !strings.Contains(r.Warnings[0], "disk full") {
+		t.Errorf("warning %q missing underlying error message", r.Warnings[0])
+	}
 }
 
 

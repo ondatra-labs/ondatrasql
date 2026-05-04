@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	duckdbdriver "github.com/duckdb/duckdb-go/v2"
+
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
@@ -181,7 +183,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Starlark script models (.star) are no longer supported as model files.
 	// Starlark is used only in lib/ blueprints via the API dict pattern.
 	if model.ScriptType != parser.ScriptTypeNone {
-		return nil, fmt.Errorf("Starlark script models (.star) are no longer supported. Use SQL models with lib/ blueprints instead")
+		return nil, fmt.Errorf("starlark script models (.star) are no longer supported — use SQL models with lib/ blueprints instead")
 	}
 
 
@@ -223,8 +225,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		decision, err = ComputeSingleRunType(r.sess, model, r.configHash)
 		r.trace(result, "run_type.compute", stepStart, "ok")
 		if err != nil {
+			// Abort rather than fall back to backfill — a transient DB error
+			// would otherwise force a destructive full re-fetch.
 			result.Errors = append(result.Errors, fmt.Sprintf("run_type check: %v", err))
-			decision = &RunTypeDecision{RunType: "backfill"} // Safe fallback
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("run_type check: %w", err)
 		}
 	}
 
@@ -281,7 +286,17 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		incrState, incrErr := backfill.GetIncrementalState(
 			r.sess, model.Target, model.Incremental, model.IncrementalInitial)
 		if incrErr != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("incremental state: %v", incrErr))
+			// State lookup failed (catalog read error, snapshots() down,
+			// MAX(cursor) failed). Don't proceed with NULL incr_* vars —
+			// the model's `WHERE col > getvariable('incr_last_value')`
+			// would evaluate to NULL and silently materialise 0 rows.
+			// Abort so the caller decides whether to retry or escalate.
+			// (Pre-fix this was masked by GetIncrementalState falling
+			// back to InitialValue; the strict-error contract surfaces
+			// the failure but the runner must respect it.)
+			result.Errors = append(result.Errors, fmt.Sprintf("incremental state: %v", incrErr))
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("incremental state for %s: %w", model.Target, incrErr)
 		}
 		if incrState != nil {
 			// Force is_backfill when the runner decided on backfill (e.g. hash changed).
@@ -291,12 +306,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				incrState.IsBackfill = true
 				incrState.LastValue = incrState.InitialValue
 			}
-			// Set DuckDB variables that SQL can reference via getvariable()
-			// Escape values to prevent SQL injection from data-driven cursors
-			r.sess.Exec(fmt.Sprintf("SET VARIABLE incr_last_value = '%s'", escapeSQL(incrState.LastValue)))
-			r.sess.Exec(fmt.Sprintf("SET VARIABLE incr_last_run = '%s'", escapeSQL(incrState.LastRun)))
-			r.sess.Exec(fmt.Sprintf("SET VARIABLE incr_is_backfill = %t", incrState.IsBackfill))
-			r.sess.Exec(fmt.Sprintf("SET VARIABLE incr_cursor = '%s'", escapeSQL(incrState.Cursor)))
+			if err := applyIncrementalVars(r.sess, incrState); err != nil {
+				result.Errors = append(result.Errors, err.Error())
+				result.Duration = time.Since(start)
+				return result, err
+			}
 		}
 		r.trace(result, "incremental.set_vars", stepStart, "ok")
 	}
@@ -308,12 +322,25 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Auto-detect tables and column lineage from SQL (single AST query)
 	stepStart = time.Now()
-	astJSON, _ := r.getAST(model.SQL)
+	astJSON, astErr := r.getAST(model.SQL)
+	if astErr != nil {
+		// Surface AST serialization failures so degraded lib-call /
+		// CDC / lineage paths are at least visible to the operator.
+		// Materialization itself still proceeds — DuckDB will surface
+		// a clearer error if the SQL is genuinely broken — but a
+		// transient json_serialize_sql hiccup would otherwise silently
+		// disable AST-driven validators and lineage capture.
+		result.Warnings = append(result.Warnings, fmt.Sprintf("AST serialize failed (lineage/CDC degraded): %v", astErr))
+	}
 
 	// Parse the AST once for cross-cutting validators and downstream uses.
 	// Parse failures are non-fatal here — DuckDB will surface a clearer
 	// error when the model actually executes. Validators tolerate nil AST.
-	parsedAST, _ := duckast.Parse(astJSON)
+	parsedAST, parseErr := duckast.Parse(astJSON)
+	if parseErr != nil && astErr == nil {
+		// Don't double-report when the upstream serialise already failed.
+		result.Warnings = append(result.Warnings, fmt.Sprintf("AST parse failed (lineage/CDC degraded): %v", parseErr))
+	}
 
 	// Cross-cutting parser rule: pipeline models must not contain LIMIT or
 	// OFFSET. Applies to every kind, every directive, every nesting level.
@@ -348,7 +375,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				break
 			}
 			for _, claimID := range sr.ClaimIDs {
-				script.DeleteAck(r.sess, claimID)
+				if err := script.DeleteAck(r.sess, claimID); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: delete ack record: %v\n", err)
+				}
 			}
 		}
 		if allOK {
@@ -362,9 +391,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				continue
 			}
 			if !libClaimsAcked && len(sr.ClaimIDs) > 0 {
-				sr.NackClaims()
+				_ = sr.NackClaims() // claim retries on next run if Nack fails
 			}
-			sr.Close()
+			_ = sr.Close() // cleanup path; close error secondary
 		}
 	}()
 	if r.libRegistry != nil && !r.libRegistry.Empty() {
@@ -417,7 +446,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// outermost SELECT projection only — the rest of the SQL is free
 	// shape construction.
 	if model.Push != "" {
-		if err := validateStrictPushSchema(parsedAST, libCalls); err != nil {
+		if err := validateStrictPushSchema(parsedAST, len(libCalls) > 0); err != nil {
 			return nil, fmt.Errorf("%s: %w", model.Target, err)
 		}
 	}
@@ -490,11 +519,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						}
 					}
 
-					// Inject incremental state as kwargs
+					// Inject incremental state as kwargs.
+					//
+					// Fail closed on read failure — pre-R7 the code logged a
+					// warning and fell through to synthetic
+					// is_backfill=true/empty cursor, which silently produced
+					// wrong rows (a fetch that should have been incremental
+					// would have re-pulled everything OR pulled nothing
+					// depending on the lib's defaults). A fetch with
+					// corrupted state is never the right answer; it must
+					// halt and surface the error so the operator can
+					// inspect catalog state.
 					incrState, incrErr := backfill.GetIncrementalState(
 						r.sess, model.Target, model.Incremental, model.IncrementalInitial)
 					if incrErr != nil {
-						result.Warnings = append(result.Warnings, fmt.Sprintf("lib %s incremental state: %v", call.FuncName, incrErr))
+						result.Errors = append(result.Errors, fmt.Sprintf("lib %s incremental state: %v", call.FuncName, incrErr))
+						return result, fmt.Errorf("lib %s incremental state for %s: %w", call.FuncName, model.Target, incrErr)
 					}
 					if incrState != nil && needsBackfill {
 						incrState.IsBackfill = true
@@ -507,6 +547,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						kwargs["cursor"] = incrState.Cursor
 						kwargs["initial_value"] = incrState.InitialValue
 					} else {
+						// GetIncrementalState returned (nil, nil) — no
+						// existing target table, so first-run backfill
+						// semantics with empty cursor is the correct
+						// initial state, NOT a fallback for an error path.
 						kwargs["is_backfill"] = true
 						kwargs["last_value"] = ""
 						kwargs["last_run"] = ""
@@ -530,15 +574,31 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 							pollInterval := 5 * time.Second
 							pollTimeout := 5 * time.Minute
 							pollBackoff := 1
+							// Reject zero/negative durations — pre-R8 a
+							// blueprint that set fetch_poll_interval="0s"
+							// (or a malformed value that parsed but landed
+							// negative) would either busy-spin in
+							// time.After(0) or trigger immediate timeout
+							// before the first poll. Fail closed instead.
 							if call.Lib.APIConfig.FetchPollInterval != "" {
-								if d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollInterval); err == nil {
-									pollInterval = d
+								d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollInterval)
+								if err != nil {
+									return nil, fmt.Errorf("lib %s fetch_poll_interval %q: %w", call.FuncName, call.Lib.APIConfig.FetchPollInterval, err)
 								}
+								if d <= 0 {
+									return nil, fmt.Errorf("lib %s fetch_poll_interval must be > 0 (got %v)", call.FuncName, d)
+								}
+								pollInterval = d
 							}
 							if call.Lib.APIConfig.FetchPollTimeout != "" {
-								if d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollTimeout); err == nil {
-									pollTimeout = d
+								d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollTimeout)
+								if err != nil {
+									return nil, fmt.Errorf("lib %s fetch_poll_timeout %q: %w", call.FuncName, call.Lib.APIConfig.FetchPollTimeout, err)
 								}
+								if d <= 0 {
+									return nil, fmt.Errorf("lib %s fetch_poll_timeout must be > 0 (got %v)", call.FuncName, d)
+								}
+								pollTimeout = d
 							}
 							if call.Lib.APIConfig.FetchPollBackoff > 0 {
 								pollBackoff = call.Lib.APIConfig.FetchPollBackoff
@@ -599,7 +659,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						for _, c := range call.Lib.Columns {
 							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.Name), c.Type))
 						}
-						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+						_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
 							return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
 						}
@@ -625,7 +685,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						for _, c := range shape {
 							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.name), c.sqlType))
 						}
-						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+						_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
 							return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
 						}
@@ -637,8 +697,12 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					// 3. SQL didn't reference any columns belonging to this
 					//    lib (e.g. `SELECT *` against a single lib source).
 					//    Fall back to cloning the existing target.
-					if targetExists, _ := r.tableExistsCheck(model.Target); targetExists {
-						r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName))
+					targetExists, existsErr := r.tableExistsCheck(model.Target)
+					if existsErr != nil {
+						return nil, fmt.Errorf("check target exists for empty-lib fallback: %w", existsErr)
+					}
+					if targetExists {
+						_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", stubName, model.Target)); err != nil {
 							return nil, fmt.Errorf("create empty lib stub from target %s: %w", model.Target, err)
 						}
@@ -698,7 +762,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				}
 
 				// Re-parse AST for lineage/CDC (now references temp tables, not lib functions)
-				astJSON, _ = r.getAST(state.Current())
+				var rewriteASTErr error
+				astJSON, rewriteASTErr = r.getAST(state.Current())
+				if rewriteASTErr != nil {
+					// Post-rewrite AST drives lineage + CDC. A failure
+					// here silently strips column lineage from the
+					// downstream impact analysis — surface it.
+					result.Warnings = append(result.Warnings, fmt.Sprintf("post-rewrite AST serialize failed (lineage/CDC degraded): %v", rewriteASTErr))
+				}
 			}
 	}  // end if r.libRegistry != nil
 	// state.Rewritten() is now the post-lib-rewrite SQL — used as retry target
@@ -806,14 +877,25 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				schema, table := parts[0], parts[1]
 				// Set search_path to include the source schema for table_changes()
 				// (which takes bare table name). Restore default search_path after.
-				r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
-					escapeSQL(r.sess.CatalogAlias()), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath())))
+				// A failure on either set or restore means subsequent
+				// table_changes() calls or model SQL would run against
+				// the wrong scope — propagate so the iteration aborts
+				// rather than silently corrupting the gate.
+				if err := r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
+					escapeSQL(r.sess.CatalogAlias()), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath()))); err != nil {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("set search_path for table_changes gate (%s): %v", t, err))
+					hasChanges = true
+					insertOnly = false
+					break
+				}
 				cnt, err := r.sess.TableHasChanges(table, snapshotID+1, currSnap)
 				if err != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("table_changes gate failed for %s: %v", t, err))
 					hasChanges = true
 					insertOnly = false
-					r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
+					if restoreErr := r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath()))); restoreErr != nil {
+						result.Warnings = append(result.Warnings, fmt.Sprintf("restore search_path after gate failure: %v", restoreErr))
+					}
 					break
 				}
 				if cnt > 0 {
@@ -823,7 +905,12 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						insertOnly = false
 					}
 				}
-				r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
+				if err := r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath()))); err != nil {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("restore search_path after CDC gate (%s): %v", t, err))
+					// Don't break — the gate decision is already made;
+					// surface the warning so an operator notices the
+					// scope leak.
+				}
 			}
 		}
 		r.trace(result, "cdc.table_changes_gate", stepStart, "ok")
@@ -957,18 +1044,21 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			r.trace(result, "create_temp", stepStart, "retry_describe")
 			descRows, descErr := r.sess.QueryRows(fmt.Sprintf("SELECT column_name || ' ' || column_type FROM (DESCRIBE %s)", state.Current()))
 			if descErr == nil && len(descRows) > 0 {
-				r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+				_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 				descCreateSQL := fmt.Sprintf("CREATE TEMP TABLE %s (%s)", tmpTable, strings.Join(descRows, ", "))
 				if createErr := r.sess.Exec(descCreateSQL); createErr != nil {
 					return nil, fmt.Errorf("create temp table from DESCRIBE: %w", createErr)
 				}
 			} else {
 				// DESCRIBE also failed — fall back to target clone
-				targetExists, _ := r.tableExistsCheck(model.Target)
+				targetExists, existsErr := r.tableExistsCheck(model.Target)
+				if existsErr != nil {
+					return nil, fmt.Errorf("check target exists after DESCRIBE failure: %w", existsErr)
+				}
 				if !targetExists {
 					return nil, fmt.Errorf("create temp table: %w", err)
 				}
-				r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+				_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 				cloneSQL := fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", tmpTable, model.Target)
 				if cloneErr := r.sess.Exec(cloneSQL); cloneErr != nil {
 					return nil, fmt.Errorf("create temp table (fallback clone): %w", cloneErr)
@@ -1087,7 +1177,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// transaction within a transaction". Best-effort: ignore any
 		// error from the ROLLBACK itself (the session might already be
 		// clean if the error came from a non-transactional path).
-		r.sess.Exec("ROLLBACK")
+		_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
 
 		// Lib-call Badger claim handling on materialize failure
 		// (same logic as script.go: audit fail → ack, other fail → nack)
@@ -1136,15 +1226,28 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	if model.Push != "" {
 		// Get post-commit snapshot. All sink kinds need this:
 		// All sink-enabled kinds need table_changes() range
+		// A failure here is fatal for the push step — postCommitSnapshot=0
+		// would make createPushDelta interpret as "no delta" and silently
+		// omit newly-committed rows from outbound sync. Abort with an
+		// error rather than letting the push silently push zero rows.
 		var postCommitSnapshot int64
-		if err := r.sess.RefreshSnapshot(); err == nil {
-			postCommitSnapshot, _ = r.sess.GetCurrentSnapshot()
+		if err := r.sess.RefreshSnapshot(); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("refresh snapshot for push delta: %v", err))
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("refresh snapshot for %s push: %w", model.Target, err)
+		}
+		var snapErr error
+		postCommitSnapshot, snapErr = r.sess.GetCurrentSnapshot()
+		if snapErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("read current snapshot for push delta: %v", snapErr))
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("get current snapshot for %s push: %w", model.Target, snapErr)
 		}
 
 		// Set search_path so table_changes() can resolve bare table name
 		schema, _ := splitSchemaTable(model.Target)
 		if schema != "" {
-			r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
+			_ = r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'", // search_path is restored on a later set; failure here means subsequent queries hit the previous scope (pre-existing pattern)
 				escapeSQL(r.sess.CatalogAlias()), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath())))
 		}
 
@@ -1152,7 +1255,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		sinkEvents, deltaErr := r.createPushDelta(model, tmpTable, preCommitSnapshot, postCommitSnapshot)
 
 		if schema != "" {
-			r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
+			_ = r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath()))) // search_path is restored on a later set; failure here means subsequent queries hit the previous scope (pre-existing pattern)
 		}
 
 		if deltaErr != nil {
@@ -1276,7 +1379,7 @@ func (r *Runner) tableExistsInCatalog(table, catalog string) (bool, error) {
 
 // cleanup removes the temp table.
 func (r *Runner) cleanup(tmpTable string) {
-	r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+	_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
 }
 
 // runWarnings runs warning validations (log only, no rollback).
@@ -1293,8 +1396,13 @@ func (r *Runner) runWarnings(model *parser.Model, table string, result *Result) 
 	// Set search_path so delta macros can resolve table_changes() + memory macros.
 	parts := strings.SplitN(model.Target, ".", 2)
 	if len(parts) == 2 {
-		r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'", escapeSQL(r.sess.CatalogAlias()), escapeSQL(parts[0]), escapeSQL(r.sess.DefaultSearchPath())))
-		defer r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
+		// search_path scoping; restore via deferred set below.
+		_ = r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'", escapeSQL(r.sess.CatalogAlias()), escapeSQL(parts[0]), escapeSQL(r.sess.DefaultSearchPath())))
+		defer func() {
+			// Restore search_path on function exit; if this fails the caller
+			// sees the temp scope until they next set it.
+			_ = r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath())))
+		}()
 	}
 
 	for _, warning := range model.Warnings {
@@ -1582,8 +1690,16 @@ func (r *Runner) detectSchemaEvolution(
 	}
 
 	stepStart = time.Now()
-	prevSchema, _ := backfill.GetPreviousSchema(r.sess, model.Target)
+	prevSchema, prevErr := backfill.GetPreviousSchema(r.sess, model.Target)
 	r.trace(result, "schema.get_previous", stepStart, "ok")
+	if prevErr != nil {
+		// Surface metadata-read failures as a warning rather than
+		// silently treating "no previous schema" as the equivalent of
+		// "fresh table" — a transient catalog read error would otherwise
+		// suppress legitimate schema-change warnings and rebuild
+		// decisions for an existing table.
+		result.Warnings = append(result.Warnings, fmt.Sprintf("read previous schema for %s: %v", model.Target, prevErr))
+	}
 
 	// Filter out kind-specific columns from prevSchema before comparison.
 	// These are added by materialization (SCD2 adds is_current etc., tracked

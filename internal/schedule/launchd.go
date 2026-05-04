@@ -109,23 +109,40 @@ func (l *launchdBackend) Install(projectName, projectDir, cronExpr, binaryPath s
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-
-	if err := tmpl.Execute(f, map[string]string{
+	// Don't `defer f.Close()` — that swallows the Close error which
+	// for a write handle indicates flush/data-loss. Close explicitly
+	// after Execute and propagate the error. (Per
+	// https://www.joeshaw.org/dont-defer-close-on-writable-files/)
+	if execErr := tmpl.Execute(f, map[string]string{
 		"Label":    label,
 		"Binary":   binaryPath,
 		"Dir":      projectDir,
 		"LogPath":  logPath,
 		"Schedule": schedule,
 		"Cron":     cronExpr,
-	}); err != nil {
-		return "", err
+	}); execErr != nil {
+		_ = f.Close() // primary error already set
+		return "", execErr
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close plist file: %w", err)
 	}
 
-	// Load (skipped in test mode)
+	// Load (skipped in test mode). The pre-emptive unload covers the
+	// case where the same plist label is already loaded — typical when
+	// re-installing with a new cron expression. unload fails are
+	// expected (plist not loaded) so we don't surface them; load fails
+	// are real and propagated.
+	//
+	// On load failure, roll back the plist file we just wrote. Without
+	// rollback the on-disk plist is visible to `launchctl list` (after
+	// next login) but never actually loaded, which leaves the user with
+	// a confusingly-half-installed schedule that Status reports as
+	// "installed but inactive".
 	if l.useLaunchctl() {
-		_ = exec.Command("launchctl", "unload", path).Run() // best-effort
+		_ = exec.Command("launchctl", "unload", path).Run() //nolint:errcheck // unload errors are expected on first install (plist not yet loaded); the subsequent load() surfaces real failures.
 		if err := runCmd("launchctl", "load", path); err != nil {
+			_ = os.Remove(path)
 			return "", err
 		}
 	}
@@ -172,8 +189,30 @@ func (l *launchdBackend) Status(projectName string) (*Status, error) {
 	}
 
 	if l.useLaunchctl() {
-		out, _ := exec.Command("launchctl", "list", l.label(projectName)).CombinedOutput()
-		st.Active = !strings.Contains(string(out), "Could not find service")
+		// `launchctl list <label>` exits 0 with a plist-formatted dump
+		// when the job is loaded, exits non-zero with "Could not find
+		// service" on stderr when it isn't, and fails entirely (no
+		// such binary, etc.) when launchctl is missing or broken. We
+		// must distinguish the second case from the third: ignoring
+		// the run error meant a missing launchctl produced empty
+		// stdout, and the original `!Contains(..., "Could not find
+		// service")` check then reported Active=true incorrectly.
+		// (R6 finding.)
+		cmd := exec.Command("launchctl", "list", l.label(projectName))
+		out, runErr := cmd.CombinedOutput()
+		switch {
+		case runErr != nil && cmd.ProcessState != nil && cmd.ProcessState.Exited():
+			// launchctl ran and reported the job is not loaded.
+			st.Active = false
+		case runErr != nil:
+			// launchctl is missing/broken — we can't determine state.
+			// Surface the failure on stderr so the operator notices
+			// rather than silently assuming inactive.
+			fmt.Fprintf(os.Stderr, "warning: launchctl list %s failed: %v\n", l.label(projectName), runErr)
+			st.Active = false
+		default:
+			st.Active = !strings.Contains(string(out), "Could not find service")
+		}
 	}
 	return st, nil
 }

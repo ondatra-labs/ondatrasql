@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"go.starlark.net/syntax"
@@ -80,6 +81,17 @@ func Scan(projectDir string) (*Registry, error) {
 	reg := &Registry{funcs: make(map[string]*LibFunc)}
 	libDir := filepath.Join(projectDir, "lib")
 
+	// Symlink containment: reject lib/ if it resolves outside projectDir.
+	// Without this, a malicious or accidental external symlink could
+	// inject blueprints from outside the project as if they were
+	// trusted lib/*.star files. Same hardening as ScanLenient.
+	absProj := resolveProjectDir(projectDir)
+	if real, symErr := filepath.EvalSymlinks(libDir); symErr == nil {
+		if !pathInsideProject(absProj, real) {
+			return nil, fmt.Errorf("lib/ resolves outside project directory (%s → %s)", libDir, real)
+		}
+	}
+
 	entries, err := os.ReadDir(libDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -94,9 +106,17 @@ func Scan(projectDir string) (*Registry, error) {
 		}
 
 		path := filepath.Join(libDir, e.Name())
+		// Per-file containment: each `lib/foo.star` must also resolve
+		// inside projectDir. Otherwise an individual file symlink can
+		// point at /etc/passwd or external tooling code.
+		if real, symErr := filepath.EvalSymlinks(path); symErr == nil {
+			if !pathInsideProject(absProj, real) {
+				return nil, fmt.Errorf("lib/%s resolves outside project directory (%s → %s)", e.Name(), path, real)
+			}
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("read lib/%s: %w", e.Name(), err)
 		}
 
 		name := strings.TrimSuffix(e.Name(), ".star")
@@ -117,6 +137,85 @@ func Scan(projectDir string) (*Registry, error) {
 // NewRegistryForTest creates a registry from a map of lib functions (test helper).
 func NewRegistryForTest(funcs map[string]*LibFunc) *Registry {
 	return &Registry{funcs: funcs}
+}
+
+// ScanLenient is like Scan but never aborts on a single bad blueprint.
+// Returns a registry containing every lib that parsed successfully,
+// plus a per-file error map for the ones that didn't.
+//
+// Used by `describe <model>` so that one broken `.star` file doesn't
+// silently strip the blueprint cross-link from describe output for
+// every model in the project. The runtime path keeps using Scan and
+// the strict abort-on-error contract.
+func ScanLenient(projectDir string) (*Registry, map[string]error) {
+	reg := &Registry{funcs: make(map[string]*LibFunc)}
+	libDir := filepath.Join(projectDir, "lib")
+
+	// Resolve symlinks on lib/ and verify the real path stays within
+	// projectDir. Without this, `lib/` could be a symlink to an external
+	// tree and validate/describe/describe-blueprint would silently
+	// ingest blueprints from outside the project as if they were
+	// trusted lib/*.star files.
+	absProj := resolveProjectDir(projectDir)
+	if real, symErr := filepath.EvalSymlinks(libDir); symErr == nil {
+		if !pathInsideProject(absProj, real) {
+			return reg, map[string]error{"<lib-dir>": fmt.Errorf("lib/ resolves outside project directory (%s → %s)", libDir, real)}
+		}
+	}
+
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return reg, nil
+		}
+		// Use a sentinel filename for the directory-level error so
+		// consumers (which key by base filename for in-scope dedup)
+		// don't get a malformed absolute-path key.
+		return reg, map[string]error{"<lib-dir>": fmt.Errorf("read %s: %w", libDir, err)}
+	}
+
+	var errs map[string]error
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".star") {
+			continue
+		}
+		path := filepath.Join(libDir, e.Name())
+		// Per-file containment: skip individual file symlinks that
+		// resolve outside projectDir. Reported as a per-file error so
+		// the user sees the rejection rather than wondering why their
+		// blueprint disappeared.
+		if real, symErr := filepath.EvalSymlinks(path); symErr == nil {
+			if !pathInsideProject(absProj, real) {
+				if errs == nil {
+					errs = map[string]error{}
+				}
+				errs[e.Name()] = fmt.Errorf("rejected: file resolves outside project directory (%s → %s)", path, real)
+				continue
+			}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if errs == nil {
+				errs = map[string]error{}
+			}
+			errs[e.Name()] = err
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".star")
+		relPath := filepath.Join("lib", e.Name())
+		lf, err := parseLibFile(name, relPath, string(data))
+		if err != nil {
+			if errs == nil {
+				errs = map[string]error{}
+			}
+			errs[e.Name()] = err
+			continue
+		}
+		if lf != nil {
+			reg.funcs[name] = lf
+		}
+	}
+	return reg, errs
 }
 
 // Get returns the lib function with the given name, or nil.
@@ -157,6 +256,24 @@ func (r *Registry) PushFuncs() []*LibFunc {
 // Empty returns true if no lib functions were found.
 func (r *Registry) Empty() bool {
 	return r == nil || len(r.funcs) == 0
+}
+
+// List returns all registered lib functions sorted by name.
+// Order is deterministic so callers (e.g. `describe blueprint` listing) get stable output.
+func (r *Registry) List() []*LibFunc {
+	if r == nil {
+		return nil
+	}
+	names := make([]string, 0, len(r.funcs))
+	for name := range r.funcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]*LibFunc, 0, len(names))
+	for _, name := range names {
+		result = append(result, r.funcs[name])
+	}
+	return result
 }
 
 // SQLExecutor can execute SQL statements. Satisfied by *duckdb.Session.
@@ -213,6 +330,18 @@ func buildMacroSQL(lf *LibFunc) string {
 
 	b.WriteString(" WHERE false")
 	return b.String()
+}
+
+// ParseLibFile parses a single .star file and extracts the API dict.
+//
+// Returns (nil, nil) if the file has no API dict (helper library — Scan()
+// silently skips these). Returns an error for malformed Starlark or an
+// API dict that fails validation.
+//
+// Exposed for the `validate` CLI command, which needs to surface the
+// parse error per file rather than abort the whole scan.
+func ParseLibFile(name, relPath, code string) (*LibFunc, error) {
+	return parseLibFile(name, relPath, code)
 }
 
 // parseLibFile parses a single .star file and extracts the API dict.
@@ -726,6 +855,45 @@ func validateFunc(lf *LibFunc, isSink bool, f *syntax.File) error {
 	return nil
 }
 
+// ExtractSignatures walks all top-level def-statements in a parsed Starlark
+// file and returns a map from function name to its parameter-name list.
+//
+// Used by `describe blueprint` to surface fetch/submit/check/fetch_result/push
+// signatures without re-running validateFunc/validateAsyncParam (which only
+// return error/nil and don't expose the parameter list).
+//
+// Parameter handling matches validateFunc:
+//   - *syntax.Ident          → bare name
+//   - *syntax.BinaryExpr     → name with default value (only the name is kept)
+//   - *syntax.UnaryExpr      → *args / **kwargs (skipped)
+func ExtractSignatures(f *syntax.File) map[string][]string {
+	if f == nil {
+		return nil
+	}
+	out := make(map[string][]string)
+	for _, stmt := range f.Stmts {
+		def, ok := stmt.(*syntax.DefStmt)
+		if !ok {
+			continue
+		}
+		params := make([]string, 0, len(def.Params))
+		for _, p := range def.Params {
+			switch v := p.(type) {
+			case *syntax.Ident:
+				params = append(params, v.Name)
+			case *syntax.BinaryExpr:
+				if ident, ok := v.X.(*syntax.Ident); ok {
+					params = append(params, ident.Name)
+				}
+			case *syntax.UnaryExpr:
+				continue
+			}
+		}
+		out[def.Name.Name] = params
+	}
+	return out
+}
+
 // cloneAPIConfig creates a shallow copy of an APIConfig.
 func cloneAPIConfig(src *APIConfig) *APIConfig {
 	dst := *src
@@ -917,6 +1085,44 @@ func literalBool(expr syntax.Expr) bool {
 		return false
 	}
 	return ident.Name == "True"
+}
+
+// resolveProjectDir returns the canonicalised projectDir suitable for
+// path-containment comparison. Falls through `EvalSymlinks → Abs → ""`
+// so a missing or unresolvable projectDir doesn't crash the scanner.
+//
+// Required because on macOS `/var → /private/var` symlinks make
+// `t.TempDir()` produce `/var/folders/...` paths whose
+// `EvalSymlinks` form is `/private/var/folders/...`. Without
+// canonicalising the projectDir the same way the resolved file
+// paths are canonicalised, every legitimate path would be flagged
+// as "resolves outside project directory" — which is exactly the
+// macOS unit-test failure observed on the v0.31 release tag push.
+func resolveProjectDir(projectDir string) string {
+	if real, err := filepath.EvalSymlinks(projectDir); err == nil {
+		if abs, err := filepath.Abs(real); err == nil {
+			return abs
+		}
+	}
+	abs, _ := filepath.Abs(projectDir)
+	return abs
+}
+
+// pathInsideProject reports whether `realPath` (already canonicalised
+// via EvalSymlinks) is contained inside `absProject` (already
+// canonicalised via resolveProjectDir).
+func pathInsideProject(absProject, realPath string) bool {
+	if absProject == "" {
+		return true // can't validate; let callers proceed
+	}
+	absReal, err := filepath.Abs(realPath)
+	if err != nil {
+		return false
+	}
+	if absReal == absProject {
+		return true
+	}
+	return strings.HasPrefix(absReal+string(filepath.Separator), absProject+string(filepath.Separator))
 }
 
 // extractStringList extracts a list of strings from a Starlark list expression.

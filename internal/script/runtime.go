@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -23,6 +24,59 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 )
+
+// recoverScriptPanic converts a panic into an error written through
+// errOut. Used as `defer recoverScriptPanic(&err)` at the top of every
+// public Runtime entry point so a Go-side builtin/helper panic
+// surfaces as a normal error rather than crashing the host process.
+//
+// Returned error has a STABLE prefix `starlark execution panicked: `
+// (callers can `strings.HasPrefix` on it). The suffix is the panic
+// value rendered via panicValueString below — explicitly NOT plain
+// `%v` so a struct/map/error panic produces a deterministic suffix
+// instead of Go's default formatter (which emits non-canonical
+// braces, quotes, and field-order-dependent text). The stack trace
+// is written separately to stderr because:
+//
+//   - debug.Stack() output isn't a stable cross-Go-version contract;
+//     embedding it in the error baked instability into the public
+//     surface.
+//   - Stack frames carry absolute build-host paths, which leak when
+//     an error is logged to a downstream system or surfaced
+//     verbatim in a JSON envelope.
+//
+// Operators still get the stack on stderr where it belongs as
+// diagnostic output, separate from the error contract.
+func recoverScriptPanic(errOut *error) {
+	if r := recover(); r != nil {
+		fmt.Fprintf(os.Stderr, "starlark execution panicked: %s\n%s", panicValueString(r), debug.Stack())
+		*errOut = fmt.Errorf("starlark execution panicked: %s", panicValueString(r))
+	}
+}
+
+// panicValueString renders a recovered panic value with a stable
+// suffix shape:
+//
+//   - error    → its Error() text
+//   - string   → the string itself
+//   - other    → "<type>: <%v formatting>" so the type prefix
+//                disambiguates structurally-different values that
+//                happen to format the same, AND non-string panic
+//                values still produce traceable diagnostic text.
+//
+// (R9 #7: pre-fix used bare `%v`, so a struct/map panic value emitted
+// non-canonical braces and field-order-dependent text — incompatible
+// with the documented "stable prefix" contract.)
+func panicValueString(r any) string {
+	switch v := r.(type) {
+	case error:
+		return v.Error()
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%T: %v", r, r)
+	}
+}
 
 // AbortError is returned when a script calls abort() for a clean early exit.
 type AbortError struct{}
@@ -296,7 +350,8 @@ func (r *Runtime) makeLoadFunc(ctx context.Context, libPredeclared starlark.Stri
 
 // Run executes a Starlark script and returns a temp table with collected data.
 // The executor should then use materialize() to handle backfill, schema evolution, etc.
-func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error) {
+func (r *Runtime) Run(ctx context.Context, target, code string) (result *Result, err error) {
+	defer recoverScriptPanic(&err)
 	start := time.Now()
 
 	// Create collector: Badger-backed (durable) or in-memory
@@ -321,7 +376,7 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 	if bc != nil {
 		defer func() {
 			if !succeeded {
-				bc.close()
+				_ = bc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -362,14 +417,14 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 	// Ad-hoc Run() uses permissive options (top-level if/for/while OK,
 	// global reassign OK). Blueprints loaded via load() get the strict
 	// blueprintFileOptions instead.
-	_, err := starlark.ExecFileOptions(adhocFileOptions(), thread, target+".star", code, predeclared)
+	_, err = starlark.ExecFileOptions(adhocFileOptions(), thread, target+".star", code, predeclared)
 	if err != nil {
 		return nil, fmt.Errorf("run script: %w", err)
 	}
 
 	// Return result with collector for deferred temp table creation.
 	// The caller should call result.CreateTempTable() after resuming DuckDB.
-	result := &Result{
+	result = &Result{
 		Duration: time.Since(start),
 		RowCount: int64(collector.count()),
 		// Script-kind models don't currently flow through the lib smart-skip
@@ -392,7 +447,8 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (*Result, error)
 // calling it directly via starlark.Call(). This avoids generating Starlark source
 // code as a string — config values are converted to Starlark values in Go and
 // passed as keyword arguments.
-func (r *Runtime) RunSource(ctx context.Context, target, source string, config map[string]any) (*Result, error) {
+func (r *Runtime) RunSource(ctx context.Context, target, source string, config map[string]any) (result *Result, err error) {
+	defer recoverScriptPanic(&err)
 	start := time.Now()
 
 	// Create collector: Badger-backed (durable) or in-memory
@@ -417,7 +473,7 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 	if bc != nil {
 		defer func() {
 			if !succeeded {
-				bc.close()
+				_ = bc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -496,7 +552,7 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 		return nil, fmt.Errorf("run source: %w", err)
 	}
 
-	result := &Result{
+	result = &Result{
 		Duration: time.Since(start),
 		RowCount: int64(collector.count()),
 		// Legacy save.row() libs have no contract for declaring empty
@@ -516,7 +572,8 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 // RunSourcePaginated executes a paginated fetch from lib/<source>.star.
 // Runtime calls fetch(page, **kwargs) per page until next is None.
 // fetch() returns {"rows": [...], "next": cursor_or_none}.
-func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string, config map[string]any, pageSize int, httpCfg ...*apiHTTPConfig) (*Result, error) {
+func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string, config map[string]any, pageSize int, httpCfg ...*apiHTTPConfig) (result *Result, err error) {
+	defer recoverScriptPanic(&err)
 	start := time.Now()
 
 	var cfg *apiHTTPConfig
@@ -543,7 +600,7 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 	if bc != nil {
 		defer func() {
 			if !succeeded {
-				bc.close()
+				_ = bc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -685,7 +742,7 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 		}
 	}
 
-	result := &Result{
+	result = &Result{
 		Duration:    time.Since(start),
 		RowCount:    int64(collector.count()),
 		EmptyResult: emptyIntent,
@@ -701,7 +758,8 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 
 // RunSourceAsync executes an async fetch blueprint: submit() → poll check() → fetch_result().
 // Runtime handles the poll loop with interval, backoff, and timeout from API config.
-func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, config map[string]any, pageSize int, pollInterval, pollTimeout time.Duration, pollBackoff int, httpCfg ...*apiHTTPConfig) (*Result, error) {
+func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, config map[string]any, pageSize int, pollInterval, pollTimeout time.Duration, pollBackoff int, httpCfg ...*apiHTTPConfig) (result *Result, err error) {
+	defer recoverScriptPanic(&err)
 	start := time.Now()
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
@@ -727,7 +785,7 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 	if bc != nil {
 		defer func() {
 			if !succeeded {
-				bc.close()
+				_ = bc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -799,17 +857,75 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		return &Result{Duration: time.Since(start), EmptyResult: EmptyNoChange}, nil
 	}
 
-	// Phase 2: poll check() until done
+	// Phase 2: poll check() until done.
 	checkKwargs := []starlark.Tuple{
 		{starlark.String("job_ref"), submitRet},
 	}
+	const maxPollInterval = 30 * time.Second
+	// Cap the initial pollInterval so a misconfigured blueprint with
+	// `fetch_poll_interval: "10m"` can't stall a single iteration
+	// past pollTimeout. Validation in runner.go already rejects
+	// non-positive values, so we only need to clamp the upper bound.
 	currentInterval := pollInterval
+	if currentInterval > maxPollInterval {
+		currentInterval = maxPollInterval
+	}
 	pollStart := time.Now()
 
+	// Call check() IMMEDIATELY after submit (no initial sleep) —
+	// pre-R10 the loop always slept currentInterval before the
+	// first check, so when pollTimeout < clamped pollInterval
+	// (e.g. timeout=10s, interval=30s) the loop timed out without
+	// ever calling check. Most async APIs return submitted-but-not-
+	// done initially, so the immediate first-check typically falls
+	// through to the sleep+retry path below, but a fast-path
+	// "already done" check is now correctly observed too.
+	// (R10 #2 + R11 #9.)
+	//
+	// Observability note: timing/metrics that previously assumed
+	// "first check happens after one pollInterval" need updating —
+	// the first poll now happens at t=0 (post-submit), and
+	// subsequent polls happen at t=currentInterval intervals from
+	// the previous one. The loop calls check() at most ceil(
+	// pollTimeout/currentInterval)+1 times in the worst case (the
+	// +1 is the immediate first call).
 	var resultRef starlark.Value
-	for {
+	{
+		// Honour context cancellation before the very first check.
+		// A caller that already cancelled the request between submit
+		// and check (e.g. SIGINT lands during the submit RTT) should
+		// not have one extra check fire on its way out. (R11 #1.)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		// pollTimeout=0 is technically valid (caller wants
+		// fail-fast). Honour it before calling check, so a
+		// 0-budget request doesn't spin one check before failing.
+		if time.Since(pollStart) > pollTimeout {
+			return nil, fmt.Errorf("async fetch timed out after %v", pollTimeout)
+		}
+		checkRet, err := starlark.Call(thread, checkFn, nil, filterKwargs(checkFn, checkKwargs))
+		if err != nil {
+			return nil, fmt.Errorf("check: %w", err)
+		}
+		if checkRet != nil && checkRet != starlark.None {
+			resultRef = checkRet
+		}
+	}
+
+	for resultRef == nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		// Check timeout BEFORE sleeping — guarantees we don't sleep
+		// through the entire pollTimeout budget when
+		// currentInterval >= pollTimeout. Combined with the
+		// pre-loop check() above, this means: on the first
+		// iteration we've already called check once, so this
+		// check-then-sleep is a normal poll cycle.
+		if time.Since(pollStart) > pollTimeout {
+			return nil, fmt.Errorf("async fetch timed out after %v", pollTimeout)
 		}
 
 		// Context-aware sleep — responds to cancellation during poll interval
@@ -834,9 +950,19 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		}
 
 		if pollBackoff > 1 {
-			currentInterval = currentInterval * time.Duration(pollBackoff)
-			if currentInterval > 30*time.Second {
-				currentInterval = 30 * time.Second
+			// Cap BEFORE multiplying. Pre-fix the cap was applied
+			// after the multiply, so a malformed blueprint with
+			// pollBackoff in the millions could overflow
+			// time.Duration (int64 nanoseconds) to a negative value
+			// — `time.After(currentInterval)` then fires immediately
+			// and the poll loop busy-spins until the outer timeout.
+			// (R8 #8.) Capping pre-multiply also prevents a single
+			// overflow from a huge currentInterval seed; the initial
+			// clamp above (R9 #2) handles the seed itself.
+			if currentInterval >= maxPollInterval/time.Duration(pollBackoff) {
+				currentInterval = maxPollInterval
+			} else {
+				currentInterval = currentInterval * time.Duration(pollBackoff)
 			}
 		}
 	}
@@ -903,7 +1029,7 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		pageNum++
 	}
 
-	result := &Result{
+	result = &Result{
 		Duration:    time.Since(start),
 		RowCount:    int64(collector.count()),
 		EmptyResult: emptyIntent,
@@ -976,7 +1102,8 @@ type PushResult struct {
 // from the table — DuckDB-native syntax: "VARCHAR", "DECIMAL(18,3)",
 // etc.). Pass nil to fall back to deriving names from the row dicts
 // (untyped); the caller does this only when the schema lookup fails.
-func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, tableColumns []map[string]any, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (*PushResult, error) {
+func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[string]any, batchNumber int, kind string, uniqueKey string, tableColumns []map[string]any, sinkArgs map[string]string, httpCfg ...*apiHTTPConfig) (result *PushResult, err error) {
+	defer recoverScriptPanic(&err)
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
@@ -1113,7 +1240,7 @@ func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[strin
 	}
 
 	// Parse return value
-	result := &PushResult{}
+	result = &PushResult{}
 	if retVal == nil || retVal == starlark.None {
 		return result, nil
 	}
@@ -1153,7 +1280,8 @@ func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[strin
 
 // RunPushFinalize calls the optional finalize(succeeded, failed) function after all batches.
 // Returns nil if finalize() is not defined (no-op).
-func (r *Runtime) RunPushFinalize(ctx context.Context, sinkName string, succeeded, failed int64, httpCfg ...*apiHTTPConfig) error {
+func (r *Runtime) RunPushFinalize(ctx context.Context, sinkName string, succeeded, failed int64, httpCfg ...*apiHTTPConfig) (err error) {
+	defer recoverScriptPanic(&err)
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]
@@ -1212,6 +1340,7 @@ func (r *Runtime) RunPushFinalize(ctx context.Context, sinkName string, succeede
 
 // RunPushPoll calls the poll() function for async batch mode.
 func (r *Runtime) RunPushPoll(ctx context.Context, sinkName string, jobRef map[string]any, httpCfg ...*apiHTTPConfig) (done bool, perRow map[string]string, err error) {
+	defer recoverScriptPanic(&err)
 	var cfg *apiHTTPConfig
 	if len(httpCfg) > 0 {
 		cfg = httpCfg[0]

@@ -69,7 +69,12 @@ func (c *saveCollector) createTempTable() (string, error) {
 
 	tmpTable := "tmp_" + sanitize(c.target)
 
-	c.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable))
+	// IF EXISTS makes "table doesn't exist" not an error; a real
+	// failure here (catalog locked, transaction aborted) would also
+	// break the CREATE that follows, so propagate it.
+	if err := c.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
+		return "", fmt.Errorf("drop existing temp table %s: %w", tmpTable, err)
+	}
 
 	// Infer column types from data and create the table
 	colTypes := c.inferTypes()
@@ -99,7 +104,7 @@ func (c *saveCollector) createTempTable() (string, error) {
 		if err != nil {
 			return fmt.Errorf("create appender: %w", err)
 		}
-		defer appender.Close()
+		defer func() { _ = appender.Close() }() // appender flushed by caller; close error not actionable here
 
 		for _, row := range c.data {
 			vals := make([]driver.Value, len(c.columns))

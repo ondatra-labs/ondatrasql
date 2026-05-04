@@ -6,6 +6,8 @@ weight: 8
 ---
 Bad data in a pipeline is worse than no data. A wrong number in a dashboard erodes trust. A null email sent to a CRM causes an API error. A sudden row count drop means something broke upstream. OndatraSQL catches these problems at three different stages, each designed for a different class of issue.
 
+This page covers **runtime data validation** — checks that run while a pipeline executes against actual data. For **static contract validation** that runs without DuckDB or data (parser strictness, `@fetch`/`@push` schema rules, blueprint API consistency, DAG cycles), see the [`validate` command](/reference/pipeline/cli/#validate). The two surfaces complement each other: static validation catches contract violations before commit, runtime validation catches data-quality issues during execution.
+
 ## Why three stages
 
 You might wonder why one validation step isn't enough. The reason is timing. Some problems are visible before data is written (a null email is never valid), some are only visible after (the total row count dropped by 80%), and some you want to know about but not block on (the average price dipped below your threshold).

@@ -23,23 +23,37 @@ func runHistory(cfg *config.Config, args []string) error {
 	limit := 50 // Default limit
 
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--limit", "-l":
-			if i+1 < len(args) {
-				n, err := strconv.Atoi(args[i+1])
-				if err != nil {
-					return fmt.Errorf("invalid limit: %s", args[i+1])
-				}
-				if n <= 0 {
-					return fmt.Errorf("--limit must be a positive integer (got %d)", n)
-				}
-				limit = n
-				i++
+		a := args[i]
+		switch {
+		case a == "--limit" || a == "-l":
+			if i+1 >= len(args) {
+				return &invocationErr{fmt.Errorf("%s requires a positive integer value", a)}
 			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return &invocationErr{fmt.Errorf("invalid limit: %s", args[i+1])}
+			}
+			if n <= 0 {
+				return &invocationErr{fmt.Errorf("--limit must be a positive integer (got %d)", n)}
+			}
+			limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return &invocationErr{fmt.Errorf("invalid limit: %s", a)}
+			}
+			if n <= 0 {
+				return &invocationErr{fmt.Errorf("--limit must be a positive integer (got %d)", n)}
+			}
+			limit = n
+		case strings.HasPrefix(a, "-"):
+			return &invocationErr{fmt.Errorf("unknown flag: %s", a)}
 		default:
-			if !strings.HasPrefix(args[i], "-") && model == "" {
-				model = args[i]
+			if model != "" {
+				return &invocationErr{fmt.Errorf("unexpected argument: %s (model already set to %q)", a, model)}
 			}
+			model = a
 		}
 	}
 
@@ -47,7 +61,7 @@ func runHistory(cfg *config.Config, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
@@ -77,12 +91,54 @@ func runHistory(cfg *config.Config, args []string) error {
 
 	// In --json mode, emit the row list to stdout. The box rendering still
 	// runs but its output is routed to stderr by the output package.
+	//
+	// Transform rows from the SQL query's presentation-only aliases
+	// ("Run ID", "ms", "Time") into stable snake_case keys so JSON
+	// consumers don't break when SQL aliases change for human display.
+	// Numeric fields (id, rows, duration_ms) emit as JSON numbers,
+	// not strings, so consumers don't need to parse them.
 	if output.JSONEnabled {
-		output.EmitJSON(map[string]any{
-			"model": model,
-			"limit": limit,
-			"runs":  rows,
-		})
+		jsonRows := make([]map[string]any, len(rows))
+		// Always emit as []. Always-present empty array beats absent-key
+		// shape drift: typed clients can decode unconditionally instead
+		// of branching on `if "warnings" in env`. (R6 finding.)
+		warnings := []string{}
+		for i, row := range rows {
+			// Parse failures here indicate the snapshot history table
+			// has non-numeric data in fields the query forces to integer
+			// shape — surface as a warning rather than silently coercing
+			// to 0 (Codex round 5 finding).
+			id, idErr := strconv.ParseInt(row["ID"], 10, 64)
+			if idErr != nil && row["ID"] != "" {
+				warnings = append(warnings, fmt.Sprintf("row %d: parse id %q: %v", i, row["ID"], idErr))
+			}
+			rowsCount, rowsErr := strconv.ParseInt(row["Rows"], 10, 64)
+			if rowsErr != nil && row["Rows"] != "" {
+				warnings = append(warnings, fmt.Sprintf("row %d: parse rows %q: %v", i, row["Rows"], rowsErr))
+			}
+			duration, durErr := strconv.ParseInt(row["ms"], 10, 64)
+			if durErr != nil && row["ms"] != "" {
+				warnings = append(warnings, fmt.Sprintf("row %d: parse duration_ms %q: %v", i, row["ms"], durErr))
+			}
+			jsonRows[i] = map[string]any{
+				"id":          id,
+				"time":        row["Time"],
+				"model":       row["Model"],
+				"kind":        row["Kind"],
+				"run_type":    row["Type"],
+				"rows":        rowsCount,
+				"duration_ms": duration,
+				"run_id":      row["Run ID"],
+			}
+		}
+		envelope := map[string]any{
+			"schema_version": 1,
+			"model":          model,
+			"limit":          limit,
+			"runs":           jsonRows,
+			"warnings":       warnings,
+		}
+		output.EmitJSON(envelope)
 		return nil
 	}
 
@@ -190,13 +246,13 @@ func printHistoryBox(rows []map[string]string, model string, limit int) {
 // Usage: ondatrasql query <schema.table> [--limit N] [--format csv|json|markdown]
 func runQueryTable(cfg *config.Config, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: ondatrasql query <schema.table> [--limit N] [--format csv|json|markdown]")
+		return &invocationErr{fmt.Errorf("usage: ondatrasql query <schema.table> [--limit N] [--format csv|json|markdown]")}
 	}
 
 	target := args[0]
 	parts := strings.SplitN(target, ".", 2)
 	if len(parts) != 2 {
-		return fmt.Errorf("invalid target format, expected schema.table (e.g., raw.customers)")
+		return &invocationErr{fmt.Errorf("invalid target format, expected schema.table (e.g., raw.customers)")}
 	}
 	schema, table := parts[0], parts[1]
 
@@ -204,32 +260,55 @@ func runQueryTable(cfg *config.Config, args []string) error {
 	limit := 0
 	format := "markdown"
 	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--limit", "-l":
-			if i+1 < len(args) {
-				n, err := strconv.Atoi(args[i+1])
-				if err != nil {
-					return fmt.Errorf("invalid limit: %s", args[i+1])
-				}
-				if n <= 0 {
-					return fmt.Errorf("--limit must be a positive integer (got %d)", n)
-				}
-				limit = n
-				i++
+		a := args[i]
+		switch {
+		case a == "--limit" || a == "-l":
+			if i+1 >= len(args) {
+				return &invocationErr{fmt.Errorf("%s requires a positive integer value", a)}
 			}
-		case "--format", "-f":
-			if i+1 < len(args) {
-				format = args[i+1]
-				i++
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return &invocationErr{fmt.Errorf("invalid limit: %s", args[i+1])}
 			}
+			if n <= 0 {
+				return &invocationErr{fmt.Errorf("--limit must be a positive integer (got %d)", n)}
+			}
+			limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return &invocationErr{fmt.Errorf("invalid limit: %s", a)}
+			}
+			if n <= 0 {
+				return &invocationErr{fmt.Errorf("--limit must be a positive integer (got %d)", n)}
+			}
+			limit = n
+		case a == "--format" || a == "-f":
+			if i+1 >= len(args) {
+				return &invocationErr{fmt.Errorf("%s requires a value (csv|json|markdown)", a)}
+			}
+			format = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--format="):
+			format = strings.TrimPrefix(a, "--format=")
+		case strings.HasPrefix(a, "-"):
+			return &invocationErr{fmt.Errorf("unknown flag: %s", a)}
+		default:
+			return &invocationErr{fmt.Errorf("unexpected argument: %s", a)}
 		}
+	}
+	switch format {
+	case "csv", "json", "markdown", "md":
+	default:
+		return &invocationErr{fmt.Errorf("invalid --format value %q (want csv|json|markdown)", format)}
 	}
 
 	sess, err := duckdb.NewSession("")
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
@@ -242,6 +321,33 @@ func runQueryTable(cfg *config.Config, args []string) error {
 		query = fmt.Sprintf("SELECT * FROM %s LIMIT %d", quotedTable, limit)
 	} else {
 		query = fmt.Sprintf("SELECT * FROM %s", quotedTable)
+	}
+
+	if output.JSONEnabled {
+		rows, err := sess.QueryRowsAny(query)
+		if err != nil {
+			return fmt.Errorf("query: %w", err)
+		}
+		jsonRows := make([]map[string]any, len(rows))
+		for i, row := range rows {
+			out := make(map[string]any, len(row))
+			for k, v := range row {
+				out[k] = duckdb.JSONValue(v)
+			}
+			jsonRows[i] = out
+		}
+		// warnings:[] for shape parity with history/run/stats envelopes.
+		// query has no current warning sources, but the field is part
+		// of the contract so typed clients can decode unconditionally
+		// across all read commands.
+		output.EmitJSON(map[string]any{
+			"schema_version": 1,
+			"table":          target,
+			"limit":          limit,
+			"rows":           jsonRows,
+			"warnings":       []string{},
+		})
+		return nil
 	}
 
 	return sess.QueryPrint(query, format)
@@ -265,7 +371,7 @@ func runSQL(cfg *config.Config, query string, format string) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
@@ -273,6 +379,30 @@ func runSQL(cfg *config.Config, query string, format string) error {
 
 	if err := sess.EnsureReadOnly(query); err != nil {
 		return err
+	}
+
+	if output.JSONEnabled {
+		rows, err := sess.QueryRowsAny(query)
+		if err != nil {
+			return fmt.Errorf("sql: %w", err)
+		}
+		jsonRows := make([]map[string]any, len(rows))
+		for i, row := range rows {
+			out := make(map[string]any, len(row))
+			for k, v := range row {
+				out[k] = duckdb.JSONValue(v)
+			}
+			jsonRows[i] = out
+		}
+		// See `query` envelope above — warnings:[] is part of the
+		// stable contract even when there are no warning sources.
+		output.EmitJSON(map[string]any{
+			"schema_version": 1,
+			"query":          query,
+			"rows":           jsonRows,
+			"warnings":       []string{},
+		})
+		return nil
 	}
 
 	return sess.QueryPrint(query, format)

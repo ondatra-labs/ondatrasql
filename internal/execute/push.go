@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -89,7 +90,7 @@ func (se *pushExecutor) run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open sync store: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }() // shutdown path; close error not actionable here
 
 	target := "sync:" + se.model.Target
 
@@ -507,7 +508,7 @@ func (se *pushExecutor) ackAll(store *collect.SyncStore, claimID string, batchNu
 	}
 
 	// Step 3: Cleanup _sync_acked (Badger confirmed, no longer needed)
-	deleteSyncAck(se.runner.sess, claimID)
+	recordSyncAckCleanupWarning(se.result, deleteSyncAck(se.runner.sess, claimID))
 
 	return allOK(events)
 }
@@ -552,7 +553,10 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 			return batchOutcome{ok: int64(len(events)), failed: 0,
 				err: fmt.Errorf("batch %d: re-ack after crash recovery: %w", batchNum, err)}
 		}
-		deleteSyncAck(se.runner.sess, claimID)
+		if err := deleteSyncAck(se.runner.sess, claimID); err != nil {
+			return batchOutcome{ok: int64(len(events)), failed: 0,
+				warnings: []string{fmt.Sprintf("_sync_acked cleanup after crash recovery failed (re-ack succeeded): %v", err)}}
+		}
 		return allOK(events)
 	}
 
@@ -784,12 +788,12 @@ func (se *pushExecutor) openSyncStore() (*collect.SyncStore, error) {
 	return collect.OpenSyncStore(dir)
 }
 
-// writeSyncLog writes aggregate sync stats to _sync_log in DuckLake.
-// Best-effort observability -- failures are logged as warnings, not hard errors.
-// Badger handles durability; _sync_log is for queryable monitoring.
-// ensureSyncLogTable creates _sync_log if it doesn't exist.
-func (se *pushExecutor) ensureSyncLogTable() {
-	se.runner.sess.Exec(`CREATE TABLE IF NOT EXISTS _sync_log (
+// ensureSyncLogTable creates _sync_log if it doesn't exist. Returns
+// the CREATE error so the caller can decide whether to surface it —
+// _sync_log is observability-only (queryable monitoring), not on the
+// data path, so callers typically log to stderr rather than abort.
+func (se *pushExecutor) ensureSyncLogTable() error {
+	return se.runner.sess.Exec(`CREATE TABLE IF NOT EXISTS _sync_log (
 		target VARCHAR NOT NULL,
 		sync_key VARCHAR NOT NULL,
 		status VARCHAR NOT NULL,
@@ -802,7 +806,10 @@ func (se *pushExecutor) ensureSyncLogTable() {
 }
 
 func (se *pushExecutor) writeSyncLog(succeeded, failed int64, syncErrors []string) {
-	se.ensureSyncLogTable()
+	if err := se.ensureSyncLogTable(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ensure _sync_log table: %v\n", err)
+		return
+	}
 
 	if failed == 0 && len(syncErrors) == 0 {
 		se.writeSyncLogEntry(se.model.Target, "*", "batch_complete",
@@ -829,7 +836,10 @@ func (se *pushExecutor) writeSyncLog(succeeded, failed int64, syncErrors []strin
 
 // writeSyncLogEntry writes a single entry to _sync_log, creating the table if needed.
 func (se *pushExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
-	se.ensureSyncLogTable()
+	if err := se.ensureSyncLogTable(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ensure _sync_log table: %v\n", err)
+		return
+	}
 	esc := func(s string) string { return strings.ReplaceAll(s, "'", "''") }
 	sql := fmt.Sprintf(`INSERT INTO _sync_log (target, sync_key, status, error_message, operation, batch_mode, dag_run_id)
 		VALUES ('%s', '%s', '%s', '%s', 'push', '%s', '%s')`,

@@ -42,19 +42,51 @@ func Reset() {
 	Human = os.Stdout
 }
 
+// ModelResultSchemaVersion is the JSON schema version for the
+// machine-readable model-run output emitted via `--json run`. Bump
+// on breaking shape changes (field rename, type change, OR a key
+// going from omitempty → always-emit since clients that previously
+// branched on key presence will now always see the key).
+// Adding a new optional field with omitempty is a non-breaking
+// change and does NOT require a bump.
+//
+// Version history:
+//   - 1: initial release with snake_case field names
+//   - 2: errors and warnings always emitted as `[]` instead of being
+//        omitempty (R10 #1) — clients that branched on key presence
+//        no longer see absent keys for clean runs.
+const ModelResultSchemaVersion = 2
+
 // ModelResult is the JSON structure emitted after each model run.
+//
+// Always-emitted fields (clients can decode unconditionally without
+// branching on key presence): schema_version, model, kind, run_type,
+// rows_affected, duration_ms, status, errors, warnings.
+//
+// Optional (omitempty): run_reason, dag_run_id, sandbox.
 type ModelResult struct {
-	Model        string   `json:"model"`
-	Kind         string   `json:"kind"`
-	RunType      string   `json:"run_type"`
-	RunReason    string   `json:"run_reason,omitempty"`
-	RowsAffected int64    `json:"rows_affected"`
-	DurationMs   int64    `json:"duration_ms"`
-	Status       string   `json:"status"`
-	Errors       []string `json:"errors,omitempty"`
-	Warnings     []string `json:"warnings,omitempty"`
-	DagRunID     string   `json:"dag_run_id,omitempty"`
-	Sandbox      bool     `json:"sandbox,omitempty"`
+	// SchemaVersion lets typed clients detect breaking changes.
+	// Always emitted, never omitempty.
+	SchemaVersion int    `json:"schema_version"`
+	Model         string `json:"model"`
+	Kind          string `json:"kind"`
+	RunType       string `json:"run_type"`
+	RunReason     string `json:"run_reason,omitempty"`
+	RowsAffected  int64  `json:"rows_affected"`
+	DurationMs    int64  `json:"duration_ms"`
+	Status        string `json:"status"`
+	// Errors and Warnings are ALWAYS emitted (`[]` when empty) for
+	// shape parity with history/stats/query/sql --json envelopes.
+	// Pre-R10 these had `omitempty`, so a clean run produced an
+	// envelope without these keys while a failing run produced one
+	// with them — typed clients had to branch on key presence to
+	// decode safely. (R10 #1.) Callers MUST initialise the slices
+	// non-nil before encoding so a clean run emits `[]` rather than
+	// `null` (a nil slice marshals to `null` in encoding/json).
+	Errors   []string `json:"errors"`
+	Warnings []string `json:"warnings"`
+	DagRunID string   `json:"dag_run_id,omitempty"`
+	Sandbox  bool     `json:"sandbox,omitempty"`
 }
 
 // EmitJSON writes a value as a single JSON line to stdout.
@@ -68,12 +100,17 @@ func EmitJSON(v any) {
 	}
 }
 
-// Fprintf writes formatted output to the Human writer.
+// Fprintf writes formatted output to the Human writer. Write errors are
+// intentionally dropped: Human is the user-facing terminal/log destination,
+// and if the write fails (broken pipe, closed stderr) there is no
+// alternative channel to report it on. Callers should use os.Stdout
+// directly when the write outcome must be checked.
 func Fprintf(format string, a ...any) {
-	fmt.Fprintf(Human, format, a...)
+	_, _ = fmt.Fprintf(Human, format, a...)
 }
 
-// Println writes a line to the Human writer.
+// Println writes a line to the Human writer. Same write-error semantics
+// as Fprintf — see that function's comment for the rationale.
 func Println(a ...any) {
-	fmt.Fprintln(Human, a...)
+	_, _ = fmt.Fprintln(Human, a...)
 }

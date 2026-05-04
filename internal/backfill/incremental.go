@@ -77,10 +77,12 @@ func GetIncrementalState(sess *duckdb.Session, target, cursor, initial string) (
 
 		maxResult, err := sess.QueryValue(maxSQL)
 		if err != nil {
-			state.LastValue = state.InitialValue
-		} else {
-			state.LastValue = maxResult
+			// Surface the error rather than silently falling back to the
+			// initial value: a broken cursor column would otherwise force a
+			// destructive full re-fetch on every run.
+			return nil, fmt.Errorf("read MAX(%s) from %s for incremental: %w", cursor, target, err)
 		}
+		state.LastValue = maxResult
 	} else {
 		state.LastValue = state.InitialValue
 	}
@@ -98,9 +100,10 @@ func GetIncrementalState(sess *duckdb.Session, target, cursor, initial string) (
 			snapshotCatalog, escapeSQL(target))
 
 		lastRunResult, err := sess.QueryValue(lastRunSQL)
-		if err == nil {
-			state.LastRun = lastRunResult
+		if err != nil {
+			return nil, fmt.Errorf("read last snapshot for %s: %w", target, err)
 		}
+		state.LastRun = lastRunResult
 	}
 
 	return state, nil

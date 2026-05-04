@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +77,9 @@ func NewSession(dbFile string) (*Session, error) {
 
 	conn, err := db.Conn(context.Background())
 	if err != nil {
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, fmt.Errorf("get connection: %w (also: db.Close: %v)", err, closeErr)
+		}
 		return nil, fmt.Errorf("get connection: %w", err)
 	}
 
@@ -87,13 +90,17 @@ func NewSession(dbFile string) (*Session, error) {
 
 	// Disable progress bar
 	if err := s.Exec("SET enable_progress_bar = false"); err != nil {
-		s.Close()
+		if closeErr := s.Close(); closeErr != nil {
+			return nil, fmt.Errorf("disable progress bar: %w (also: session.Close: %v)", err, closeErr)
+		}
 		return nil, fmt.Errorf("disable progress bar: %w", err)
 	}
 
 	// Load DuckLake extension
 	if err := s.loadExtensions(); err != nil {
-		s.Close()
+		if closeErr := s.Close(); closeErr != nil {
+			return nil, fmt.Errorf("load extensions: %w (also: session.Close: %v)", err, closeErr)
+		}
 		return nil, fmt.Errorf("load extensions: %w", err)
 	}
 
@@ -258,7 +265,7 @@ func (s *Session) EnsureReadOnly(query string) error {
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }() // prepared statement cleanup
 
 		ddbStmt, ok := stmt.(*duckdbdriver.Stmt)
 		if !ok {
@@ -370,7 +377,7 @@ func (s *Session) QueryContext(ctx context.Context, sqlStr string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	return rowsToCSV(rows)
 }
@@ -428,7 +435,7 @@ func (s *Session) QueryRowsContext(ctx context.Context, sqlStr string) ([]string
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	var result []string
 	for rows.Next() {
@@ -464,7 +471,7 @@ func (s *Session) QueryRowsMapContext(ctx context.Context, sqlStr string) ([]map
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -522,7 +529,7 @@ func (s *Session) QueryRowsAnyContext(ctx context.Context, sqlStr string) ([]map
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -565,7 +572,7 @@ func (s *Session) QueryPrint(sqlQuery, format string) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -657,7 +664,12 @@ func (s *Session) Close() error {
 	}
 
 	if s.conn != nil {
-		s.conn.Close()
+		// Returns the conn to the pool. The error is sql.ErrConnDone if
+		// the conn was already returned (impossible here — we hold it
+		// across the whole session) or a wrapped driver error from the
+		// pool. Either way, s.db.Close() below is the meaningful close
+		// and its error is what we propagate to the caller.
+		_ = s.conn.Close()
 	}
 
 	// Now that s.conn is released we can drop the sandbox postgres database
@@ -752,7 +764,7 @@ func (s *Session) queryDataFilePathsLocked(alias string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 	var out []string
 	for rows.Next() {
 		var p string
@@ -773,7 +785,7 @@ func (s *Session) dropPostgresSandboxDatabaseAfterCloseLocked() error {
 	if err != nil {
 		return fmt.Errorf("open postgres admin for sandbox cleanup: %w", err)
 	}
-	defer adminDB.Close()
+	defer func() { _ = adminDB.Close() }() // admin DB connection cleanup
 
 	dropSQL := fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", quoteIdent(s.sandboxPostgresDropDB))
 	if _, err := adminDB.Exec(dropSQL); err != nil {
@@ -892,7 +904,7 @@ func (s *Session) InitWithCatalog(configPath string) error {
 
 	// Include memory in search path BEFORE user macros, so cross-file macro
 	// references resolve (e.g. audits.sql calling helper() from common.sql).
-	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", catalogAlias)); err != nil {
+	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", EscapeSQL(catalogAlias))); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
 	}
 
@@ -1115,9 +1127,9 @@ func (s *Session) validateCatalogBackend() error {
 			names = append(names, db.name)
 		}
 		return fmt.Errorf(
-			"catalog.sql attached %d catalogs (%s), but OndatraSQL requires exactly one DuckLake ATTACH. "+
-				"Multiple ATTACHes create an inconsistent state where the runner and sandbox forker disagree about which catalog is primary. "+
-				"Pick one and remove the others.",
+			"catalog.sql attached %d catalogs (%s), but OndatraSQL requires exactly one DuckLake ATTACH — "+
+				"multiple ATTACHes create an inconsistent state where the runner and sandbox forker disagree about which catalog is primary; "+
+				"pick one and remove the others",
 			len(attached), strings.Join(names, ", "))
 	}
 
@@ -1125,11 +1137,11 @@ func (s *Session) validateCatalogBackend() error {
 	for _, db := range attached {
 		if db.typ != "ducklake" {
 			return fmt.Errorf(
-				"catalog.sql attached %q as type %q (path %q), but OndatraSQL requires a DuckLake catalog. "+
-					"Replace your ATTACH with one of:\n"+
+				"catalog.sql attached %q as type %q (path %q), but OndatraSQL requires a DuckLake catalog — "+
+					"replace your ATTACH with one of:\n"+
 					"  ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.files/');\n"+
 					"  ATTACH 'ducklake:postgres:host=localhost dbname=lake' AS lake (DATA_PATH '/path/to/data/');\n"+
-					"Raw sqlite, duckdb, or other database attaches are not supported because the runner needs DuckLake's snapshots, time travel, and commit metadata.",
+					"raw sqlite, duckdb, or other database attaches are not supported because the runner needs DuckLake's snapshots, time travel, and commit metadata",
 				db.name, db.typ, db.path)
 		}
 	}
@@ -1145,13 +1157,13 @@ func (s *Session) validateCatalogBackend() error {
 			// supported — sqlite and duckdb use file copy for sandbox, postgres uses CREATE DATABASE TEMPLATE
 		case "mysql":
 			return fmt.Errorf(
-				"catalog %q is a DuckLake-on-mysql catalog (path %q), but OndatraSQL only supports sqlite, duckdb, and postgres backends. "+
-					"The sandbox feature uses backend-native fork primitives (cp for sqlite/duckdb, CREATE DATABASE TEMPLATE for postgres) and there is no equivalent for mysql. "+
-					"Migrate your catalog to postgres, sqlite, or duckdb, or open an issue if mysql support is critical for your use case.",
+				"catalog %q is a DuckLake-on-mysql catalog (path %q), but OndatraSQL only supports sqlite, duckdb, and postgres backends — "+
+					"the sandbox feature uses backend-native fork primitives (cp for sqlite/duckdb, CREATE DATABASE TEMPLATE for postgres) and there is no equivalent for mysql; "+
+					"migrate your catalog to postgres, sqlite, or duckdb, or open an issue if mysql support is critical for your use case",
 				db.name, db.path)
 		default:
 			return fmt.Errorf(
-				"catalog %q has an unrecognised DuckLake backend (path %q). OndatraSQL supports sqlite and postgres only.",
+				"catalog %q has an unrecognised DuckLake backend (path %q) — OndatraSQL supports sqlite and postgres only",
 				db.name, db.path)
 		}
 	}
@@ -1175,60 +1187,136 @@ func backendFromDuckLakePath(path string) string {
 }
 
 // forkSqliteCatalog implements sandbox v2 fork for sqlite-backed DuckLake.
-// It copies the prod sqlite catalog file to sandboxCatalog and returns the
-// DuckLake connection string for the new sandbox catalog. Cleanup is the
-// caller's responsibility (usually os.RemoveAll on .sandbox/<sub>).
+// It copies the prod sqlite catalog file (plus its WAL sibling when in
+// WAL mode) to sandboxCatalog and returns the DuckLake connection
+// string for the new sandbox catalog. Cleanup is the caller's
+// responsibility (usually os.RemoveAll on .sandbox/<sub>).
 //
 // Bug S15 fix: when prod catalog doesn't exist (typical for a freshly-init'd
 // project before the user has run any model), produce a friendly actionable
 // error rather than the low-level "Failed to load DuckLake table data" error
 // chain that DuckDB would produce on ATTACH of a missing file.
+//
+// WAL handling: SQLite in WAL journal mode keeps recently-committed
+// transactions in `<db>-wal` until checkpoint; the main file alone is
+// stale. Copy the WAL sibling so SQLite recovers the full state when
+// the sandbox catalog is opened. The shared-memory `<db>-shm` is a
+// transient cache and is regenerated on open — skipped intentionally.
+// The `-journal` rollback file (default mode) is also copied for the
+// same reason.
 func (s *Session) forkSqliteCatalog(prodConnStr, sandboxCatalog string) (string, error) {
 	prodCatalogPath := strings.TrimPrefix(prodConnStr, "ducklake:sqlite:")
 
 	if _, err := os.Stat(prodCatalogPath); os.IsNotExist(err) {
 		return "", fmt.Errorf(
-			"sandbox needs an existing prod catalog to fork from, but %s does not exist yet. "+
-				"Run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` "+
-				"can validate changes against it.", prodCatalogPath)
+			"sandbox needs an existing prod catalog to fork from, but %s does not exist yet — "+
+				"run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` "+
+				"can validate changes against it", prodCatalogPath)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(sandboxCatalog), 0o755); err != nil {
 		return "", fmt.Errorf("fork prod catalog: ensure dir: %w", err)
 	}
-	src, err := os.ReadFile(prodCatalogPath)
-	if err != nil {
-		return "", fmt.Errorf("fork prod catalog: read %s: %w", prodCatalogPath, err)
-	}
-	if err := os.WriteFile(sandboxCatalog, src, 0o644); err != nil {
-		return "", fmt.Errorf("fork prod catalog: write %s: %w", sandboxCatalog, err)
+	if err := copyCatalogWithSiblings(prodCatalogPath, sandboxCatalog, []string{"-wal", "-journal"}); err != nil {
+		return "", err
 	}
 	return "ducklake:sqlite:" + sandboxCatalog, nil
 }
 
-// forkDuckDBCatalog implements sandbox v2 fork for duckdb-backed DuckLake
-// using a simple file copy — identical strategy to SQLite.
+// forkDuckDBCatalog implements sandbox v2 fork for duckdb-backed DuckLake.
+// Like the SQLite path, it copies the WAL sibling (`<db>.wal`) so the
+// sandbox sees committed-but-not-yet-checkpointed state.
 func (s *Session) forkDuckDBCatalog(prodConnStr, sandboxCatalog string) (string, error) {
 	prodCatalogPath := strings.TrimPrefix(prodConnStr, "ducklake:duckdb:")
 
 	if _, err := os.Stat(prodCatalogPath); os.IsNotExist(err) {
 		return "", fmt.Errorf(
-			"sandbox needs an existing prod catalog to fork from, but %s does not exist yet. "+
-				"Run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` "+
-				"can validate changes against it.", prodCatalogPath)
+			"sandbox needs an existing prod catalog to fork from, but %s does not exist yet — "+
+				"run `ondatrasql run` to materialize at least one model first, then `ondatrasql sandbox` "+
+				"can validate changes against it", prodCatalogPath)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(sandboxCatalog), 0o755); err != nil {
 		return "", fmt.Errorf("fork prod catalog: ensure dir: %w", err)
 	}
-	src, err := os.ReadFile(prodCatalogPath)
-	if err != nil {
-		return "", fmt.Errorf("fork prod catalog: read %s: %w", prodCatalogPath, err)
-	}
-	if err := os.WriteFile(sandboxCatalog, src, 0o644); err != nil {
-		return "", fmt.Errorf("fork prod catalog: write %s: %w", sandboxCatalog, err)
+	if err := copyCatalogWithSiblings(prodCatalogPath, sandboxCatalog, []string{".wal"}); err != nil {
+		return "", err
 	}
 	return "ducklake:duckdb:" + sandboxCatalog, nil
+}
+
+// copyCatalogWithSiblings copies the main catalog file from src to dst
+// plus any sibling files matching one of the suffixes (e.g. "-wal",
+// "-journal", ".wal"). Missing siblings are skipped — they're optional
+// recovery files that only exist when the engine has uncheckpointed
+// state.
+//
+// Correctness contract:
+//
+//   - Main file alone is incomplete: in WAL journal mode, SQLite (and
+//     DuckDB) keep committed-but-not-yet-checkpointed transactions in
+//     the WAL sibling. Recovery on the next open replays them. The
+//     copy must include both, or the sandbox sees a stale snapshot.
+//
+//   - The shared-memory `-shm` file is a transient cache regenerated on
+//     open and is intentionally NOT copied.
+//
+// USAGE CONTRACT — read before invoking:
+//
+// This helper assumes the prod catalog has no concurrent writer
+// during the copy. Sandbox is normally invoked interactively when
+// no `ondatrasql run` / `ondatrasql events` / `ondatrasql odata`
+// process is active, which satisfies that assumption.
+//
+// SQLite-docs explicitly call out that a clean filesystem-level copy
+// of a WAL-mode database under concurrent writers requires holding a
+// `BEGIN DEFERRED` transaction during the copy (to prevent the WAL
+// from being checkpointed-and-deleted mid-copy). This helper does
+// NOT acquire that lock — callers who need correctness against an
+// active writer must use SQLite's Online Backup API instead, which
+// is page-level atomic.
+//
+// Failure mode if a concurrent writer DOES exist: the sandbox can see
+// inconsistent state where the copied WAL references pages that no
+// longer match the copied main file. SQLite recovery may surface this
+// as a corrupted-database error on sandbox open, or — more rarely —
+// as silently wrong data. Quiesce prod or use a dedicated backup
+// pipeline if this matters for your workflow.
+//
+// References:
+//   https://sqlite.org/forum/forumpost/2ea989bbe9 (hot backup in WAL mode)
+//   https://sqlite.org/wal.html (WAL semantics)
+//   https://duckdb.org/docs/current/sql/statements/checkpoint (DuckDB WAL)
+func copyCatalogWithSiblings(src, dst string, suffixes []string) error {
+	if err := copyFileBytes(src, dst); err != nil {
+		return fmt.Errorf("fork prod catalog: copy %s: %w", src, err)
+	}
+	for _, suf := range suffixes {
+		srcSibling := src + suf
+		if _, err := os.Stat(srcSibling); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("fork prod catalog: stat %s: %w", srcSibling, err)
+		}
+		dstSibling := dst + suf
+		if err := copyFileBytes(srcSibling, dstSibling); err != nil {
+			return fmt.Errorf("fork prod catalog: copy %s: %w", srcSibling, err)
+		}
+	}
+	return nil
+}
+
+// copyFileBytes is a small ReadFile/WriteFile pair used by
+// copyCatalogWithSiblings. Keeping it private makes the call sites
+// read cleanly without exposing yet another generic file helper to
+// the rest of the package.
+func copyFileBytes(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
 }
 
 // forkPostgresCatalog implements sandbox v2 fork for postgres-backed DuckLake
@@ -1279,7 +1367,7 @@ func (s *Session) forkPostgresCatalog(prodConnStr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("fork prod catalog: open postgres admin: %w", err)
 	}
-	defer adminDB.Close()
+	defer func() { _ = adminDB.Close() }() // admin DB connection cleanup
 
 	// Bug S30 fix: check that the prod database actually exists before
 	// attempting CREATE DATABASE TEMPLATE. Without this, a freshly-init'd
@@ -1353,7 +1441,7 @@ func SandboxPgActiveConnections(prodConnStr string) int {
 	if err != nil {
 		return 0
 	}
-	defer adminDB.Close()
+	defer func() { _ = adminDB.Close() }() // admin DB connection cleanup
 
 	var count int
 	err = adminDB.QueryRow(
@@ -1509,8 +1597,8 @@ func (s *Session) TableHasChanges(table string, startSnapshot, endSnapshot int64
 	if err != nil {
 		return 0, err
 	}
-	var cnt int64
-	if _, err := fmt.Sscanf(result, "%d", &cnt); err != nil {
+	cnt, err := strconv.ParseInt(strings.TrimSpace(result), 10, 64)
+	if err != nil {
 		return 0, fmt.Errorf("parse table_changes count %q for %s: %w", result, table, err)
 	}
 	return cnt, nil
@@ -1541,8 +1629,8 @@ func (s *Session) GetCurrentSnapshot() (int64, error) {
 	if result == "" {
 		return 0, nil
 	}
-	var id int64
-	if _, err := fmt.Sscanf(result, "%d", &id); err != nil {
+	id, err := strconv.ParseInt(strings.TrimSpace(result), 10, 64)
+	if err != nil {
 		return 0, fmt.Errorf("parse curr_snapshot %q: %w", result, err)
 	}
 	return id, nil
@@ -1557,8 +1645,8 @@ func (s *Session) GetDagStartSnapshot() (int64, error) {
 	if result == "" {
 		return 0, nil // Variable not set (no DuckLake attached)
 	}
-	var id int64
-	if _, err := fmt.Sscanf(result, "%d", &id); err != nil {
+	id, err := strconv.ParseInt(strings.TrimSpace(result), 10, 64)
+	if err != nil {
 		return 0, fmt.Errorf("parse dag_start_snapshot %q: %w", result, err)
 	}
 	return id, nil
@@ -1724,7 +1812,7 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 
 	// Set search_path BEFORE user macros so cross-file macro refs resolve.
 	// Temporary path with memory — will be updated after USE sandbox.
-	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", prodAlias)); err != nil {
+	if err := s.Exec(fmt.Sprintf("SET search_path = '%s,memory';", EscapeSQL(prodAlias))); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
 	}
 
@@ -1903,7 +1991,7 @@ func printJSON(cols []string, data [][]any) error {
 		m := make(map[string]any, len(cols))
 		for i, col := range cols {
 			if i < len(row) {
-				m[col] = jsonValue(row[i])
+				m[col] = JSONValue(row[i])
 			}
 		}
 		rows = append(rows, m)
@@ -1913,12 +2001,12 @@ func printJSON(cols []string, data [][]any) error {
 	return enc.Encode(rows)
 }
 
-// jsonValue converts a database value to a JSON-friendly Go type.
+// JSONValue converts a database value to a JSON-friendly Go type.
 // Times become RFC3339 strings; DuckDB Decimal and HUGEINT (*big.Int) are
 // emitted as json.Number to preserve full precision; everything else passes
 // through unchanged (numbers stay numbers, bools stay bools, nil becomes
 // JSON null, []byte becomes a string).
-func jsonValue(v any) any {
+func JSONValue(v any) any {
 	if v == nil {
 		return nil
 	}

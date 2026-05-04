@@ -27,6 +27,11 @@ type ImpactAnalysis struct {
 	ChangedModel string
 	ChangeType   backfill.SchemaChangeType
 	Impacts      []Impact
+
+	// SkippedDownstreams collects per-target failures from
+	// analyzeModelImpact so callers see that the impact set is
+	// incomplete instead of silently treating it as exhaustive.
+	SkippedDownstreams map[string]error
 }
 
 // AnalyzeImpact analyzes what downstream models would be affected if the given model changes.
@@ -43,11 +48,16 @@ func AnalyzeImpact(sess *duckdb.Session, changedModel string) (*ImpactAnalysis, 
 		return nil, err
 	}
 
-	// For each downstream model, analyze the impact
+	// For each downstream model, analyze the impact. Per-model failures
+	// are recorded on SkippedDownstreams instead of silently dropped so
+	// callers know which downstreams are missing from the impact set.
 	for _, model := range downstream {
 		impact, err := analyzeModelImpact(sess, changedModel, model)
 		if err != nil {
-			// Log warning but continue
+			if analysis.SkippedDownstreams == nil {
+				analysis.SkippedDownstreams = make(map[string]error)
+			}
+			analysis.SkippedDownstreams[model] = err
 			continue
 		}
 		if impact != nil {

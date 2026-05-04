@@ -86,7 +86,7 @@ func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error
 		}
 		return fmt.Errorf("open event store: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }() // ignored: shutdown path, error not actionable
 
 	// Recover all inflight events from previous crashes.
 	// At daemon startup, no runner is active, so all inflight events
@@ -101,7 +101,7 @@ func runEvents(ctx context.Context, cfg *config.Config, publicPort string) error
 	if err := os.WriteFile(portFile, []byte(adminPort), 0o644); err != nil {
 		return fmt.Errorf("write port file: %w", err)
 	}
-	defer os.Remove(portFile)
+	defer func() { _ = os.Remove(portFile) }() // ignored: best-effort port-file cleanup
 
 	// Start HTTP servers
 	srv := collect.NewServer(store, models, publicPort, adminPort)

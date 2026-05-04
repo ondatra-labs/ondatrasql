@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,21 @@ import (
 )
 
 // buildCommentSQL generates COMMENT ON statements for table and column descriptions.
+// parseRowCount converts a `SELECT COUNT(*) ...` result string from
+// QueryValue to int64. Earlier sites used fmt.Sscanf("%d") and silently
+// ignored parse failures, leaving rowsAffected at 0 — that's a
+// programmer-visible bug (commit metadata reports zero rows for a
+// non-empty table) but more importantly, in the tracked-model path it
+// causes the `changedGroups == 0` fast-path to skip required updates
+// (Codex round 4 finding).
+func parseRowCount(s string) (int64, error) {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse row count %q: %w", s, err)
+	}
+	return n, nil
+}
+
 // Returns empty string if there are no descriptions to set.
 // Target is unquoted (safe: validated by parser.ValidateIdentifier, consistent with SQL templates).
 func buildCommentSQL(model *parser.Model) string {
@@ -114,9 +130,9 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		return 0, fmt.Errorf("count temp table: %w", err)
 	}
 
-	var count int64
-	if _, err := fmt.Sscanf(countResult, "%d", &count); err != nil {
-		return 0, fmt.Errorf("parse row count %q: %w", countResult, err)
+	count, err := parseRowCount(countResult)
+	if err != nil {
+		return 0, err
 	}
 
 	// Ensure schema exists before creating table
@@ -347,7 +363,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	r.trace(result, "commit", stepStart, "ok")
 
 	// Apply COMMENT ON statements (best-effort, data already committed)
-	r.applyComments(model)
+	_ = r.applyComments(model) // post-commit metadata; data already committed
 
 	// Apply DuckLake storage hints (best-effort, on backfill or full table replacement)
 	if isBackfill || model.Kind == "table" {
@@ -410,6 +426,8 @@ func (r *Runner) buildMergeSQL(target, source, uniqueKey string, cols []string) 
 
 // applySchemaEvolution applies additive schema changes (renames, new columns, type promotions) to the target table.
 // This is called before materialization when we can evolve the schema instead of doing a full backfill.
+//
+//lint:ignore U1000 retained — directly exercised by schema_evolution_integration_test.go; no production caller yet (schema-evolution path is wired but not invoked from materialize).
 func (r *Runner) applySchemaEvolution(target string, change backfill.SchemaChange) error {
 	// Apply column renames first (before adding new columns, in case of name conflicts)
 	for _, rename := range change.Renamed {
@@ -525,9 +543,9 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	if err != nil {
 		return 0, fmt.Errorf("get current snapshot: %w", err)
 	}
-	var currSnapshot int64
-	if _, err := fmt.Sscanf(snapshotResult, "%d", &currSnapshot); err != nil {
-		return 0, fmt.Errorf("parse snapshot %q: %w", snapshotResult, err)
+	currSnapshot, err := parseRowCount(snapshotResult)
+	if err != nil {
+		return 0, fmt.Errorf("parse snapshot: %w", err)
 	}
 
 	// Get source columns (excluding SCD2 columns if they somehow got included)
@@ -556,8 +574,9 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		if err != nil {
 			return 0, fmt.Errorf("count rows: %w", err)
 		}
-		if _, err := fmt.Sscanf(countResult, "%d", &rowsAffected); err != nil {
-			return 0, fmt.Errorf("parse row count %q: %w", countResult, err)
+		rowsAffected, err = parseRowCount(countResult)
+		if err != nil {
+			return 0, err
 		}
 
 		// Build commit metadata
@@ -611,7 +630,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		}
 		r.trace(result, "commit", stepStart, "ok")
 
-		r.applyComments(model)
+		_ = r.applyComments(model) // post-commit metadata; data already committed
 		r.applyStorageHints(model)
 
 		return rowsAffected, nil
@@ -625,7 +644,10 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		if err != nil {
 			return 0, fmt.Errorf("count rows: %w", err)
 		}
-		fmt.Sscanf(countResult, "%d", &rowsAffected)
+		rowsAffected, err = parseRowCount(countResult)
+		if err != nil {
+			return 0, err
+		}
 
 		stepStart := time.Now()
 		columns, _ := backfill.CaptureSchema(r.sess, tmpTable)
@@ -663,7 +685,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		}
 		r.trace(result, "commit", stepStart, "ok")
 
-		r.applyComments(model)
+		_ = r.applyComments(model) // post-commit metadata; data already committed
 		return rowsAffected, nil
 	}
 
@@ -701,9 +723,9 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 	rollbackOnErr := func(err error, msg string) (int64, error) {
 		r.trace(result, "commit", stepStart, "error")
-		r.sess.Exec("ROLLBACK")
-		r.sess.Exec("DROP TABLE IF EXISTS scd2_changes")
-		r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted")
+		_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
+		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_changes") // IF EXISTS makes non-existence OK
+		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted") // IF EXISTS makes non-existence OK
 		return 0, fmt.Errorf("%s: %w", msg, err)
 	}
 
@@ -729,9 +751,15 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	if err != nil {
 		return rollbackOnErr(err, "count changes")
 	}
-	if _, err := fmt.Sscanf(countResult, "%d", &rowsAffected); err != nil {
-		return 0, fmt.Errorf("parse row count %q: %w", countResult, err)
+	parsed, parseErr := parseRowCount(countResult)
+	if parseErr != nil {
+		// Must rollback — the SCD2 detection txn is still open and
+		// temp tables (scd2_changes, scd2_deleted) are still
+		// visible. Returning without rollback would leak both into
+		// the next operation on this session.
+		return rollbackOnErr(parseErr, "parse scd2 row count")
 	}
+	rowsAffected = parsed
 
 	// Step 3: Build commit metadata (inside txn — temp tables visible)
 	columns, _ := backfill.CaptureSchema(r.sess, tmpTable)
@@ -811,11 +839,11 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 	r.trace(result, "commit", stepStart, "ok")
 
-	r.applyComments(model)
+	_ = r.applyComments(model) // post-commit metadata; data already committed
 
 	// Cleanup temp tables
-	r.sess.Exec("DROP TABLE IF EXISTS scd2_changes")
-	r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted")
+	_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_changes") // IF EXISTS makes non-existence OK
+	_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted") // IF EXISTS makes non-existence OK
 
 	return rowsAffected, nil
 }
@@ -937,15 +965,17 @@ FROM %s s JOIN group_hash g ON %s`,
 	if err := r.sess.Exec(hashTmpSQL); err != nil {
 		return 0, fmt.Errorf("compute content hash: %w", err)
 	}
-	defer r.sess.Exec("DROP TABLE IF EXISTS tracked_hashed")
+	defer func() { _ = r.sess.Exec("DROP TABLE IF EXISTS tracked_hashed") }() // temp cleanup at function exit
 
 	// Count rows
 	countResult, err := r.sess.QueryValue("SELECT COUNT(*) FROM tracked_hashed")
 	if err != nil {
 		return 0, fmt.Errorf("count rows: %w", err)
 	}
-	var totalRows int64
-	fmt.Sscanf(countResult, "%d", &totalRows)
+	totalRows, err := parseRowCount(countResult)
+	if err != nil {
+		return 0, err
+	}
 
 	// Build commit metadata
 	stepStart := time.Now()
@@ -992,7 +1022,7 @@ FROM %s s JOIN group_hash g ON %s`,
 		}
 		r.trace(result, "commit", stepStart, "ok")
 
-		r.applyComments(model)
+		_ = r.applyComments(model) // post-commit metadata; data already committed
 		r.applyStorageHints(model)
 
 		return totalRows, nil
@@ -1020,7 +1050,7 @@ FROM %s s JOIN group_hash g ON %s`,
 		}
 		r.trace(result, "commit", stepStart, "ok")
 
-		r.applyComments(model)
+		_ = r.applyComments(model) // post-commit metadata; data already committed
 		return totalRows, nil
 	}
 
@@ -1075,15 +1105,17 @@ WHERE h.%[5]s IS NULL`,
 	if err := r.sess.Exec(detectSQL); err != nil {
 		return 0, fmt.Errorf("detect tracked changes: %w", err)
 	}
-	defer r.sess.Exec("DROP TABLE IF EXISTS tracked_changes")
+	defer func() { _ = r.sess.Exec("DROP TABLE IF EXISTS tracked_changes") }() // temp cleanup at function exit
 
 	// Count changed groups
 	changeCount, err := r.sess.QueryValue("SELECT COUNT(*) FROM tracked_changes")
 	if err != nil {
 		return 0, fmt.Errorf("count changes: %w", err)
 	}
-	var changedGroups int64
-	fmt.Sscanf(changeCount, "%d", &changedGroups)
+	changedGroups, err := parseRowCount(changeCount)
+	if err != nil {
+		return 0, err
+	}
 
 	if changedGroups == 0 {
 		// Smart-skip fast path: when a tracked + lib + 0-row + no_change
@@ -1112,7 +1144,7 @@ WHERE h.%[5]s IS NULL`,
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
 			r.trace(result, "commit", stepStart, "error")
-			r.sess.Exec("ROLLBACK")
+			_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
 			return 0, fmt.Errorf("commit tracked (no changes): %w", err)
 		}
 		r.trace(result, "commit", stepStart, "ok")
@@ -1132,9 +1164,14 @@ WHERE h.%[5]s IS NULL`,
 	}
 	rowCountSQL := fmt.Sprintf("SELECT COUNT(*) FROM tracked_hashed h JOIN tracked_changes c ON %s WHERE c._action = 'upsert'",
 		strings.Join(countJoin, " AND "))
-	rowCountResult, _ := r.sess.QueryValue(rowCountSQL)
-	var rowsAffected int64
-	fmt.Sscanf(rowCountResult, "%d", &rowsAffected)
+	rowCountResult, rcErr := r.sess.QueryValue(rowCountSQL)
+	if rcErr != nil {
+		return 0, fmt.Errorf("count tracked rowsAffected: %w", rcErr)
+	}
+	rowsAffected, err := parseRowCount(rowCountResult)
+	if err != nil {
+		return 0, err
+	}
 
 	info.RowsAffected = rowsAffected
 	jsonBytes, _ := json.Marshal(info)
@@ -1161,7 +1198,7 @@ INSERT INTO %[1]s BY NAME SELECT h.* FROM tracked_hashed h JOIN tracked_changes 
 	}
 	r.trace(result, "commit", stepStart, "ok")
 
-	r.applyComments(model)
+	_ = r.applyComments(model) // post-commit metadata; data already committed
 
 	return rowsAffected, nil
 }

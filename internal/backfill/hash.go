@@ -132,7 +132,13 @@ func indexCommentOutsideString(line string) int {
 // Returns "" if the directory doesn't exist or contains no .sql files.
 func ConfigHash(configDir string) string {
 	var paths []string
-	filepath.WalkDir(configDir, func(path string, d os.DirEntry, err error) error {
+	// WalkDir's top-level error fires only when configDir itself cannot
+	// be opened (missing dir, permission denied at the root). Both of
+	// those produce an empty file list; the early return below converts
+	// that to the documented `""` sentinel. Per-entry walk errors are
+	// swallowed inside the callback so a single broken symlink doesn't
+	// invalidate the whole hash.
+	if err := filepath.WalkDir(configDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -141,7 +147,9 @@ func ConfigHash(configDir string) string {
 			paths = append(paths, rel)
 		}
 		return nil
-	})
+	}); err != nil {
+		return ""
+	}
 	if len(paths) == 0 {
 		return ""
 	}

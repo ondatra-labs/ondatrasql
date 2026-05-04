@@ -1498,7 +1498,18 @@ SELECT id::BIGINT AS id, name::VARCHAR AS name FROM (VALUES
 	if dot < 0 {
 		t.Fatal("malformed skiptoken in emitted nextLink")
 	}
-	tampered := tok[:dot+1] + "X" + tok[dot+2:]
+	// Flip the first signature byte to a value GUARANTEED to differ
+	// from the original. The previous version hard-coded 'X', which
+	// produced a no-op mutation on ~1/64 base64-encoded HMAC outputs
+	// (whenever the first sig byte was already 'X') — flakiness
+	// surfaced as 200 OK in CI. We pick a base64-safe replacement
+	// that we KNOW differs from the original character.
+	origFirstSig := tok[dot+1]
+	replacement := byte('A')
+	if origFirstSig == 'A' {
+		replacement = 'B'
+	}
+	tampered := tok[:dot+1] + string(replacement) + tok[dot+2:]
 	q.Set("$skiptoken", tampered)
 	u.RawQuery = q.Encode()
 

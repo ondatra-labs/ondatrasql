@@ -21,32 +21,23 @@ func runLineage(cfg *config.Config, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
 	}
 
-	// Parse args to determine mode
-	var target string
-	overview := false
-
-	for _, arg := range args {
-		if arg == "overview" {
-			overview = true
-		} else {
-			target = arg
-		}
+	if len(args) == 0 {
+		return &invocationErr{fmt.Errorf("usage: ondatrasql lineage overview | <model> | <model.column>")}
+	}
+	if len(args) > 1 {
+		return &invocationErr{fmt.Errorf("usage: ondatrasql lineage overview | <model> | <model.column> (got %d extra args)", len(args)-1)}
 	}
 
-	if overview {
-		// Overview mode - show all models
+	if args[0] == "overview" {
 		return runLineageOverview(sess)
 	}
-
-	if target == "" {
-		return fmt.Errorf("usage: ondatrasql lineage overview | <model> | <model.column>")
-	}
+	target := args[0]
 
 	// Determine if this is model or column focus
 	parts := strings.Split(target, ".")
@@ -160,12 +151,7 @@ func convertToModelLineage(name string, info *backfill.CommitInfo) *lineage.Mode
 	for i, cl := range info.ColumnLineage {
 		sources := make([]lineage.ColumnSource, len(cl.Sources))
 		for j, src := range cl.Sources {
-			sources[j] = lineage.ColumnSource{
-				Table:          src.Table,
-				Column:         src.Column,
-				Transformation: src.Transformation,
-				FunctionName:   src.FunctionName,
-			}
+			sources[j] = lineage.ColumnSource(src)
 		}
 		colLineage[i] = lineage.ColumnLineageInfo{
 			Column:  cl.Column,
@@ -199,12 +185,7 @@ func buildLineageChain(sess *duckdb.Session, target string, info *backfill.Commi
 	for i, cl := range info.ColumnLineage {
 		sources := make([]lineage.ColumnSource, len(cl.Sources))
 		for j, src := range cl.Sources {
-			sources[j] = lineage.ColumnSource{
-				Table:          src.Table,
-				Column:         src.Column,
-				Transformation: src.Transformation,
-				FunctionName:   src.FunctionName,
-			}
+			sources[j] = lineage.ColumnSource(src)
 		}
 		colLineage[i] = lineage.ColumnLineageInfo{
 			Column:  cl.Column,
@@ -240,7 +221,7 @@ func buildLineageChain(sess *duckdb.Session, target string, info *backfill.Commi
 }
 
 // renderLineageGraph renders the full lineage as ASCII art
-func renderLineageGraph(target string, models []*lineage.ModelLineage) string {
+func renderLineageGraph(_ string, models []*lineage.ModelLineage) string {
 	if len(models) == 0 {
 		return "No lineage data available"
 	}

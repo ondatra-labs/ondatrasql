@@ -11,6 +11,39 @@ import (
 	"testing"
 )
 
+// TestSystemdInstallRollbackOnWriteFailure pins the rollback contract:
+// when the timer-file write fails after the service-file write has
+// already succeeded, Install must remove the orphan service file so a
+// retry starts from a clean state. Pre-creating timer-path as a
+// directory makes WriteFile fail deterministically with EISDIR.
+func TestSystemdInstallRollbackOnWriteFailure(t *testing.T) {
+	unitDir := t.TempDir()
+	b := &systemdBackend{unitDirOverride: unitDir}
+
+	projectName := "rollback-test"
+	unit := b.unitName(projectName)
+	servicePath := filepath.Join(unitDir, unit+".service")
+	timerPath := filepath.Join(unitDir, unit+".timer")
+
+	// Make the timer-write fail by occupying the path with a directory.
+	if err := os.Mkdir(timerPath, 0o755); err != nil {
+		t.Fatalf("setup: mkdir timer path: %v", err)
+	}
+
+	_, err := b.Install(projectName, t.TempDir(), "*/5 * * * *", "/usr/bin/true")
+	if err == nil {
+		t.Fatal("expected install to fail when timer path is a directory")
+	}
+
+	// Service file MUST be rolled back so the partial install isn't
+	// visible after the failure.
+	if _, statErr := os.Stat(servicePath); statErr == nil {
+		t.Errorf("service file %s still exists after rollback", servicePath)
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("unexpected stat error: %v", statErr)
+	}
+}
+
 func TestSystemdRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	unitDir := t.TempDir() // isolated unit dir — never touches real ~/.config

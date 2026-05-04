@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -383,5 +384,38 @@ func TestShowValidationStatus_WarningsNotTriggered(t *testing.T) {
 	got := buf.String()
 	if !strings.Contains(got, "1 checked, 0 triggered") {
 		t.Errorf("expected '1 checked, 0 triggered' in output, got: %s", got)
+	}
+}
+
+// TestDerivedTargetFromPath regression-tests the helper that lets
+// findModel attribute a parse error to the requested target without
+// parsing every sibling. The mapping must mirror parser.ParseModel's
+// rules:
+//
+//	models/orders.sql           → main.orders   (top-level → main schema)
+//	models/staging/orders.sql   → staging.orders
+//	models/raw/api/orders.sql   → raw.api__orders   (3+ deep → __ separator)
+//
+// The earlier round-1 implementation used a naive '/'→'.' replacement
+// which broke top-level (got "orders" instead of "main.orders") and
+// 3-deep paths (got "raw.api.orders" instead of "raw.api__orders").
+func TestDerivedTargetFromPath(t *testing.T) {
+	t.Parallel()
+	modelsDir := filepath.Join(t.TempDir(), "models")
+	cases := []struct {
+		path string
+		want string
+	}{
+		{filepath.Join(modelsDir, "orders.sql"), "main.orders"},
+		{filepath.Join(modelsDir, "staging", "orders.sql"), "staging.orders"},
+		{filepath.Join(modelsDir, "raw", "api", "orders.sql"), "raw.api__orders"},
+		{filepath.Join(modelsDir, "raw", "api", "v2", "orders.sql"), "raw.api__v2__orders"},
+		{filepath.Join(t.TempDir(), "outside.sql"), ""}, // outside modelsDir → empty
+	}
+	for _, tc := range cases {
+		got := derivedTargetFromPath(modelsDir, tc.path)
+		if got != tc.want {
+			t.Errorf("derivedTargetFromPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }

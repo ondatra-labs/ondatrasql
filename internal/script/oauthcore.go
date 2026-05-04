@@ -105,7 +105,7 @@ func ExchangeJWTForToken(ctx context.Context, tokenURL, jwt string) (map[string]
 	if err != nil {
 		return nil, fmt.Errorf("token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -139,7 +139,7 @@ func DoOAuthRequest(ctx context.Context, tokenURL string, form url.Values) (map[
 	if err != nil {
 		return nil, fmt.Errorf("oauth request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

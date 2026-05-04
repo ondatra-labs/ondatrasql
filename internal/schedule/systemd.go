@@ -88,15 +88,30 @@ WantedBy=timers.target
 		return "", fmt.Errorf("write service: %w", err)
 	}
 	if err := os.WriteFile(timerPath, []byte(timer), 0o644); err != nil {
+		// Service was written but timer failed — undo the service write
+		// so a partial install doesn't leave an orphan .service behind.
+		_ = os.Remove(servicePath)
 		return "", fmt.Errorf("write timer: %w", err)
 	}
 
-	// Reload + enable + start (skipped in test mode)
+	// Reload + enable + start (skipped in test mode). On any failure
+	// here, roll back the unit files so the user can retry from a
+	// clean slate — without rollback a stale .service/.timer pair is
+	// left visible to systemctl, which masks the real error on a retry
+	// and can keep the timer subtly active under an old config.
 	if s.useSystemctl() {
 		if err := runCmd("systemctl", "--user", "daemon-reload"); err != nil {
+			_ = os.Remove(servicePath)
+			_ = os.Remove(timerPath)
 			return "", fmt.Errorf("systemctl daemon-reload: %w", err)
 		}
 		if err := runCmd("systemctl", "--user", "enable", "--now", unit+".timer"); err != nil {
+			_ = os.Remove(servicePath)
+			_ = os.Remove(timerPath)
+			// Best-effort second daemon-reload so systemctl forgets the
+			// units we just removed; ignore its error since the primary
+			// failure is what we want to surface.
+			_ = runCmd("systemctl", "--user", "daemon-reload")
 			return "", fmt.Errorf("systemctl enable: %w", err)
 		}
 	}
@@ -112,16 +127,30 @@ func (s *systemdBackend) Remove(projectName string) error {
 	unit := s.unitName(projectName)
 
 	if s.useSystemctl() {
-		// Disable + stop (best-effort)
-		_ = runCmd("systemctl", "--user", "disable", "--now", unit+".timer")
+		// Disable + stop. Fails are non-fatal here (the unit may already
+		// be disabled, or the timer may not exist), but we surface them
+		// to stderr so a permission-denied or broken systemd doesn't
+		// silently leave the timer active when the user thinks Remove
+		// succeeded.
+		if err := runCmd("systemctl", "--user", "disable", "--now", unit+".timer"); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: systemctl disable %s.timer failed: %v\n", unit, err)
+		}
 	}
 
-	// Remove files
-	_ = os.Remove(filepath.Join(unitDir, unit+".service"))
-	_ = os.Remove(filepath.Join(unitDir, unit+".timer"))
+	// Remove files. Surface unexpected errors (a real ENOENT is
+	// expected on a never-installed unit; permission denied or I/O
+	// errors are not).
+	for _, suffix := range []string{".service", ".timer"} {
+		path := filepath.Join(unitDir, unit+suffix)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "warning: remove %s: %v\n", path, err)
+		}
+	}
 
 	if s.useSystemctl() {
-		_ = runCmd("systemctl", "--user", "daemon-reload")
+		if err := runCmd("systemctl", "--user", "daemon-reload"); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: systemctl daemon-reload failed: %v\n", err)
+		}
 	}
 	return nil
 }

@@ -53,7 +53,7 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 		if err != nil {
 			return fmt.Errorf("create sandbox: %w", err)
 		}
-		defer os.RemoveAll(sandboxDir)
+		defer func() { _ = os.RemoveAll(sandboxDir) }() // ignored: best-effort temp-dir cleanup
 	}
 
 	// Create session
@@ -61,7 +61,7 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	// Initialize with catalog
 	if sandboxMode {
@@ -70,7 +70,7 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 			if !output.JSONEnabled {
 				fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
 				var answer string
-				fmt.Scanln(&answer)
+				_, _ = fmt.Scanln(&answer) // empty input falls through to safety default below
 				if answer != "y" && answer != "Y" {
 					return fmt.Errorf("sandbox cancelled by user")
 				}
@@ -91,7 +91,7 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 	if sandboxMode {
 		printCenteredLine(fmt.Sprintf("SANDBOX: %s", cmdName))
 	} else {
-		printCenteredLine(strings.Title(cmdName))
+		printCenteredLine(titleCase(cmdName))
 	}
 	printSectionBorder("")
 	printEmptyLine()
@@ -126,10 +126,11 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 			printPaddedLine(fmt.Sprintf("  ERROR: %s", truncateStr(err.Error(), 50)))
 			printEmptyLine()
 			printBottomBorder()
-			// Cleanup sandbox on error
+			// Cleanup sandbox on error — outer return already propagates
+			// the real failure, so cleanup-call errors aren't actionable.
 			if sandboxMode {
-				sess.Close()
-				os.RemoveAll(sandboxDir)
+				_ = sess.Close()
+				_ = os.RemoveAll(sandboxDir)
 			}
 			return fmt.Errorf("%s failed: %w", cmdName, err)
 		}
@@ -152,10 +153,11 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 
 	printBottomBorder()
 
-	// Cleanup sandbox
+	// Cleanup sandbox — best-effort; the success path doesn't have an
+	// alternative channel to surface cleanup errors on.
 	if sandboxMode {
-		sess.Close()
-		os.RemoveAll(sandboxDir)
+		_ = sess.Close()
+		_ = os.RemoveAll(sandboxDir)
 		output.Println()
 		output.Fprintf("Sandbox cleaned up. Run 'ondatrasql %s' to execute on prod.\n", cmdName)
 	}
@@ -165,6 +167,32 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 
 // splitStatements splits SQL into individual statements.
 // Handles semicolons but ignores those inside strings.
+// titleCase upper-cases the first ASCII letter of each whitespace-
+// separated word. ASCII-only is fine here because the input is one of
+// the fixed sql/<cmd>.sql command names (flush, merge, expire, ...)
+// that we control. strings.Title is deprecated in Go 1.18+ and the
+// recommended replacement (golang.org/x/text/cases) is overkill for
+// this single ASCII-only call site.
+func titleCase(s string) string {
+	if s == "" {
+		return s
+	}
+	out := []byte(s)
+	upper := true
+	for i, b := range out {
+		switch {
+		case b == ' ' || b == '\t' || b == '_' || b == '-':
+			upper = true
+		case upper && b >= 'a' && b <= 'z':
+			out[i] = b - ('a' - 'A')
+			upper = false
+		default:
+			upper = false
+		}
+	}
+	return string(out)
+}
+
 func splitStatements(sql string) []string {
 	var statements []string
 	var current strings.Builder

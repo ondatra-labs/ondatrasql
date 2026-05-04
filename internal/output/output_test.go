@@ -207,13 +207,20 @@ func TestModelResult_StatusError(t *testing.T) {
 	}
 }
 
-func TestModelResult_StatusOk_NoErrors(t *testing.T) {
+// TestModelResult_StatusOk_AlwaysEmitsErrors pins R10 #1: Errors and
+// Warnings are part of the documented "always emitted" envelope shape
+// (matching history/stats/query/sql --json). A clean run produces
+// `"errors":[],"warnings":[]` rather than omitting the keys, so typed
+// clients can decode unconditionally without branching on key presence.
+func TestModelResult_StatusOk_AlwaysEmitsErrors(t *testing.T) {
 	t.Parallel()
 	mr := ModelResult{
 		Model:        "staging.orders",
 		Kind:         "table",
 		Status:       "ok",
 		RowsAffected: 100,
+		Errors:       []string{},
+		Warnings:     []string{},
 	}
 
 	data, err := json.Marshal(mr)
@@ -225,17 +232,26 @@ func TestModelResult_StatusOk_NoErrors(t *testing.T) {
 	if !strings.Contains(s, `"status":"ok"`) {
 		t.Errorf("expected status ok, got: %s", s)
 	}
-	if strings.Contains(s, `"errors"`) {
-		t.Error("errors should be omitted when status is ok")
+	if !strings.Contains(s, `"errors":[]`) {
+		t.Errorf("errors must be emitted as [] on a clean run, got: %s", s)
+	}
+	if !strings.Contains(s, `"warnings":[]`) {
+		t.Errorf("warnings must be emitted as [] on a clean run, got: %s", s)
 	}
 }
 
-func TestModelResult_JSON_OmitEmpty(t *testing.T) {
+// TestModelResult_JSON_OmitEmptyOptional pins that fields OUTSIDE the
+// always-emitted set still respect omitempty: dag_run_id is optional,
+// sandbox defaults to false. Errors/Warnings are NOT in this set
+// anymore — they're always emitted (see test above).
+func TestModelResult_JSON_OmitEmptyOptional(t *testing.T) {
 	t.Parallel()
 	mr := ModelResult{
-		Model:  "main.test",
-		Kind:   "table",
-		Status: "ok",
+		Model:    "main.test",
+		Kind:     "table",
+		Status:   "ok",
+		Errors:   []string{},
+		Warnings: []string{},
 	}
 
 	data, err := json.Marshal(mr)
@@ -244,16 +260,10 @@ func TestModelResult_JSON_OmitEmpty(t *testing.T) {
 	}
 
 	s := string(data)
-	if strings.Contains(s, "errors") {
-		t.Error("errors should be omitted when empty")
-	}
-	if strings.Contains(s, "warnings") {
-		t.Error("warnings should be omitted when empty")
-	}
 	if strings.Contains(s, "dag_run_id") {
 		t.Error("dag_run_id should be omitted when empty")
 	}
-	if strings.Contains(s, "sandbox") {
+	if strings.Contains(s, `"sandbox"`) {
 		t.Error("sandbox should be omitted when false")
 	}
 }

@@ -1150,8 +1150,11 @@ func TestStore_AsyncRecovery_JobRefSurvivesWriteBatch(t *testing.T) {
 		t.Fatalf("got %d pending after recovery, want 3 (2 recovered + 1 new)", len(pending))
 	}
 
-	// Step 4b: job_ref still loadable for resume
-	ref, hash, _ = store.LoadJobRef(target)
+	// Step 4b: job_ref still loadable for resume. `hash` is intentionally
+	// discarded here — the recovery contract returns the original event
+	// fingerprint but this assertion only verifies the job_ref payload
+	// survives RecoverInflight; fingerprint stability has its own test.
+	ref, _, _ = store.LoadJobRef(target)
 	if ref == nil {
 		t.Fatal("job_ref should still exist after RecoverInflight")
 	}

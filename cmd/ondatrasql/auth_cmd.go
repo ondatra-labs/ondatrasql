@@ -206,25 +206,38 @@ func runAuthLocal(ctx context.Context, cfg *config.Config, provider string) erro
 		// Validate state parameter to prevent CSRF
 		if r.URL.Query().Get("state") != expectedState {
 			errCh <- fmt.Errorf("state mismatch in callback (possible CSRF)")
-			fmt.Fprint(w, "<h1>Error</h1><p>State mismatch — possible CSRF attack.</p>")
+			writeBody(w, "<h1>Error</h1><p>State mismatch — possible CSRF attack.</p>")
 			return
 		}
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errCh <- fmt.Errorf("no code in callback")
-			fmt.Fprint(w, "<h1>Error</h1><p>No authorization code received.</p>")
+			writeBody(w, "<h1>Error</h1><p>No authorization code received.</p>")
 			return
 		}
 		codeCh <- code
-		fmt.Fprint(w, "<h1>Authorized</h1><p>You can close this window and return to your terminal.</p>")
+		writeBody(w, "<h1>Authorized</h1><p>You can close this window and return to your terminal.</p>")
 	})
 
 	srv := &http.Server{Handler: mux}
-	go func() { srv.Serve(listener) }()
+	go func() {
+		// http.ErrServerClosed is the expected return from Serve once
+		// the deferred Shutdown fires; surface anything else.
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("auth callback server: %w", err)
+		}
+	}()
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		// Surface graceful-shutdown failures (deadline exceeded means
+		// connections didn't drain in time, other errors mean listener
+		// or runtime trouble — operator wants to know either way).
+		// Log instead of returning because we're inside a deferred
+		// closure on the auth-flow's exit path.
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: auth callback server shutdown: %v\n", err)
+		}
 	}()
 
 	// Build auth URL

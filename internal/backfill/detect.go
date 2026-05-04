@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
@@ -302,8 +303,8 @@ func GetPreviousSnapshot(sess *duckdb.Session, target string) (int64, error) {
 		return 0, nil
 	}
 
-	var id int64
-	if _, err := fmt.Sscanf(result, "%d", &id); err != nil {
+	id, err := strconv.ParseInt(strings.TrimSpace(result), 10, 64)
+	if err != nil {
 		return 0, fmt.Errorf("parse previous snapshot id %q for %s: %w", result, target, err)
 	}
 	return id, nil

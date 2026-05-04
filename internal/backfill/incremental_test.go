@@ -9,6 +9,7 @@ package backfill_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
@@ -326,6 +327,30 @@ func TestGetIncrementalState_ThreePartTarget(t *testing.T) {
 	}
 	if !state.IsBackfill {
 		t.Error("expected IsBackfill=true for non-existent table")
+	}
+}
+
+// TestGetIncrementalState_PropagatesMaxCursorError regression-tests the
+// fix that surfaces a failed MAX(cursor) lookup as an error rather than
+// silently falling back to InitialValue. Previously a broken cursor
+// column would force a destructive full re-fetch on every run because
+// state.LastValue silently reset to InitialValue.
+func TestGetIncrementalState_PropagatesMaxCursorError(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	// Create a table that exists but has no `nonexistent` column, so the
+	// MAX(nonexistent)::VARCHAR query fails with a column-not-found error.
+	p.AddModel("staging/missing_cursor.sql", `-- @kind: table
+SELECT 1 AS id, 'x' AS name
+`)
+	runModel(t, p, "staging/missing_cursor.sql")
+
+	_, err := backfill.GetIncrementalState(p.Sess, "staging.missing_cursor", "nonexistent", "2020-01-01")
+	if err == nil {
+		t.Fatal("expected error for MAX(nonexistent), got nil — silent fallback would force destructive re-fetch")
+	}
+	if !strings.Contains(err.Error(), "MAX") && !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("error should reference cursor column, got: %v", err)
 	}
 }
 

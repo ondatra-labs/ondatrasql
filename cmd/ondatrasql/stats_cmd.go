@@ -15,51 +15,79 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
+// statsSchemaVersion is the JSON schema version for the `stats` command
+// output. Bump on breaking changes to ProjectStats / ModelStats /
+// KindCount field shape.
+//
+// Version history:
+//   - 1: initial release with snake_case JSON fields
+const statsSchemaVersion = 1
+
 // ProjectStats holds project-level statistics.
+//
+// JSON field names use snake_case for consistency with the rest of the
+// CLI's machine-readable output (validate, describe, history).
 type ProjectStats struct {
+	// SchemaVersion lets typed clients detect breaking changes.
+	SchemaVersion int `json:"schema_version"`
+
 	// Counts
-	ModelCount int
-	Snapshots  int
-	TotalRuns  int
+	ModelCount int `json:"model_count"`
+	Snapshots  int `json:"snapshots"`
+	TotalRuns  int `json:"total_runs"`
 
 	// Processing
-	TotalRows   int64
-	AvgDuration float64
+	TotalRows   int64   `json:"total_rows"`
+	AvgDuration float64 `json:"avg_duration_ms"`
 
 	// Timing
-	LastRun string
+	LastRun string `json:"last_run,omitempty"`
 
-	// By kind breakdown (ordered)
-	KindBreakdown []KindCount
+	// By kind breakdown (ordered). Always emitted as an array (possibly
+	// empty) so JSON consumers see a stable shape — empty project must
+	// look the same as populated project.
+	KindBreakdown []KindCount `json:"kind_breakdown"`
 
-	// All models
-	AllModels []ModelStats
+	// All models. Always emitted as an array (see KindBreakdown).
+	AllModels []ModelStats `json:"all_models"`
 
 	// DuckLake info
-	CatalogType string `json:",omitempty"`
-	DataPath    string `json:",omitempty"`
-	DuckLakeVer string `json:",omitempty"`
+	CatalogType string `json:"catalog_type,omitempty"`
+	DataPath    string `json:"data_path,omitempty"`
+	DuckLakeVer string `json:"ducklake_version,omitempty"`
+
+	// Warnings surface non-fatal partial-output failures (a sub-query
+	// failed but the rest of the report is intact). Always emitted as
+	// `[]` when empty so typed clients can decode unconditionally —
+	// removed `omitempty` for shape parity with history/run envelopes
+	// (R7 #5). The runtime path appends to the slice via append, which
+	// promotes a nil slice to a populated one; add an explicit
+	// initialisation in runStats so the encoded JSON is `[]` rather
+	// than `null` on the no-warnings path.
+	Warnings []string `json:"warnings"`
 }
 
 // KindCount holds count for a kind.
 type KindCount struct {
-	Kind  string
-	Count int
+	Kind  string `json:"kind"`
+	Count int    `json:"count"`
 }
 
 // ModelStats holds stats for a single model.
+//
+//lintcheck:nojsonversion nested under ProjectStats.AllModels; versioned via the wrapping payload.
 type ModelStats struct {
-	Name     string
-	Kind     string
-	RunType  string
-	Rows     int64
-	Duration int64
-	LastRun  string
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	RunType  string `json:"run_type,omitempty"`
+	Rows     int64  `json:"rows"`
+	Duration int64  `json:"duration_ms"`
+	LastRun  string `json:"last_run,omitempty"`
 	// Orphaned is true when the table exists in the catalog but its
 	// model file no longer exists on disk. Kept as a separate flag so
 	// JSON consumers can rely on Name as a stable identifier instead
-	// of parsing presentation labels. (Review finding 3)
-	Orphaned bool `json:",omitempty"`
+	// of parsing presentation labels.
+	Orphaned bool `json:"orphaned,omitempty"`
 }
 
 // runStats executes the stats command with nice formatting.
@@ -68,7 +96,7 @@ func runStats(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	defer sess.Close()
+	defer closeSessionOrLog(sess)
 
 	if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
 		return fmt.Errorf("init session: %w", err)
@@ -97,7 +125,16 @@ func runStats(cfg *config.Config) error {
 
 // gatherProjectStats collects project-level statistics.
 func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
-	stats := &ProjectStats{}
+	// Initialise slice fields to non-nil empty slices so they JSON-encode
+	// as `[]` rather than `null` when the project has no models / kinds.
+	// Stable shape lets typed clients rely on the field always being an
+	// array, populated or not.
+	stats := &ProjectStats{
+		SchemaVersion: statsSchemaVersion,
+		KindBreakdown: []KindCount{},
+		AllModels:     []ModelStats{},
+		Warnings:      []string{},
+	}
 
 	// Get basic counts
 	basicQuery, err := sql.LoadQuery("stats_basic")
@@ -111,18 +148,44 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 	}
 	if len(rows) > 0 {
 		row := rows[0]
-		stats.ModelCount, _ = strconv.Atoi(row["models"])
-		stats.TotalRuns, _ = strconv.Atoi(row["total_runs"])
-		stats.TotalRows, _ = strconv.ParseInt(row["total_rows"], 10, 64)
-		stats.AvgDuration, _ = strconv.ParseFloat(row["avg_duration"], 64)
+		// Surface parse failures as warnings (matching describe.GatherWarnings).
+		// COUNT(*)/COALESCE(...) results should always parse, but a malformed
+		// snapshot extra-info JSON could yield a non-numeric string — silent
+		// fallback to 0 would hide that the report is partial.
+		if v, perr := strconv.Atoi(row["models"]); perr == nil {
+			stats.ModelCount = v
+		} else if row["models"] != "" {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse models: %v", perr))
+		}
+		if v, perr := strconv.Atoi(row["total_runs"]); perr == nil {
+			stats.TotalRuns = v
+		} else if row["total_runs"] != "" {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse total_runs: %v", perr))
+		}
+		if v, perr := strconv.ParseInt(row["total_rows"], 10, 64); perr == nil {
+			stats.TotalRows = v
+		} else if row["total_rows"] != "" {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse total_rows: %v", perr))
+		}
+		if v, perr := strconv.ParseFloat(row["avg_duration"], 64); perr == nil {
+			stats.AvgDuration = v
+		} else if row["avg_duration"] != "" {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse avg_duration: %v", perr))
+		}
 		stats.LastRun = row["last_run"]
 	}
 
 	// Get snapshot count
 	snapshotQuery := "SELECT COUNT(*) as cnt FROM snapshots()"
 	snapRows, err := sess.QueryRowsMap(snapshotQuery)
-	if err == nil && len(snapRows) > 0 {
-		stats.Snapshots, _ = strconv.Atoi(snapRows[0]["cnt"])
+	if err != nil {
+		stats.Warnings = append(stats.Warnings, fmt.Sprintf("snapshot count: %v", err))
+	} else if len(snapRows) > 0 {
+		if v, perr := strconv.Atoi(snapRows[0]["cnt"]); perr == nil {
+			stats.Snapshots = v
+		} else if snapRows[0]["cnt"] != "" {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse snapshot count: %v", perr))
+		}
 	}
 
 	// Get kind breakdown (ordered by count DESC)
@@ -132,11 +195,18 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 	}
 
 	kindRows, err := sess.QueryRowsMap(kindQuery)
-	if err == nil {
+	if err != nil {
+		stats.Warnings = append(stats.Warnings, fmt.Sprintf("kind breakdown: %v", err))
+	} else {
 		for _, row := range kindRows {
 			kind := row["kind"]
-			cnt, _ := strconv.Atoi(row["cnt"])
-			stats.KindBreakdown = append(stats.KindBreakdown, KindCount{Kind: kind, Count: cnt})
+			if v, perr := strconv.Atoi(row["cnt"]); perr == nil {
+				stats.KindBreakdown = append(stats.KindBreakdown, KindCount{Kind: kind, Count: v})
+			} else if row["cnt"] != "" {
+				stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse kind_breakdown[%s].count: %v", kind, perr))
+			} else {
+				stats.KindBreakdown = append(stats.KindBreakdown, KindCount{Kind: kind, Count: 0})
+			}
 		}
 	}
 
@@ -147,12 +217,21 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 	}
 
 	modelRows, err := sess.QueryRowsMap(modelsQuery)
-	if err == nil {
+	if err != nil {
+		stats.Warnings = append(stats.Warnings, fmt.Sprintf("all models: %v", err))
+	} else {
 		for _, row := range modelRows {
-			rows, _ := strconv.ParseInt(row["rows"], 10, 64)
-			duration, _ := strconv.ParseInt(row["duration"], 10, 64)
+			modelName := row["model"]
+			rows, rowsErr := strconv.ParseInt(row["rows"], 10, 64)
+			if rowsErr != nil && row["rows"] != "" {
+				stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse all_models[%s].rows: %v", modelName, rowsErr))
+			}
+			duration, durErr := strconv.ParseInt(row["duration"], 10, 64)
+			if durErr != nil && row["duration"] != "" {
+				stats.Warnings = append(stats.Warnings, fmt.Sprintf("parse all_models[%s].duration_ms: %v", modelName, durErr))
+			}
 			stats.AllModels = append(stats.AllModels, ModelStats{
-				Name:     row["model"],
+				Name:     modelName,
 				Kind:     row["kind"],
 				RunType:  row["run_type"],
 				Rows:     rows,
@@ -168,7 +247,9 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 		alias = "lake"
 	}
 	dlRows, err := sess.QueryRowsMap(fmt.Sprintf("SELECT * FROM ducklake_settings('%s')", alias))
-	if err == nil && len(dlRows) > 0 {
+	if err != nil {
+		stats.Warnings = append(stats.Warnings, fmt.Sprintf("ducklake settings: %v", err))
+	} else if len(dlRows) > 0 {
 		stats.CatalogType = dlRows[0]["catalog_type"]
 		stats.DataPath = dlRows[0]["data_path"]
 		stats.DuckLakeVer = dlRows[0]["extension_version"]
@@ -188,8 +269,10 @@ func gatherProjectStats(sess *duckdb.Session) (*ProjectStats, error) {
 func annotateOrphans(stats *ProjectStats, cfg *config.Config) {
 	models, err := loadModelsFromDir(cfg)
 	if err != nil {
-		// If we can't load models, leave stats untouched — better to show
-		// possibly-stale info than to silently hide everything.
+		// Surface the failure so the user knows orphan detection didn't
+		// run — silently leaving stats untouched would hide stale
+		// catalog rows that should have been flagged.
+		stats.Warnings = append(stats.Warnings, fmt.Sprintf("orphan detection skipped: %v", err))
 		return
 	}
 	known := make(map[string]bool, len(models))
@@ -292,6 +375,15 @@ func printStatsBox(stats *ProjectStats) {
 				line := fmt.Sprintf("  %-22s %-9s %5d %5d   %5s", name, m.Kind, m.Rows, m.Duration, m.LastRun)
 				printPaddedLine(line)
 			}
+		}
+		printEmptyLine()
+	}
+
+	if len(stats.Warnings) > 0 {
+		printSectionBorder("Warnings")
+		printEmptyLine()
+		for _, w := range stats.Warnings {
+			printPaddedLine("  " + w)
 		}
 		printEmptyLine()
 	}

@@ -167,6 +167,8 @@ edit <target>        Open file in $EDITOR
 sql "SELECT ..."     Query DuckLake catalog
 stats                Project overview
 describe <model>     Model details and schema
+describe blueprint   Blueprint API contract introspection
+validate             Static validation of models and blueprints
 history [model]      Run history
 lineage overview     View dependencies and column lineage
 flush                Flush inlined data to Parquet

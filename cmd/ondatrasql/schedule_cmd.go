@@ -27,6 +27,9 @@ func runSchedule(cfg *config.Config, args []string) error {
 	if len(args) == 0 {
 		return showSchedule(cfg)
 	}
+	if len(args) > 1 {
+		return &invocationErr{fmt.Errorf("usage: ondatrasql schedule [<cron> | remove] (got %d extra args)", len(args)-1)}
+	}
 	if args[0] == "remove" || args[0] == "uninstall" {
 		return removeSchedule(cfg)
 	}
@@ -64,9 +67,34 @@ func getOrCreateProjectID(cfg *config.Config) string {
 		if len(id) >= 8 {
 			return id[:8]
 		}
+		// File exists but is truncated/empty. Don't silently rotate to
+		// a new id — the OS scheduler may already have a unit
+		// installed under the existing (now-orphaned) id, and rotating
+		// would create a second active timer/plist while leaving the
+		// first one stranded. Refuse to rotate; surface the corruption
+		// to stderr so the operator can clean up manually. Falls
+		// through to deterministic fallback below for the current
+		// invocation so other commands (status/remove) can still find
+		// the existing schedule by hashed path.
+		fmt.Fprintf(os.Stderr,
+			"warning: %s is truncated (%d bytes); not rotating — fix or delete the file manually before installing a new schedule\n",
+			idPath, len(id))
+	} else if !os.IsNotExist(err) {
+		// File exists but unreadable (permission denied, etc.). Same
+		// concern as truncation: don't rotate behind the user's back.
+		fmt.Fprintf(os.Stderr,
+			"warning: cannot read %s: %v — not rotating; commands fall back to path-derived id\n",
+			idPath, err)
+		abs, absErr := filepath.Abs(cfg.ProjectDir)
+		if absErr != nil {
+			abs = cfg.ProjectDir
+		}
+		sum := sha256.Sum256([]byte(abs))
+		return hex.EncodeToString(sum[:4])
 	}
 
-	// Generate a new random id
+	// Generate a new random id (only when the file genuinely doesn't
+	// exist or is truncated past recoverability — both surfaced above).
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err == nil {
 		id := hex.EncodeToString(b[:])

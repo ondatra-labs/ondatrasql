@@ -1350,6 +1350,74 @@ func TestExtract_WalkerProbe_TableFunctionWithSubquery(t *testing.T) {
 		t.Fatalf("GetAllTables: %v", err)
 	}
 	if !containsTable(tables, "staging.left_tbl") || !containsTable(tables, "staging.right_tbl") {
-		t.Errorf("table-fn-with-subquery: expected both tables, got %v", tables)
+	    t.Errorf("table-fn-with-subquery: expected both tables, got %v", tables)
+	}
+}
+
+// TestExtract_ThreePartColumnRef regression-tests the fix in
+// traceExprWithType: a 3-part COLUMN_REF (schema.table.column) used to
+// silently corrupt the lineage by treating the schema token as the
+// column name. The right-most token must always be the column.
+func TestExtract_ThreePartColumnRef(t *testing.T) {
+	sql := `SELECT staging.orders.amount AS amt FROM staging.orders`
+	lineage, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	var amtSources []SourceColumn
+	for _, cl := range lineage {
+		if cl.Column == "amt" {
+			amtSources = cl.Sources
+		}
+	}
+	if len(amtSources) == 0 {
+		t.Fatalf("expected sources for 'amt', got none; lineage=%+v", lineage)
+	}
+	for _, s := range amtSources {
+		if s.Column != "amount" {
+			t.Errorf("source column = %q, want 'amount' (3-part ref must select right-most token)", s.Column)
+		}
+	}
+}
+
+// TestExtract_FourPartColumnRef extends the 3-part test to a fully
+// qualified catalog.schema.table.column reference. The fix must still
+// pick the right-most token as the column.
+func TestExtract_FourPartColumnRef(t *testing.T) {
+	sql := `SELECT memory.staging.orders.amount AS amt FROM memory.staging.orders`
+	lineage, err := Extract(shared, sql)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	var amtSources []SourceColumn
+	for _, cl := range lineage {
+		if cl.Column == "amt" {
+			amtSources = cl.Sources
+		}
+	}
+	if len(amtSources) == 0 {
+		t.Fatalf("expected sources for 'amt', got none; lineage=%+v", lineage)
+	}
+	for _, s := range amtSources {
+		if s.Column != "amount" {
+			t.Errorf("source column = %q, want 'amount' (4-part ref must select right-most token)", s.Column)
+		}
+	}
+}
+
+// TestExtractTables_CatalogQualified regression-tests collectTablesScoped:
+// a catalog-qualified BASE_TABLE used to silently drop the catalog from
+// the resulting fullName. The catalog component must be preserved.
+func TestExtractTables_CatalogQualified(t *testing.T) {
+	sql := `SELECT * FROM memory.staging.orders`
+	tables, err := ExtractTables(shared, sql)
+	if err != nil {
+		t.Fatalf("ExtractTables: %v", err)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("expected 1 table, got %d (%v)", len(tables), tables)
+	}
+	if tables[0].Table != "memory.staging.orders" {
+		t.Errorf("table = %q, want memory.staging.orders (catalog must be preserved)", tables[0].Table)
 	}
 }

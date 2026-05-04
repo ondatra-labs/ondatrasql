@@ -7,6 +7,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -130,6 +131,33 @@ func TestParseCatalogSQL(t *testing.T) {
 			wantPath:  "new.sqlite",
 			wantDP:    "new.sqlite.files", // default for sqlite
 			wantAlias: "catalog",
+		},
+		{
+			// Regression: a leading-comment line followed by ATTACH used to
+			// collapse to a single string whose first ;-chunk began with
+			// "--". The HasPrefix("--") guard then dropped the ATTACH and
+			// the parser silently fell back to defaults, so sandbox / other
+			// CatalogInfo consumers targeted the wrong catalog.
+			name:      "leading comment before ATTACH preserves attach",
+			content:   "-- managed by deploy script\nATTACH 'ducklake:sqlite:real.sqlite' AS lake;",
+			wantType:  "sqlite",
+			wantPath:  "real.sqlite",
+			wantDP:    "real.sqlite.files",
+			wantAlias: "lake",
+		},
+		{
+			// Round-2 regression: the comment-stripper used naive
+			// strings.Index(ln,"--") which truncated inside SQL string
+			// literals. A connection-string password containing `--`
+			// would lose the rest of the ATTACH, and parseCatalogSQL
+			// would silently fall back to defaults pointing at the
+			// wrong database.
+			name:      "literal containing -- preserves attach",
+			content:   "ATTACH 'ducklake:postgres:postgresql://user:pa--ss@host/db' AS lake;",
+			wantType:  "postgres",
+			wantPath:  "postgresql://user:pa--ss@host/db",
+			wantDP:    "", // no DATA_PATH — defaults applied
+			wantAlias: "lake",
 		},
 		{
 			name:      "duckdb backend",
@@ -407,5 +435,53 @@ func TestFindProjectRoot_NotFound(t *testing.T) {
 	_, err := FindProjectRoot(tmpDir)
 	if !os.IsNotExist(err) {
 		t.Errorf("expected os.ErrNotExist, got %v", err)
+	}
+}
+
+// TestLoadEnvFile_SetenvErrorPropagated regression-tests the fix that
+// promotes os.Setenv failures from silent ignores to returned errors.
+// Triggered by an env line whose key is empty (e.g. "=value") — Go's
+// os.Setenv documents that an empty name returns an error. Pre-fix
+// the env-load silently dropped the offending line, leaving downstream
+// consumers seeing an unset variable they expected to read.
+func TestLoadEnvFile_SetenvErrorPropagated(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envFile, []byte("=oopsempty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := LoadEnvFile(envFile)
+	if err == nil {
+		t.Fatal("expected error from LoadEnvFile when Setenv would fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "setenv") {
+		t.Errorf("error = %v, want phrase 'setenv'", err)
+	}
+}
+
+// TestStripLineComment regression-tests the helper introduced to
+// preserve `--` sequences inside SQL string literals. Naive
+// strings.Index(line, "--") truncated connection-string passwords
+// like 'pa--ss' and silently dropped the surrounding ATTACH.
+func TestStripLineComment(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"ATTACH 'foo' AS lake;", "ATTACH 'foo' AS lake;"},
+		{"-- comment", ""},
+		{"ATTACH 'foo' AS lake; -- trailing", "ATTACH 'foo' AS lake; "},
+		{"ATTACH 'pa--ss' AS lake;", "ATTACH 'pa--ss' AS lake;"},
+		{"ATTACH 'pa--ss' AS lake; -- trail", "ATTACH 'pa--ss' AS lake; "},
+		{"ATTACH 'a''b--c' AS lake;", "ATTACH 'a''b--c' AS lake;"},
+		{"   ", "   "},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := stripLineComment(tc.in)
+		if got != tc.want {
+			t.Errorf("stripLineComment(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

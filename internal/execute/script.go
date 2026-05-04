@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"os"
+
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
@@ -93,6 +95,8 @@ func (r *Runner) loadExtension(ext string) error {
 
 // runScript executes a Starlark script model using the same flow as SQL models.
 // This ensures scripts get backfill detection, schema evolution, and metadata.
+//
+//lint:ignore U1000 dead code — Starlark model files were removed in v0.30; runScript predates that and has no remaining production caller. Kept until the surrounding helpers are re-evaluated against lib/-blueprint usage.
 func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, error) {
 	start := time.Now()
 	result := &Result{
@@ -190,7 +194,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		result.Duration = time.Since(start)
 		return result, err
 	}
-	defer scriptResult.Close()
+	defer func() { _ = scriptResult.Close() }() // cleanup path; close error secondary
 	r.trace(result, "script_execute", stepStart, "ok")
 
 	// Create temp table from collected data (DuckDB is now resumed).
@@ -282,7 +286,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	// Abort if constraints failed — nack claims so events can be retried
 	if len(result.Errors) > 0 {
-		scriptResult.NackClaims()
+		_ = scriptResult.NackClaims() // claim retries on next run if Nack fails
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
 		return result, fmt.Errorf("constraint validation failed")
@@ -312,7 +316,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		for _, e := range auditParseErrors {
 			result.Errors = append(result.Errors, e.Error())
 		}
-		scriptResult.NackClaims()
+		_ = scriptResult.NackClaims() // claim retries on next run if Nack fails
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
 		return result, fmt.Errorf("audit parse errors")
@@ -329,7 +333,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		// aborts the transaction but leaves the session in an aborted
 		// state — explicit ROLLBACK clears it so the next model in the
 		// same batch can start its own transaction. Best-effort.
-		r.sess.Exec("ROLLBACK")
+		_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
 
 		// Badger claim handling differs by failure cause:
 		//
@@ -355,7 +359,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 					fmt.Sprintf("ack after audit failure: %v", ackErr))
 			}
 		} else {
-			scriptResult.NackClaims()
+			_ = scriptResult.NackClaims() // claim retries on next run if Nack fails
 		}
 
 		result.Errors = append(result.Errors, err.Error())
@@ -372,7 +376,9 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		result.Warnings = append(result.Warnings, fmt.Sprintf("ack claims: %v", ackErr))
 	} else {
 		for _, claimID := range scriptResult.ClaimIDs {
-			script.DeleteAck(r.sess, claimID)
+			if err := script.DeleteAck(r.sess, claimID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: delete ack record: %v\n", err)
+			}
 		}
 	}
 

@@ -22,14 +22,15 @@ stdout 'willdie \[orphaned\]'
 # The kept model must NOT have the tag
 ! stdout 'keeps \[orphaned\]'
 
-# --- JSON rendering: Name stays clean, Orphaned: true is set separately ---
+# --- JSON rendering: name stays clean, orphaned: true is set separately ---
+# v0.31 migrated all --json fields from PascalCase to snake_case.
 exec ondatrasql --json stats
-stdout '"Name":"raw.willdie","Kind"'
-stdout '"Orphaned":true'
-# The kept model must not have " [orphaned]" baked into Name
-! stdout '"Name":"raw.willdie \[orphaned\]"'
-# Canonical Name stays present for the non-orphan too
-stdout '"Name":"raw.keeps"'
+stdout '"name":"raw.willdie","kind"'
+stdout '"orphaned":true'
+# The kept model must not have " [orphaned]" baked into name
+! stdout '"name":"raw.willdie \[orphaned\]"'
+# Canonical name stays present for the non-orphan too
+stdout '"name":"raw.keeps"'
 
 -- m1.sql --
 -- @kind: table

@@ -59,6 +59,10 @@ func toInt64(v any) int64 {
 	case int32:
 		return int64(val)
 	default:
+		// toInt64 is a coercion helper for DuckDB rowset values; the
+		// documented contract is "return 0 for anything we can't read
+		// as an integer" so unparseable strings fall back to zero.
+		//strconvcheck:silent toInt64's contract is zero-on-non-numeric
 		n, _ := strconv.ParseInt(fmt.Sprintf("%v", v), 10, 64)
 		return n
 	}

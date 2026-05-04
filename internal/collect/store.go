@@ -38,10 +38,21 @@ type Store struct {
 }
 
 // Open opens or creates a Badger store at the given directory.
+//
+// SyncWrites is true so that the batch endpoint
+// (`POST /collect/<schema>/<table>/batch`) returns 202 only after the
+// transaction has been fsync'd — matching the "fully durable" contract
+// in docs/concepts/events.md and docs/reference/data-access/events-api.md.
+//
+// The single-event endpoint amortises the cost via the WriteBatch
+// flushed every 100ms (server.go), so per-event latency stays at the
+// WriteBatch layer; only the periodic Flush() pays the fsync. ack/nack
+// and claim transactions also fsync, which is what we want for
+// at-least-once delivery semantics.
 func Open(dir string) (*Store, error) {
 	opts := badger.DefaultOptions(dir).
-		WithLogger(nil).        // Suppress Badger's built-in logging
-		WithSyncWrites(false)   // Async writes — OS flushes to disk periodically
+		WithLogger(nil).      // Suppress Badger's built-in logging
+		WithSyncWrites(true)  // fsync on commit — see comment above
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)
@@ -49,9 +60,12 @@ func Open(dir string) (*Store, error) {
 	s := &Store{db: db, wb: db.NewWriteBatch()}
 
 	// Scan existing keys to find the max counter value, preventing
-	// key collisions on restart (Bug S31-32).
+	// key collisions on restart (Bug S31-32). A View failure here is
+	// fatal: starting with maxSeq=0 against existing keys would
+	// re-issue the same identifier and corrupt the WriteBatch
+	// invariant. Surface the error so Open() can refuse to start.
 	var maxSeq uint64
-	db.View(func(txn *badger.Txn) error {
+	if err := db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
 		it := txn.NewIterator(opts)
@@ -66,7 +80,10 @@ func Open(dir string) (*Store, error) {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("scan badger keys for max counter: %w", err)
+	}
 	s.counter.Store(maxSeq)
 
 	return s, nil
@@ -188,8 +205,8 @@ func (s *Store) HasRecentInflight(target string) (bool, error) {
 			if len(parts) < 1 {
 				continue
 			}
-			var nanos int64
-			if _, err := fmt.Sscanf(parts[0], "%d", &nanos); err != nil {
+			nanos, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
 				continue
 			}
 			claimTime := time.Unix(0, nanos)
@@ -665,6 +682,189 @@ func (s *Store) ClearAll(target string) error {
 
 		return nil
 	})
+}
+
+// ClaimTarget returns the target ("schema.table") that owns claimID,
+// or ("", false) if no inflight events exist for that claim. Used by
+// admin handlers (R11 #6) to verify the URL path's target matches
+// the claim's actual target before ack/nack — prevents a typoed or
+// stale path from acknowledging another target's claim.
+//
+// Inflight keys follow the format "inflight:{claimID}:{target}:{suffix}",
+// so we scan the inflight: prefix for the first key matching this
+// claimID and parse the target from positions 2.
+func (s *Store) ClaimTarget(claimID string) (string, bool) {
+	prefix := []byte(prefixInflight + claimID + ":")
+	var target string
+	var found bool
+	_ = s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Seek(prefix)
+		if !it.Valid() {
+			return nil
+		}
+		key := string(it.Item().Key())
+		// key = "inflight:<claimID>:<target>:<suffix>"
+		rest := key[len(prefix):]
+		colon := strings.IndexByte(rest, ':')
+		if colon < 0 {
+			return nil
+		}
+		target = rest[:colon]
+		found = true
+		return nil
+	})
+	return target, found
+}
+
+// AckForTarget atomically validates that claimID has at least one
+// inflight event under target, and if so deletes ALL inflight events
+// for that claim. Returns ErrClaimNotFound if no inflight events
+// exist at all (already ack'd, reaped, or never claimed) and
+// ErrClaimWrongTarget if the claim belongs to a different target.
+//
+// Replaces the pre-R12 sequence "ClaimTarget(claim) → Ack(claim)"
+// which had a TOCTOU race: a reap between the two calls returned
+// 200 OK with no mutation. By doing the check and delete inside a
+// single Update txn, the validation and the state change are
+// atomic. (R12 #3.)
+func (s *Store) AckForTarget(claimID, target string) error {
+	prefix := []byte(prefixInflight + claimID + ":")
+	return s.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		// First pass: ensure at least one inflight event exists AND
+		// it belongs to the requested target.
+		it.Seek(prefix)
+		if !it.Valid() {
+			return ErrClaimNotFound
+		}
+		got, ok := parseInflightTarget(string(it.Item().Key()), len(prefix))
+		if !ok {
+			return ErrClaimNotFound
+		}
+		if got != target {
+			return &ErrClaimWrongTarget{ClaimID: claimID, Got: got, Want: target}
+		}
+
+		// Second pass: delete all inflight rows for this claim.
+		var keys [][]byte
+		for it.Seek(prefix); it.Valid(); it.Next() {
+			key := make([]byte, len(it.Item().Key()))
+			copy(key, it.Item().Key())
+			keys = append(keys, key)
+		}
+		for _, k := range keys {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// NackForTarget is the atomic counterpart of AckForTarget for the
+// nack path. Same validation semantics and error returns; on success
+// it requeues the claimed events back to evt: instead of deleting.
+// (R12 #3 — same TOCTOU rationale as AckForTarget.)
+func (s *Store) NackForTarget(claimID, target string) error {
+	prefix := []byte(prefixInflight + claimID + ":")
+	return s.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		it.Seek(prefix)
+		if !it.Valid() {
+			return ErrClaimNotFound
+		}
+		got, ok := parseInflightTarget(string(it.Item().Key()), len(prefix))
+		if !ok {
+			return ErrClaimNotFound
+		}
+		if got != target {
+			return &ErrClaimWrongTarget{ClaimID: claimID, Got: got, Want: target}
+		}
+
+		// Reuse the existing Nack txn body: copy each inflight row
+		// back to its evt: counterpart, then delete the inflight
+		// row. Mirrors Store.Nack's logic but inside the same txn.
+		type inflightRow struct {
+			key  []byte
+			body []byte
+		}
+		var rows []inflightRow
+		for it.Seek(prefix); it.Valid(); it.Next() {
+			item := it.Item()
+			body, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			key := make([]byte, len(item.Key()))
+			copy(key, item.Key())
+			rows = append(rows, inflightRow{key: key, body: body})
+		}
+		for _, row := range rows {
+			// Inflight key: "inflight:<claimID>:<target>:<suffix>"
+			// Evt key:      "evt:<target>:<suffix>"
+			rest := string(row.key)[len(prefix):]
+			colon := strings.IndexByte(rest, ':')
+			if colon < 0 {
+				continue
+			}
+			suffix := rest[colon+1:]
+			evtKey := []byte("evt:" + target + ":" + suffix)
+			if err := txn.Set(evtKey, row.body); err != nil {
+				return err
+			}
+			if err := txn.Delete(row.key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// parseInflightTarget extracts the target from an inflight key of
+// the form "inflight:<claimID>:<target>:<suffix>". prefixLen is the
+// length of the leading "inflight:<claimID>:" portion that the
+// caller has already computed.
+func parseInflightTarget(key string, prefixLen int) (string, bool) {
+	if len(key) <= prefixLen {
+		return "", false
+	}
+	rest := key[prefixLen:]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return "", false
+	}
+	return rest[:colon], true
+}
+
+// ErrClaimNotFound is returned by AckForTarget/NackForTarget when no
+// inflight events exist for the claim ID.
+var ErrClaimNotFound = errors.New("claim has no inflight events (already ack'd, reaped, or never claimed)")
+
+// ErrClaimWrongTarget is returned by AckForTarget/NackForTarget when
+// the claim exists but belongs to a different target than the one
+// the URL path indicated.
+type ErrClaimWrongTarget struct {
+	ClaimID string
+	Got     string
+	Want    string
+}
+
+func (e *ErrClaimWrongTarget) Error() string {
+	return fmt.Sprintf("claim %q belongs to target %q, not %q (URL path mismatch)", e.ClaimID, e.Got, e.Want)
 }
 
 // Ack deletes all inflight events for a claim (successful DuckLake commit).

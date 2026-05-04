@@ -1,3 +1,12 @@
 # --json flag works with version
+# v0.31 wraps version in a versioned envelope when --json is set, so the
+# stdout shape is `{"schema_version":1,"version":"X.Y.Z"}` rather than the
+# bare version string. Plain `ondatrasql version` still emits just the
+# version line.
 exec ondatrasql --json version
+stdout '"schema_version":1'
+stdout '"version":"\d+\.\d+\.\d+"'
+
+# Plain `version` (no --json) keeps the bare line shape.
+exec ondatrasql version
 stdout '^\d+\.\d+\.\d+$'

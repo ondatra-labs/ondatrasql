@@ -4,12 +4,14 @@ import (
 	"testing"
 
 	"go.starlark.net/starlark"
+	"go.starlark.net/syntax"
 )
 
 func TestFilterKwargs_DropsUndeclared(t *testing.T) {
 	t.Parallel()
 	thread := &starlark.Thread{Name: "test"}
-	globals, _ := starlark.ExecFile(thread, "test.star", `
+	opts := &syntax.FileOptions{}
+	globals, _ := starlark.ExecFileOptions(opts, thread, "test.star", `
 def fetch(pattern, page=None):
     pass
 `, nil)
@@ -37,7 +39,8 @@ def fetch(pattern, page=None):
 func TestFilterKwargs_PassesAllWithStarKwargs(t *testing.T) {
 	t.Parallel()
 	thread := &starlark.Thread{Name: "test"}
-	globals, _ := starlark.ExecFile(thread, "test.star", `
+	opts := &syntax.FileOptions{}
+	globals, _ := starlark.ExecFileOptions(opts, thread, "test.star", `
 def fetch(pattern, **kwargs):
     pass
 `, nil)

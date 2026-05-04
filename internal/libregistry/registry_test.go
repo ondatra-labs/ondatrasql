@@ -344,3 +344,64 @@ def push(rows):
 		t.Errorf("expected 1 sink func, got %d", len(sinks))
 	}
 }
+
+// TestScan_PerFileSymlinkOutsideProject regression-tests the fix in
+// runtime Scan: an individual `lib/foo.star` file that resolves
+// (through a symlink) outside the project tree must surface an error.
+// Pre-fix, Scan silently `continue`d past the symlink, so a malicious
+// or accidental external symlink would just produce a "lib not found"
+// at runtime instead of the actual filesystem-scope violation.
+func TestScan_PerFileSymlinkOutsideProject(t *testing.T) {
+	project := t.TempDir()
+	external := t.TempDir()
+
+	// Drop a real .star file outside the project tree.
+	externalLib := filepath.Join(external, "evil.star")
+	if err := os.WriteFile(externalLib, []byte(`API = {"fetch": {"args": []}}` + "\n" + `def fetch(): pass` + "\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink it into the project's lib/ as a per-file symlink.
+	libDir := filepath.Join(project, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalLib, filepath.Join(libDir, "evil.star")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := Scan(project)
+	if err == nil {
+		t.Fatal("expected error for per-file symlink outside project, got nil")
+	}
+	if !strings.Contains(err.Error(), "outside project directory") {
+		t.Errorf("error %q should reference 'outside project directory'", err)
+	}
+}
+
+// TestScan_PerFileReadFailure regression-tests that runtime Scan
+// surfaces a per-file read error rather than silently continuing.
+// Triggered by a .star file with mode 0 (no read permission) — the
+// file passes the .star extension check but ReadFile fails.
+func TestScan_PerFileReadFailure(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; chmod 0 doesn't block reads")
+	}
+	project := t.TempDir()
+	libDir := filepath.Join(project, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unreadable := filepath.Join(libDir, "blocked.star")
+	if err := os.WriteFile(unreadable, []byte("def fetch(): pass\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Scan(project)
+	if err == nil {
+		t.Fatal("expected error for unreadable lib file, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked.star") {
+		t.Errorf("error %q should reference the offending file", err)
+	}
+}

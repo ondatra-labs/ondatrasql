@@ -5,7 +5,11 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/ondatra-labs/ondatrasql/internal/output"
 )
 
 func TestFormatNumber(t *testing.T) {
@@ -105,6 +109,123 @@ func TestDisplayWidth(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("displayWidth(%q) = %d, want %d", tt.input, got, tt.want)
 		}
+	}
+}
+
+// TestPrintModelBox_RendersGatherWarnings regression-tests that
+// non-fatal stats-collection failures collected on
+// ModelInfo.GatherWarnings are surfaced in the human view rather than
+// silently dropped. Previously parse failures (Atoi/ParseInt/ParseFloat)
+// and helper-query errors (size, recent runs, downstream models) were
+// swallowed.
+func TestPrintModelBox_RendersGatherWarnings(t *testing.T) {
+	old := output.Human
+	defer func() { output.Human = old }()
+	var buf strings.Builder
+	output.Human = &buf
+
+	info := &ModelInfo{
+		SchemaVersion: 1,
+		Target:        "staging.orders",
+		Kind:          "table",
+		GatherWarnings: []string{
+			"stats query: connection refused",
+			"parse total_runs: invalid syntax",
+		},
+	}
+	printModelBox(info)
+
+	got := buf.String()
+	if !strings.Contains(got, "Gather Warnings") {
+		t.Errorf("expected 'Gather Warnings' section, got: %s", got)
+	}
+	if !strings.Contains(got, "connection refused") || !strings.Contains(got, "parse total_runs") {
+		t.Errorf("expected both warning messages, got: %s", got)
+	}
+}
+
+// TestModelInfo_JSON_BlueprintCrossLink locks in the JSON contract for
+// the v0.31 blueprint cross-link fields:
+//   - blueprint: name of the lib function the model fetches from.
+//     Omitted when empty so consumers can detect "no lib call" directly.
+//   - blueprint_error: structured signal that blueprint detection
+//     couldn't complete (lib/ failed to parse, AST serialisation failed,
+//     or model references a broken blueprint).
+//
+// The two fields are independent: a model can have one, both, or
+// neither populated. JSON consumers (agents) rely on this exact shape
+// to decide whether to follow up with `describe blueprint <name>` or
+// surface the detection failure to the user.
+func TestModelInfo_JSON_BlueprintCrossLink(t *testing.T) {
+	cases := []struct {
+		name           string
+		info           *ModelInfo
+		mustContain    []string
+		mustNotContain []string
+	}{
+		{
+			name:           "no_lib_call_omits_both",
+			info:           &ModelInfo{Target: "x.y"},
+			mustNotContain: []string{`"blueprint"`, `"blueprint_error"`},
+		},
+		{
+			name:           "blueprint_resolved",
+			info:           &ModelInfo{Target: "x.y", Blueprint: "mistral_ocr"},
+			mustContain:    []string{`"blueprint":"mistral_ocr"`},
+			mustNotContain: []string{`"blueprint_error"`},
+		},
+		{
+			name:           "detection_failure",
+			info:           &ModelInfo{Target: "x.y", BlueprintError: "AST serialization failed: ..."},
+			mustContain:    []string{`"blueprint_error":"AST serialization failed: ..."`},
+			mustNotContain: []string{`"blueprint":`},
+		},
+		{
+			name: "both_populated_when_partial_resolution",
+			info: &ModelInfo{Target: "x.y", Blueprint: "mistral_ocr",
+				BlueprintError: "model uses blueprint \"other_lib\" which failed to parse"},
+			mustContain: []string{`"blueprint":"mistral_ocr"`, `"blueprint_error":`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.info)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := string(b)
+			for _, want := range tc.mustContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q in: %s", want, got)
+				}
+			}
+			for _, dont := range tc.mustNotContain {
+				if strings.Contains(got, dont) {
+					t.Errorf("unexpected %q in: %s", dont, got)
+				}
+			}
+		})
+	}
+}
+
+// TestModelInfo_JSON_GatherWarnings ensures GatherWarnings serialises
+// under the snake_case key `gather_warnings` and is omitted when empty.
+// Pairs with the rendering test above to lock in the schema.
+func TestModelInfo_JSON_GatherWarnings(t *testing.T) {
+	clean, err := json.Marshal(&ModelInfo{Target: "x.y"})
+	if err != nil {
+		t.Fatalf("marshal clean: %v", err)
+	}
+	if strings.Contains(string(clean), "gather_warnings") {
+		t.Errorf("clean ModelInfo should omit gather_warnings, got: %s", clean)
+	}
+
+	dirty, err := json.Marshal(&ModelInfo{Target: "x.y", GatherWarnings: []string{"oops"}})
+	if err != nil {
+		t.Fatalf("marshal dirty: %v", err)
+	}
+	if !strings.Contains(string(dirty), `"gather_warnings":["oops"]`) {
+		t.Errorf("dirty ModelInfo should include gather_warnings, got: %s", dirty)
 	}
 }
 

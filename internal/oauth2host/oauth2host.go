@@ -54,7 +54,7 @@ func ListProviders(ctx context.Context, host string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list providers: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("list providers: HTTP %d", resp.StatusCode)
 	}
@@ -79,7 +79,7 @@ func FetchProviderConfig(ctx context.Context, host, provider string) (*ProviderC
 	if err != nil {
 		return nil, fmt.Errorf("fetch provider config: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode == 404 {
 		return nil, fmt.Errorf("unknown provider: %s", provider)
 	}
@@ -113,7 +113,7 @@ func Register(ctx context.Context, host, provider, state, licenseKey, ephemeralK
 	if err != nil {
 		return fmt.Errorf("register auth: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode == 403 {
 		return fmt.Errorf("invalid license key (check ONDATRA_KEY in .env)")
 	}
@@ -149,7 +149,7 @@ func Poll(ctx context.Context, host, state, licenseKey string) (*PollResult, err
 	if err != nil {
 		return nil, fmt.Errorf("poll: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode == 404 {
 		return nil, ErrPending
 	}
@@ -189,7 +189,7 @@ func Refresh(ctx context.Context, host, provider, refreshToken, licenseKey strin
 	if err != nil {
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode == 403 {
 		return nil, fmt.Errorf("invalid license key (check ONDATRA_KEY in .env)")
 	}
@@ -222,7 +222,7 @@ func ExchangeCode(ctx context.Context, tokenURL, clientID, clientSecret, code, r
 	if err != nil {
 		return nil, fmt.Errorf("exchange code: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode != 200 {
 		msg, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("exchange code: HTTP %d: %s", resp.StatusCode, msg)
@@ -251,7 +251,7 @@ func RefreshLocal(ctx context.Context, tokenURL, clientID, clientSecret, refresh
 	if err != nil {
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read-only HTTP body close
 	if resp.StatusCode != 200 {
 		msg, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("refresh token: HTTP %d: %s", resp.StatusCode, msg)

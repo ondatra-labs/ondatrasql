@@ -139,6 +139,21 @@ func TestConfigHash_UnreadableFile(t *testing.T) {
 	// on all platforms, so this is a documentation test.
 }
 
+// TestConfigHash_NonexistentDir regression-tests the fix that makes
+// ConfigHash check WalkDir's top-level error explicitly. Pre-fix the
+// `_` discard meant a non-existent or permission-denied configDir
+// silently returned a hash over zero files (i.e. ""). The function
+// docstring promises that contract; the test pins it so a future
+// caller adds-a-checking-but-different-path doesn't break it.
+func TestConfigHash_NonexistentDir(t *testing.T) {
+	t.Parallel()
+	// A path that's guaranteed not to exist on any sane filesystem.
+	got := ConfigHash("/this/path/definitely/does/not/exist")
+	if got != "" {
+		t.Errorf("ConfigHash(nonexistent) = %q, want empty string", got)
+	}
+}
+
 // --- indexCommentOutsideString ---
 
 func TestIndexCommentOutsideString(t *testing.T) {

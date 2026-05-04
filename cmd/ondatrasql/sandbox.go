@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
@@ -13,6 +14,20 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	sql "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
+
+// parseSandboxCount parses a COUNT(*)/SUM() result returned by QueryValue
+// (always a string) into int64. The query templates that feed this all
+// produce numeric output (COUNT, SUM with COALESCE), so parse failures
+// indicate a programmer bug in the query template — falling back to 0
+// keeps the diff display rendering instead of aborting the whole
+// sandbox summary on one malformed row.
+func parseSandboxCount(s string) int64 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 // quoteTarget quotes a schema.table target for safe use in SQL queries.
 func quoteTarget(target string) string {
@@ -204,9 +219,8 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 			continue
 		}
 
-		var prod, sandbox int64
-		fmt.Sscanf(prodCount, "%d", &prod)
-		fmt.Sscanf(sandboxCount, "%d", &sandbox)
+		prod := parseSandboxCount(prodCount)
+		sandbox := parseSandboxCount(sandboxCount)
 
 		// v0.12.1 (Bug S6 fix): in addition to the row-count and row-content
 		// check, compare schemas. A column add/drop/rename without a row-count
@@ -231,8 +245,7 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 			}
 			addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), m.Target)
 			added, _ := sess.QueryValue(addedSQL)
-			var addedCount int64
-			fmt.Sscanf(added, "%d", &addedCount)
+			addedCount := parseSandboxCount(added)
 
 			if addedCount > 0 {
 				changed++
@@ -320,9 +333,8 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 	prodCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(target)))
 	sandboxCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.CatalogAlias(), quoteTarget(target)))
 
-	var prod, sandbox int64
-	fmt.Sscanf(prodCount, "%d", &prod)
-	fmt.Sscanf(sandboxCount, "%d", &sandbox)
+	prod := parseSandboxCount(prodCount)
+	sandbox := parseSandboxCount(sandboxCount)
 
 	// Check and show schema changes FIRST (schema evolution).
 	// Pass the full schema.table target so the SQL filters by both
@@ -391,9 +403,8 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
 	added, _ := sess.QueryValue(addedSQL)
 	removed, _ := sess.QueryValue(removedSQL)
-	var addedCount, removedCount int64
-	fmt.Sscanf(added, "%d", &addedCount)
-	fmt.Sscanf(removed, "%d", &removedCount)
+	addedCount := parseSandboxCount(added)
+	removedCount := parseSandboxCount(removed)
 
 	if addedCount > 0 || removedCount > 0 {
 		if addedCount > 0 {
@@ -474,9 +485,8 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 	}
 
 	// Parse counts
-	var prod, sandbox int64
-	fmt.Sscanf(prodCount, "%d", &prod)
-	fmt.Sscanf(sandboxCount, "%d", &sandbox)
+	prod := parseSandboxCount(prodCount)
+	sandbox := parseSandboxCount(sandboxCount)
 
 	// Calculate diff
 	diff := sandbox - prod
@@ -507,9 +517,8 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 	added, _ := sess.QueryValue(addedSQL)
 	removed, _ := sess.QueryValue(removedSQL)
 
-	var addedCount, removedCount int64
-	fmt.Sscanf(added, "%d", &addedCount)
-	fmt.Sscanf(removed, "%d", &removedCount)
+	addedCount := parseSandboxCount(added)
+	removedCount := parseSandboxCount(removed)
 
 	if addedCount > 0 || removedCount > 0 {
 		if addedCount > 0 {

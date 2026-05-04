@@ -7,6 +7,7 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,7 +78,7 @@ func LoadEnvFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // read-only handle, no flush needed
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -107,7 +108,9 @@ func LoadEnvFile(path string) error {
 			value = strings.ReplaceAll(value, `\"`, `"`)
 
 			if _, exists := os.LookupEnv(key); !exists {
-				os.Setenv(key, value)
+				if err := os.Setenv(key, value); err != nil {
+					return fmt.Errorf("setenv %q: %w", key, err)
+				}
 			}
 		}
 	}
@@ -129,6 +132,33 @@ var dataPathRe = regexp.MustCompile(`(?i)DATA_PATH\s+'([^']+)'`)
 
 // parseCatalogSQL reads catalog.sql and extracts catalog connection info.
 // Falls back to defaults if the file is missing or unparseable.
+// stripLineComment removes everything from the first `--` outside a
+// single-quoted string literal to end-of-line. Preserves `--` that
+// appear inside SQL string literals (e.g. a connection string with a
+// password containing `--`) so the ATTACH statement survives.
+// Standalone helper rather than inlined so the test for `pa--ss`
+// safety can drive a focused unit test.
+func stripLineComment(line string) string {
+	inString := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if ch == '\'' {
+			// SQL doubles quotes to escape: '' inside a literal stays
+			// inside. Toggle on the boundary single quote.
+			if i+1 < len(line) && line[i+1] == '\'' {
+				i++ // skip both quotes (escaped quote)
+				continue
+			}
+			inString = !inString
+			continue
+		}
+		if !inString && ch == '-' && i+1 < len(line) && line[i+1] == '-' {
+			return line[:i]
+		}
+	}
+	return line
+}
+
 func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 	defaults := CatalogInfo{
 		Type:     "sqlite",
@@ -151,13 +181,31 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 	// happens to work because session.go expands env vars at SQL execution
 	// time on the original file content, but the parsed config struct never
 	// sees the resolved values without this.
+	//
+	// Strip `--` line comments BEFORE collapsing newlines. Otherwise a
+	// leading-comment line like
+	//     -- managed by deploy script
+	//     ATTACH 'ducklake:sqlite:foo' AS lake;
+	// would collapse to a single string whose semicolon-chunk begins
+	// with "--", and the HasPrefix("--") guard below would silently
+	// drop the ATTACH — leaving the parser to fall back to defaults
+	// even though the file is well-formed.
+	var stripped strings.Builder
+	for _, ln := range strings.Split(string(content), "\n") {
+		// Strip the first `--` line-comment that lives outside string
+		// literals. Naive strings.Index would truncate inside SQL
+		// connection strings like 'postgres://user:pa--ss@host', which
+		// would silently drop the ATTACH and fall back to defaults.
+		stripped.WriteString(stripLineComment(ln))
+		stripped.WriteByte('\n')
+	}
 	// Collapse multi-line ATTACH statements into single lines so the regex
 	// can match ATTACH ... AS ... that spans multiple lines in catalog.sql.
-	collapsed := strings.ReplaceAll(string(content), "\n", " ")
+	collapsed := strings.ReplaceAll(stripped.String(), "\n", " ")
 	lines := strings.Split(os.ExpandEnv(collapsed), ";")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "--") {
+		if line == "" {
 			continue
 		}
 

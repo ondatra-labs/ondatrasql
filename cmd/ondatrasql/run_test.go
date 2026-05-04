@@ -7,6 +7,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -591,6 +592,192 @@ SELECT 1 AS id, 'Alice' AS name`)
 	})
 	if !strings.Contains(got, "Alice") {
 		t.Errorf("expected data in query output, got: %s", got)
+	}
+}
+
+// TestRun_StrictArguments_RejectsExtraArgs sweeps every CLI command
+// that gained strict argument validation in v0.31 and asserts each one
+// rejects a trailing unexpected operand instead of silently accepting
+// it (or worse, treating it as a model/file/port/provider name).
+//
+// One table-driven test covers the surface so a future regression in
+// any single command's dispatcher branch is caught here.
+func TestRun_StrictArguments_RejectsExtraArgs(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	p.AddModel("staging/x.sql", `-- @kind: table
+SELECT 1 AS id`)
+
+	cases := []struct {
+		name       string
+		args       []string
+		wantPhrase string
+	}{
+		{"version_extra", []string{"version", "extra"}, "unexpected args"},
+		{"init_extra", []string{"init", "extra"}, "unexpected args"},
+		{"stats_extra", []string{"stats", "extra"}, "unexpected args"},
+		{"run_extra", []string{"run", "staging.x", "extra"}, "extra args"},
+		{"sandbox_extra", []string{"sandbox", "staging.x", "extra"}, "extra args"},
+		{"describe_extra", []string{"describe", "staging.x", "extra"}, "extra args"},
+		{"edit_extra", []string{"edit", "staging.x", "extra"}, "extra args"},
+		{"new_extra", []string{"new", "staging.y", "extra"}, "extra args"},
+		{"events_extra", []string{"events", "8080", "extra"}, "extra args"},
+		{"odata_extra", []string{"odata", "8081", "extra"}, "extra args"},
+		{"auth_extra", []string{"auth", "google", "extra"}, "extra args"},
+		{"lineage_extra", []string{"lineage", "staging.x", "extra"}, "extra args"},
+		{"sql_extra_positional", []string{"sql", "SELECT 1", "extra"}, "unexpected argument"},
+		{"history_extra_model", []string{"history", "a", "b"}, "unexpected argument"},
+		{"schedule_install_extra", []string{"schedule", "*/5 * * * *", "extra"}, "extra args"},
+		{"schedule_remove_extra", []string{"schedule", "remove", "extra"}, "extra args"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := run(tc.args)
+			if err == nil {
+				t.Fatalf("expected error for %v, got nil", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.wantPhrase) {
+				t.Errorf("err=%v, want phrase %q", err, tc.wantPhrase)
+			}
+		})
+	}
+}
+
+// TestRun_Version_JsonEnvelope verifies that `--json version` emits a
+// wrapped {"schema_version":1,"version":"..."} envelope on stdout.
+// Regression test for the v0.31 fix that made the version command
+// respect the global --json flag.
+func TestRun_Version_JsonEnvelope(t *testing.T) {
+	defer output.Reset()
+	got := captureAll(t, func() {
+		if err := run([]string{"--json", "version"}); err != nil {
+			t.Fatalf("run --json version: %v", err)
+		}
+	})
+	var env map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &env); err != nil {
+		t.Fatalf("expected JSON envelope, got %q: %v", got, err)
+	}
+	if sv, ok := env["schema_version"].(float64); !ok || sv != 1 {
+		t.Errorf("schema_version = %v, want 1", env["schema_version"])
+	}
+	if v, ok := env["version"].(string); !ok || v != version {
+		t.Errorf("version = %v, want %q", env["version"], version)
+	}
+}
+
+// TestRun_Lineage_RejectsMultiOperand verifies that `lineage` rejects
+// extra operands instead of silently keeping the last one. Regression
+// test for the v0.31 lineage_cmd argument-strictness fix.
+func TestRun_Lineage_RejectsMultiOperand(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	p.AddModel("staging/lm.sql", `-- @kind: table
+SELECT 1 AS id`)
+
+	err := run([]string{"lineage", "staging.lm", "extra"})
+	if err == nil {
+		t.Fatal("expected error for multi-operand lineage, got nil")
+	}
+	if !strings.Contains(err.Error(), "extra args") {
+		t.Errorf("expected 'extra args' in error, got: %v", err)
+	}
+}
+
+// TestRun_Query_JsonEnvelope verifies that `--json query` emits the
+// wrapped {"schema_version":1,"table":...,"rows":[...]} envelope and
+// that rows preserve their numeric types (no markdown leakage).
+func TestRun_Query_JsonEnvelope(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	p.AddModel("staging/qj.sql", `-- @kind: table
+SELECT 1 AS id, 'Alice' AS name`)
+	if err := run([]string{"run", "staging.qj"}); err != nil {
+		t.Fatalf("run model: %v", err)
+	}
+
+	defer output.Reset()
+	got := captureAll(t, func() {
+		if err := run([]string{"--json", "query", "staging.qj"}); err != nil {
+			t.Fatalf("query --json: %v", err)
+		}
+	})
+	// Find the JSON envelope line (model run emits its own JSON lines too).
+	var env map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+			continue
+		}
+		if _, ok := candidate["table"]; ok {
+			env = candidate
+			break
+		}
+	}
+	if env == nil {
+		t.Fatalf("no query envelope in output: %s", got)
+	}
+	if sv, ok := env["schema_version"].(float64); !ok || sv != 1 {
+		t.Errorf("schema_version = %v, want 1", env["schema_version"])
+	}
+	if tbl, ok := env["table"].(string); !ok || tbl != "staging.qj" {
+		t.Errorf("table = %v, want staging.qj", env["table"])
+	}
+	rows, ok := env["rows"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("rows = %v, want one row", env["rows"])
+	}
+	row := rows[0].(map[string]any)
+	if id, ok := row["id"].(float64); !ok || id != 1 {
+		t.Errorf("row.id = %v (type %T), want numeric 1", row["id"], row["id"])
+	}
+	if name, ok := row["name"].(string); !ok || name != "Alice" {
+		t.Errorf("row.name = %v, want Alice", row["name"])
+	}
+}
+
+// TestRun_SQL_JsonEnvelope verifies that `--json sql` emits the wrapped
+// {"schema_version":1,"query":...,"rows":[...]} envelope. Regression
+// test for the v0.31 fix that made `sql` respect the global --json flag
+// (previously it emitted markdown regardless).
+func TestRun_SQL_JsonEnvelope(t *testing.T) {
+	p := testutil.NewProject(t)
+	oldWd, _ := os.Getwd()
+	os.Chdir(p.Dir)
+	defer os.Chdir(oldWd)
+
+	defer output.Reset()
+	got := captureAll(t, func() {
+		if err := run([]string{"--json", "sql", "SELECT 7 AS n, 'beta' AS s"}); err != nil {
+			t.Fatalf("sql --json: %v", err)
+		}
+	})
+	var env map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &env); err != nil {
+		t.Fatalf("expected JSON envelope, got %q: %v", got, err)
+	}
+	if sv, ok := env["schema_version"].(float64); !ok || sv != 1 {
+		t.Errorf("schema_version = %v, want 1", env["schema_version"])
+	}
+	if q, ok := env["query"].(string); !ok || !strings.Contains(q, "beta") {
+		t.Errorf("query = %v, expected to contain 'beta'", env["query"])
+	}
+	rows, ok := env["rows"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("rows = %v, want one row", env["rows"])
+	}
+	row := rows[0].(map[string]any)
+	if n, ok := row["n"].(float64); !ok || n != 7 {
+		t.Errorf("row.n = %v (type %T), want numeric 7", row["n"], row["n"])
 	}
 }
 

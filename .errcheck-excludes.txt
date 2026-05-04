@@ -1,0 +1,14 @@
+# errcheck exclude list — empty.
+#
+# errcheck has built-in defaults (fmt.Print/Printf/Println,
+# fmt.Fprint*(os.Stderr), bytes.Buffer/strings.Builder writes,
+# crypto/rand.Read, math/rand.Read, hash.Hash.Write etc.).
+# See https://github.com/kisielk/errcheck/blob/master/errcheck/excludes.go
+#
+# All other ignored errors must be either:
+#   - handled at the call site, OR
+#   - explicitly written `_ = f()` / `_, _ = f()` with a comment
+#     stating the concrete reason ignoring is safe at THAT call site.
+#
+# Global excludes hide bugs at every call site simultaneously and are
+# therefore not used here.

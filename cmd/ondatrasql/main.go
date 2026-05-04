@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,7 +19,13 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.30.0"
+var version = "0.31.0"
+
+// exitCoder is implemented by errors that map to a specific process exit
+// code. Used by main() to honour the validate-style 0/1/2 contract.
+type exitCoder interface {
+	ExitCode() int
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -27,8 +34,19 @@ func main() {
 		for _, prefix := range []string{"materialize: ", "create temp table: "} {
 			msg = strings.TrimPrefix(msg, prefix)
 		}
-		fmt.Fprintf(os.Stderr, "error: %s\n", msg)
-		os.Exit(1)
+		// Honour custom exit codes (e.g. invocation errors → 2,
+		// findings → 1) when the error implements exitCoder.
+		code := 1
+		var ec exitCoder
+		if errors.As(err, &ec) {
+			code = ec.ExitCode()
+		}
+		// Don't print the error message for the silent "findings"
+		// sentinel — the report itself was already rendered.
+		if !errors.Is(err, errFindings) {
+			fmt.Fprintf(os.Stderr, "error: %s\n", msg)
+		}
+		os.Exit(code)
 	}
 }
 
@@ -56,8 +74,21 @@ func run(args []string) error {
 	// Commands that don't require an existing project
 	switch args[0] {
 	case "init":
+		if len(args) > 1 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql init (got %d unexpected args)", len(args)-1)}
+		}
 		return runInit()
 	case "version":
+		if len(args) > 1 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql version (got %d unexpected args)", len(args)-1)}
+		}
+		if output.JSONEnabled {
+			output.EmitJSON(map[string]any{
+				"schema_version": 1,
+				"version":        version,
+			})
+			return nil
+		}
 		fmt.Println(version)
 		return nil
 	case "auth":
@@ -94,24 +125,49 @@ func run(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle graceful shutdown
+	// Handle graceful shutdown. The signal handler must be cleaned up
+	// when run() returns so repeated in-process invocations (e.g.
+	// integration tests calling run() in a loop) don't leak a notifier
+	// registration AND a goroutine waiting on sigCh forever.
+	//
+	// Defer ordering matters and is LIFO: signal.Stop must run BEFORE
+	// close(stopCh), so the registered defers go (1) close(stopCh)
+	// then (2) signal.Stop — meaning at run-time signal.Stop pops
+	// first, unregistering the notifier, then close(stopCh) wakes the
+	// goroutine which falls through. This sequence guarantees no late
+	// signal can be queued onto sigCh after the goroutine has exited.
+	// (R8 #14 — pre-fix the order was inverse of the comment, leaving
+	// a small window where a signal could land on sigCh after the
+	// goroutine had returned. Benign but sloppy.)
 	sigCh := make(chan os.Signal, 1)
+	stopCh := make(chan struct{})
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer close(stopCh)
+	defer signal.Stop(sigCh)
 	go func() {
-		<-sigCh
-		cancel()
+		select {
+		case <-sigCh:
+			cancel()
+		case <-stopCh:
+		}
 	}()
 
 	// Handle commands
 	cmd := args[0]
 	switch cmd {
 	case "run":
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql run [<model>] (got %d extra args)", len(args)-2)}
+		}
 		if len(args) > 1 {
 			return runModel(ctx, cfg, args[1], false)
 		}
 		return runAll(ctx, cfg, false)
 
 	case "sandbox":
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql sandbox [<model>] (got %d extra args)", len(args)-2)}
+		}
 		if len(args) > 1 {
 			return runModel(ctx, cfg, args[1], true)
 		}
@@ -119,27 +175,50 @@ func run(args []string) error {
 
 	case "lineage":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql lineage overview | <model> | <model.column>")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql lineage overview | <model> | <model.column>")}
 		}
 		return runLineage(cfg, args[1:])
 	// SQL-based query commands
 	case "history":
 		return runHistory(cfg, args[1:])
 	case "stats":
+		if len(args) > 1 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql stats (got %d unexpected args)", len(args)-1)}
+		}
 		return runStats(cfg)
 	case "describe":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql describe <model>")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql describe <model> | describe blueprint [<name>]")}
+		}
+		// `describe blueprint [<name>] [--fields=...]` is a distinct subcommand.
+		// No collision with model names: OndatraSQL targets always have
+		// the form `schema.table`, so a bare token "blueprint" can never
+		// refer to a model. Schema-qualified names like `blueprint.x` go
+		// through runDescribe normally because args[1] != "blueprint".
+		if args[1] == "blueprint" {
+			return runDescribeBlueprint(cfg, args[2:])
+		}
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql describe <model> (got %d extra args)", len(args)-2)}
 		}
 		return runDescribe(cfg, args[1])
+
+	case "validate":
+		return runValidate(cfg, args[1:])
 	case "edit":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql edit <model>")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql edit <target>  (target = <schema.model>, env, catalog, sources, extensions, secrets, settings, macros/<name>, or variables/<name>)")}
+		}
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql edit <target> (got %d extra args)", len(args)-2)}
 		}
 		return runEdit(cfg, args[1])
 	case "new":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql new <schema.model[.sql]>")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql new <schema>|<schema.sub>|<schema.model[.sql]>  (bare schema or schema.sub creates a directory; full path creates a model file)")}
+		}
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql new <schema>|<schema.sub>|<schema.model[.sql]> (got %d extra args)", len(args)-2)}
 		}
 		return runNew(cfg, args[1])
 
@@ -148,14 +227,30 @@ func run(args []string) error {
 
 	case "sql":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql sql \"SELECT ...\" [--format csv|json|markdown]")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql sql \"SELECT ...\" [--format csv|json|markdown]")}
 		}
 		format := "markdown"
 		for i := 2; i < len(args); i++ {
-			if (args[i] == "--format" || args[i] == "-f") && i+1 < len(args) {
+			a := args[i]
+			switch {
+			case a == "--format" || a == "-f":
+				if i+1 >= len(args) {
+					return &invocationErr{fmt.Errorf("%s requires a value (csv|json|markdown)", a)}
+				}
 				format = args[i+1]
-				break
+				i++
+			case strings.HasPrefix(a, "--format="):
+				format = strings.TrimPrefix(a, "--format=")
+			case strings.HasPrefix(a, "-"):
+				return &invocationErr{fmt.Errorf("unknown flag: %s", a)}
+			default:
+				return &invocationErr{fmt.Errorf("unexpected argument: %s", a)}
 			}
+		}
+		switch format {
+		case "csv", "json", "markdown", "md":
+		default:
+			return &invocationErr{fmt.Errorf("invalid --format value %q (want csv|json|markdown)", format)}
 		}
 		return runSQL(cfg, args[1], format)
 
@@ -164,13 +259,19 @@ func run(args []string) error {
 
 	case "events":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql events <port>")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql events <port>")}
+		}
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql events <port> (got %d extra args)", len(args)-2)}
 		}
 		return runEvents(ctx, cfg, args[1])
 
 	case "odata":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ondatrasql odata <port>")
+			return &invocationErr{fmt.Errorf("usage: ondatrasql odata <port>")}
+		}
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql odata <port> (got %d extra args)", len(args)-2)}
 		}
 		return runOData(ctx, cfg, args[1])
 
@@ -178,19 +279,39 @@ func run(args []string) error {
 		if len(args) < 2 {
 			return runAuthList(ctx)
 		}
+		if len(args) > 2 {
+			return &invocationErr{fmt.Errorf("usage: ondatrasql auth [<provider>] (got %d extra args)", len(args)-2)}
+		}
 		return runAuth(ctx, cfg, args[1])
 
 	default:
 		if !isValidCommandName(cmd) {
-			return fmt.Errorf("invalid command: %q", cmd)
+			return &invocationErr{fmt.Errorf("invalid command: %q", cmd)}
 		}
 		// Check if there's a sql/<cmd>.sql file to execute
 		sqlFile := filepath.Join(cfg.ProjectDir, "sql", cmd+".sql")
 		if _, err := os.Stat(sqlFile); err == nil {
-			sandboxMode := len(args) > 1 && args[1] == "sandbox"
-			return runSQLFile(cfg, sqlFile, sandboxMode)
+			// sql/<cmd>.sql commands run real DuckLake catalog operations.
+			// They don't support sandbox mode, but we accept the explicit
+			// `<cmd> sandbox` invocation and route it to sqlfile_cmd.go's
+			// dedicated rejection path (which produces a friendly
+			// "<cmd> cannot run in sandbox mode" message naming the
+			// command). Pre-R-strict-args this was the documented UX;
+			// without the special-case the rejection collapses into a
+			// generic "extra args" error that doesn't tell the user
+			// WHY their request is invalid.
+			//
+			// Any other trailing operand is a typo (`checkpoint typo`
+			// must not silently fall through to a prod run).
+			if len(args) == 2 && args[1] == "sandbox" {
+				return runSQLFile(cfg, sqlFile, true)
+			}
+			if len(args) > 1 {
+				return &invocationErr{fmt.Errorf("usage: ondatrasql %s [sandbox] (got %d extra args)", cmd, len(args)-1)}
+			}
+			return runSQLFile(cfg, sqlFile, false)
 		}
-		return fmt.Errorf("unknown command: %s (run 'ondatrasql' for help)", cmd)
+		return &invocationErr{fmt.Errorf("unknown command: %s (run 'ondatrasql' for help)", cmd)}
 	}
 }
 
@@ -221,11 +342,13 @@ Run:
   odata <port>            Start OData server for @expose models
 
 Introspection:
-  stats                   Project overview and all models
-  history [model]         Run history [--limit N]
-  describe <model>        Model details (schema, deps, SQL)
-  query <table>           Query data [--limit N] [--format csv|json|md]
-  sql "SELECT ..."        Run SQL [--format csv|json|md]
+  stats                          Project overview and all models
+  history [model]                Run history [--limit N]
+  describe <model>               Model details (schema, deps, SQL)
+  describe blueprint [<name>]    Blueprint API contract (no name = list all)
+  validate [paths...]            Static validation [--strict] [--output=human|json|ndjson]
+  query <schema.table>           Query data [--limit N] [--format csv|json|md]
+  sql "SELECT ..."               Run SQL [--format csv|json|md]
 
 Lineage:
   lineage overview        All models with dependencies
@@ -248,7 +371,7 @@ Auth:
   auth                    List available OAuth2 providers
   auth <provider>         Authenticate with an OAuth2 provider
 
-SQL Commands (from sql/ folder, supports prod and sandbox modes):
+SQL Commands (from sql/ folder, prod-only — sandbox mode is rejected for these):
   flush                   Flush inlined data to Parquet (ducklake_flush_inlined_data)
   merge                   Merge small files (ducklake_merge_adjacent_files)
   expire                  Expire old snapshots (ducklake_expire_snapshots)

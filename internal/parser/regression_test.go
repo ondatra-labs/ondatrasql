@@ -11,6 +11,219 @@ import (
 	"testing"
 )
 
+// --- Unknown directives rejected (R7 #2) ---
+
+// TestParseModel_UnknownDirective_Rejected pins that a typo like
+// `-- @ftech: ...` is rejected at parse time instead of silently
+// falling through to the generic comment branch (which would let the
+// directive be ignored as if absent).
+func TestParseModel_UnknownDirective_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		"-- @ftech\nSELECT 1 AS id",                             // typo of @fetch
+		"-- @kind: table\n-- @uniqe_key: id\nSELECT 1 AS id",    // typo of @unique_key
+		"-- @kind: table\n-- @incremenntal: x\nSELECT 1 AS id",  // typo of @incremental
+		"-- @kind: table\n-- @bogus: anything\nSELECT 1 AS id",  // genuinely unknown
+	}
+	for i, src := range cases {
+		path := filepath.Join(modelsDir, "bad_"+string(rune('a'+i))+".sql")
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ParseModel(path, dir)
+		if err == nil {
+			t.Errorf("case %d: expected unknown-directive error, got nil for: %q", i, src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unknown directive") {
+			t.Errorf("case %d: error should mention 'unknown directive', got: %v", i, err)
+		}
+	}
+}
+
+// TestParseModel_BlockCommentDirectiveTreatedAsComment pins R9 #5:
+// `/* @ftech */` is treated as a regular block comment — content
+// inside `/* ... */` is stripped before classification, so a
+// directive-shaped token within a block comment is interpreted as
+// "comment about a directive", not as a typoed directive. This
+// matches user intent: if you wanted @ftech to be parsed as a
+// directive, you wouldn't wrap it in a block comment.
+//
+// (R8 #11 originally pinned the opposite behaviour — that was
+// reversed in R9 once we realised intent: a block-commented token
+// is a comment, full stop.)
+func TestParseModel_BlockCommentDirectiveTreatedAsComment(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "/* @ftech */\n-- @kind: table\nSELECT 1 AS id"
+	path := filepath.Join(modelsDir, "block.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("block-commented @ftech must parse cleanly, got: %v", err)
+	}
+	if model.Kind != "table" {
+		t.Errorf("expected @kind: table to be parsed past the block comment, got kind=%q", model.Kind)
+	}
+}
+
+// TestParseModel_MultiLineBlockCommentInHeader pins R9 #3: a header
+// block comment that spans multiple lines doesn't flip inHeader=false
+// on the first line. Real directives below it parse normally.
+func TestParseModel_MultiLineBlockCommentInHeader(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "/* multi\nline\ncomment */\n-- @kind: table\nSELECT 1 AS id"
+	path := filepath.Join(modelsDir, "multi.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("multi-line block comment in header must parse, got: %v", err)
+	}
+	if model.Kind != "table" {
+		t.Errorf("expected @kind: table parsed, got %q", model.Kind)
+	}
+}
+
+// TestParseModel_MixedLineBlockCommentBeforeDirective pins R9 #5:
+// `/* foo */ -- @kind: table` on one line — block comment is
+// stripped, the line-comment directive after it is parsed.
+func TestParseModel_MixedLineBlockCommentBeforeDirective(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "/* @ftech */ -- @kind: table\nSELECT 1 AS id"
+	path := filepath.Join(modelsDir, "mixed.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("mixed block+line comment must parse, got: %v", err)
+	}
+	if model.Kind != "table" {
+		t.Errorf("expected @kind: table parsed, got %q", model.Kind)
+	}
+}
+
+// TestParseModel_BlockCommentNonDirective_OK pins that legitimate
+// non-directive block comments at the top of a model don't trigger
+// the unknown-directive check or the inHeader=false flip.
+func TestParseModel_BlockCommentNonDirective_OK(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "/* leading note about the model */\n-- @kind: table\nSELECT 1 AS id"
+	path := filepath.Join(modelsDir, "blockok.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseModel(path, dir); err != nil {
+		t.Errorf("non-directive block comment must parse cleanly, got: %v", err)
+	}
+}
+
+// TestParseModel_UnterminatedBlockCommentInHeader_Rejected pins
+// R10 #6: a `/*` in the header with no closing `*/` must produce a
+// clear error. Pre-R10 the stripper consumed the rest of the file
+// silently, and with `@kind: events` already parsed the model was
+// accepted with empty SQL (events-kind is exempt from the
+// empty-SQL check).
+func TestParseModel_UnterminatedBlockCommentInHeader_Rejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "-- @kind: events\n/* unterminated note about the model\n@id: int"
+	path := filepath.Join(modelsDir, "broken.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ParseModel(path, dir)
+	if err == nil {
+		t.Fatal("expected error for unterminated /* in header")
+	}
+	if !strings.Contains(err.Error(), "unterminated") {
+		t.Errorf("error should mention 'unterminated', got: %v", err)
+	}
+}
+
+// TestParseModel_BlockCommentInsideStringLiteral_NotStripped pins
+// R10 #3: a SQL body line containing `'/* x */'` as a string literal
+// must NOT have the block-comment range stripped. Pre-R10 the
+// stripper ran on every header line, including the first SQL body
+// line that flips inHeader=false — so `SELECT '/* x */'` had `/* x */`
+// removed from inside the string before flipping.
+func TestParseModel_BlockCommentInsideStringLiteral_NotStripped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Body line begins with SELECT (SQL prefix), contains a block
+	// comment substring inside a string literal. The stripper must
+	// not run on this line.
+	src := "-- @kind: table\nSELECT '/* not a comment */' AS lit"
+	path := filepath.Join(modelsDir, "lit.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model, err := ParseModel(path, dir)
+	if err != nil {
+		t.Fatalf("string-literal-with-block-comment-shape must parse cleanly, got: %v", err)
+	}
+	if !strings.Contains(model.SQL, "/* not a comment */") {
+		t.Errorf("string-literal block-comment substring must be preserved, got SQL: %q", model.SQL)
+	}
+}
+
+// TestParseModel_PlainAtMentionInDescription_OK pins that @-mentions
+// embedded in @description / @column text don't trigger the
+// unknown-directive check — the regexp only fires on lines whose
+// first non-space content after the comment prefix is `@<word>`.
+func TestParseModel_PlainAtMentionInDescription_OK(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	modelsDir := filepath.Join(dir, "models", "raw")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "-- @kind: table\n-- @description: invoice from @vendor\nSELECT 1 AS id"
+	path := filepath.Join(modelsDir, "ok.sql")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseModel(path, dir); err != nil {
+		t.Errorf("should not flag @-mention inside @description body, got: %v", err)
+	}
+}
+
 // --- Multi-statement models rejected ---
 
 func TestParseModel_MultiStatement_Rejected(t *testing.T) {

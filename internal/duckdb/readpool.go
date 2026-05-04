@@ -192,7 +192,7 @@ func QueryRowsAnyOnConn(ctx context.Context, c *sql.Conn, sqlStr string) ([]map[
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -237,7 +237,7 @@ func QueryValueOnConn(ctx context.Context, c *sql.Conn, sqlStr string) (string, 
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 	if !rows.Next() {
 		return "", rows.Err()
 	}
@@ -260,7 +260,7 @@ func QueryRowsMapOnConn(ctx context.Context, c *sql.Conn, sqlStr string) ([]map[
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // read-only iterator close
 
 	cols, err := rows.Columns()
 	if err != nil {
