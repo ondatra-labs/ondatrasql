@@ -169,7 +169,22 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 			} else if err != nil {
 				output.Fprintf("[FAILED] %s\n  ERROR: %s\n", model.Target, cleanErrorMessage(err.Error()))
 			}
-			emitModelResultJSON(result, dagRunID, sandboxMode)
+			// If runner.Run failed before producing a Result (e.g.
+			// state-store open failure, blueprint resolution),
+			// emitModelResultJSON(nil, ...) is a no-op and the failure
+			// disappears from the JSON stream even though it's counted
+			// in `failed` below. Synthesize a minimal error envelope so
+			// JSON consumers see the same set of model rows the human
+			// output saw.
+			emitResult := result
+			if emitResult == nil && err != nil {
+				emitResult = &execute.Result{
+					Target: model.Target,
+					Kind:   model.Kind,
+					Errors: []string{err.Error()},
+				}
+			}
+			emitModelResultJSON(emitResult, dagRunID, sandboxMode)
 
 			if err != nil {
 				failed++

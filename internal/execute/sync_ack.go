@@ -65,12 +65,29 @@ func deleteSyncAck(sess *duckdb.Session, claimID string) error {
 // warning to result when err != nil, no-op when err == nil. Extracted
 // from ackAll so the warning wiring is testable without standing up
 // the full pushExecutor + state.SyncStore.
+//
+// Note: callers from concurrent push batches MUST hold the per-run
+// mutex when invoking this. ackAll's per-batch path uses
+// syncAckCleanupWarning() instead, which returns the message string so
+// it can be merged into batchOutcome.warnings (collected under mutex
+// in the worker fan-in). This direct-mutation entry point is kept for
+// callers that already serialize access.
 func recordSyncAckCleanupWarning(result *Result, err error) {
 	if err == nil {
 		return
 	}
-	result.Warnings = append(result.Warnings,
-		fmt.Sprintf("_sync_acked cleanup failed (push and state-store ack succeeded): %v", err))
+	result.Warnings = append(result.Warnings, syncAckCleanupWarning(err))
+}
+
+// syncAckCleanupWarning returns the warning message produced by a
+// failed _sync_acked cleanup, or empty string when err is nil.
+// Used by ackAll inside push goroutines so the message can be batched
+// through batchOutcome.warnings rather than mutating Result directly.
+func syncAckCleanupWarning(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("_sync_acked cleanup failed (push and state-store ack succeeded): %v", err)
 }
 
 func escSyncSQL(s string) string {

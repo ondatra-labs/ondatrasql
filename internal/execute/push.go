@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
@@ -399,7 +400,15 @@ func summarizeFailErrors(errs []string) string {
 	clipped := make([]string, len(shown))
 	for i, e := range shown {
 		if len(e) > maxEntryB {
-			clipped[i] = e[:maxEntryB-len(ellipsis)] + ellipsis
+			// Cut at maxEntryB-len(ellipsis), then walk back to the
+			// nearest UTF-8 boundary so we never leave a half-multibyte
+			// character in the message. byte slicing on raw cap could
+			// otherwise emit invalid UTF-8 to logs/JSON.
+			cut := maxEntryB - len(ellipsis)
+			for cut > 0 && !utf8.RuneStart(e[cut]) {
+				cut--
+			}
+			clipped[i] = e[:cut] + ellipsis
 		} else {
 			clipped[i] = e
 		}
@@ -674,10 +683,16 @@ func (se *pushExecutor) ackAll(store *state.SyncStore, claimID string, batchNum 
 		}
 	}
 
-	// Step 3: Cleanup _sync_acked (state-store confirmed, no longer needed)
-	recordSyncAckCleanupWarning(se.result, deleteSyncAck(se.runner.sess, claimID))
-
-	return allOK(events)
+	// Step 3: Cleanup _sync_acked (state-store confirmed, no longer
+	// needed). ackAll runs inside a push goroutine, so we MUST NOT
+	// touch se.result.Warnings directly here — concurrent batches
+	// would race. Surface the warning via batchOutcome.warnings so the
+	// caller's mu-protected fan-in (push.go ~line 227) merges it.
+	out := allOK(events)
+	if msg := syncAckCleanupWarning(deleteSyncAck(se.runner.sess, claimID)); msg != "" {
+		out.warnings = append(out.warnings, msg)
+	}
+	return out
 }
 
 // nackAll wraps store.Nack and returns allFailed outcome.
@@ -1019,7 +1034,14 @@ func (se *pushExecutor) writeSyncLog(succeeded, failed int64, syncErrors []strin
 	}
 }
 
-// writeSyncLogEntry writes a single entry to _sync_log, creating the table if needed.
+// writeSyncLogEntry writes a single entry to _sync_log, creating the
+// table if needed.
+//
+// Called from push goroutines, so failure paths route to stderr
+// instead of mutating se.result.Warnings — that field is shared across
+// concurrent batches and only safe to touch under the per-run mutex
+// in the worker fan-in. The ensureSyncLogTable failure path above
+// already used stderr for the same reason; this matches it.
 func (se *pushExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
 	if err := se.ensureSyncLogTable(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: ensure _sync_log table: %v\n", err)
@@ -1031,8 +1053,7 @@ func (se *pushExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
 		esc(target), esc(syncKey), esc(status), esc(msg),
 		esc(se.pushLib.PushConfig.BatchMode), esc(se.runner.dagRunID))
 	if err := se.runner.sess.Exec(sql); err != nil {
-		se.result.Warnings = append(se.result.Warnings,
-			fmt.Sprintf("_sync_log: failed to write entry: %v", err))
+		fmt.Fprintf(os.Stderr, "warning: _sync_log: failed to write entry: %v\n", err)
 	}
 }
 

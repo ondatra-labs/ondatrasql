@@ -273,9 +273,18 @@ StandardOutput=file:/var/log/ondatrasql.json
 StandardError=file:/var/log/ondatrasql.err
 ```
 
+The `--json` stream may carry two record shapes, distinguishable by the presence of `kind`:
+
+- **Model-result envelopes** (most common). One per model that the runner attempted. No `kind` field; carry `schema_version: 2`.
+- **DAG-level warnings**. Non-fatal issues not tied to a specific model. Tagged `kind: "dag_warning"`; carry their own independent `schema_version: 1`. See the next subsection.
+
+`schema_version` is per-envelope: each shape versions independently, so a bump in one doesn't force a re-encode of the other.
+
+### Model-result envelope
+
 | Field | Description |
 |---|---|
-| `schema_version` | Always emitted as `2`. Bump signals breaking shape change. (v2 made `errors`/`warnings` always-emit instead of `omitempty`.) |
+| `schema_version` | `2`. Bump signals breaking shape change. (v2 made `errors`/`warnings` always-emit instead of `omitempty`.) |
 | `model` | Target table |
 | `kind` | `table`, `append`, `merge`, `scd2`, `tracked` |
 | `run_type` | `skip`, `backfill`, `incremental`, `full` |
@@ -290,7 +299,7 @@ StandardError=file:/var/log/ondatrasql.err
 
 ### DAG-level warning envelope
 
-`run --json` may also emit a separate envelope tagged with `kind: "dag_warning"` for non-fatal issues that aren't tied to a specific model (currently only state-store GC failures during the pre-flight). Typed consumers should branch on `kind`:
+Both `run --json` and `sandbox --json` may emit a separate envelope tagged with `kind: "dag_warning"` for non-fatal issues that aren't tied to a specific model (currently only state-store GC failures during the pre-flight — `RunGC`'s orphan recovery + stale-claim reap). Typed consumers should branch on `kind`:
 
 ```json
 {"schema_version": 1, "kind": "dag_warning", "source": "_gc", "message": "state GC: ..."}
