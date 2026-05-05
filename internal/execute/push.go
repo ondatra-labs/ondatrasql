@@ -238,9 +238,17 @@ func (se *pushExecutor) run(ctx context.Context) error {
 		mu.Unlock()
 	}
 
-	// Call finalize() only when all rows succeeded (no retryable failures pending).
-	// Partial failures get finalize on the next run after retries complete.
-	if succeeded > 0 && failed == 0 && ctx.Err() == nil {
+	// Call finalize() only when the run reached a clean terminal state:
+	// rows succeeded, none failed, no run-level errors, no cancellation.
+	//
+	// The `len(syncErrors) == 0` gate is load-bearing: ackAll's
+	// "_sync_acked recorded but state-store ack failed" path returns
+	// (ok=N, failed=0) — counting rows as succeeded — and adds the ack
+	// failure to syncErrors. Without checking syncErrors, finalize would
+	// run against a claim that's still inflight and will be re-pushed
+	// on the next run, publishing premature "all delivered" side
+	// effects. Partial failures get finalize on the next run instead.
+	if succeeded > 0 && failed == 0 && len(syncErrors) == 0 && ctx.Err() == nil {
 		if err := se.callFinalize(ctx, succeeded, failed); err != nil {
 			syncErrors = append(syncErrors, fmt.Sprintf("finalize: %v", err))
 		}
@@ -370,22 +378,37 @@ func formatCompositeKey(rowid, changeType any) string {
 // summarizeFailErrors returns a short, bounded summary of the first few
 // per-row failure reasons. Used in batch error messages so operators see
 // concrete reasons (the actual sink response strings), not just counts.
-// Caps at three entries with a "+N more" suffix to keep the error
-// message readable in logs.
+//
+// Bounded on TWO axes — count (first 3 entries with +N suffix) AND
+// per-entry length (truncate to 200 bytes with an ellipsis). A sink
+// that returns multi-kilobyte error strings would otherwise blow up
+// the log line and surrounding error wrappers.
 func summarizeFailErrors(errs []string) string {
 	if len(errs) == 0 {
 		return ""
 	}
-	const maxShown = 3
+	const (
+		maxShown   = 3
+		maxEntryB  = 200
+		ellipsis   = "..."
+	)
 	shown := errs
 	if len(shown) > maxShown {
 		shown = shown[:maxShown]
+	}
+	clipped := make([]string, len(shown))
+	for i, e := range shown {
+		if len(e) > maxEntryB {
+			clipped[i] = e[:maxEntryB-len(ellipsis)] + ellipsis
+		} else {
+			clipped[i] = e
+		}
 	}
 	suffix := ""
 	if len(errs) > maxShown {
 		suffix = fmt.Sprintf(", +%d more", len(errs)-maxShown)
 	}
-	return " — " + strings.Join(shown, "; ") + suffix
+	return " — " + strings.Join(clipped, "; ") + suffix
 }
 
 // readRowsByEvents reads actual row data from DuckLake for a batch of SyncEvents.

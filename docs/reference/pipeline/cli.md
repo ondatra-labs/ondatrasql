@@ -288,6 +288,23 @@ StandardError=file:/var/log/ondatrasql.err
 | `dag_run_id` | DAG run correlation ID (omitted when empty) |
 | `sandbox` | `true` for `sandbox` mode runs (omitted when false) |
 
+### DAG-level warning envelope
+
+`run --json` may also emit a separate envelope tagged with `kind: "dag_warning"` for non-fatal issues that aren't tied to a specific model (currently only state-store GC failures during the pre-flight). Typed consumers should branch on `kind`:
+
+```json
+{"schema_version": 1, "kind": "dag_warning", "source": "_gc", "message": "state GC: ..."}
+```
+
+| Field            | Description                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------- |
+| `schema_version` | `1`. Bump signals breaking shape change.                                           |
+| `kind`           | `dag_warning` — distinguishes from model-result envelopes                          |
+| `source`         | `_gc` (more sources may be added; consumers should treat unknown values as opaque) |
+| `message`        | Human-readable warning text                                                        |
+
+A `dag_warning` always coincides with exit `1` since GC failure is a non-invocation runtime error per the exit-code contract below.
+
 ## version
 
 ```bash

@@ -140,6 +140,28 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		cfg.ProjectDir,
 		libReg,
 		func(model *parser.Model, result *execute.Result, err error) bool {
+			// Several runner.Run paths return (result, err) without
+			// having appended err to result.Errors first (e.g. ensure
+			// ack table, get pre-commit snapshot, materialize). Without
+			// this, printResult shows the existing result.Errors but
+			// the actual returned err is invisible — the model is
+			// counted as failed yet the error text never reaches human
+			// or JSON output. Fold it in once here so all downstream
+			// renderers see the same error set.
+			if err != nil && result != nil {
+				errMsg := err.Error()
+				alreadyPresent := false
+				for _, existing := range result.Errors {
+					if existing == errMsg {
+						alreadyPresent = true
+						break
+					}
+				}
+				if !alreadyPresent {
+					result.Errors = append(result.Errors, errMsg)
+				}
+			}
+
 			if sandboxMode {
 				printSandboxResult(result, model.Target, err)
 			} else if result != nil {
@@ -177,17 +199,22 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	if validationErr, ok := dagErrs["_validation"]; ok {
 		return fmt.Errorf("dag pre-flight: %w", validationErr)
 	}
-	// _gc errors are non-fatal — RunDAG ran the pipeline anyway — but
-	// they shouldn't be silent because a failed GC pass means stale
-	// orphaned inflight rows or unconsumed apply_log entries are
-	// accumulating. Surface in human output AND --json mode so neither
-	// terminal users nor JSON consumers miss the regression.
-	if gcErr, ok := dagErrs["_gc"]; ok {
+	// _gc errors come from RunDAG's pre-flight orphan recovery + GC
+	// pass. The pipeline still ran, but a failed GC means stale inflight
+	// rows or unconsumed apply_log entries are accumulating in
+	// state.duckdb — a real runtime regression. Surface in human and
+	// JSON, and propagate as a non-zero exit per the documented
+	// "any non-invocation runtime error → exit 1" contract in
+	// docs/reference/pipeline/cli.md. Without this exit propagation a
+	// CI gate would treat a degrading state.duckdb as a clean run.
+	gcErr, hasGCErr := dagErrs["_gc"]
+	if hasGCErr {
 		if output.JSONEnabled {
 			output.EmitJSON(map[string]any{
-				"kind":    "dag_warning",
-				"source":  "_gc",
-				"message": gcErr.Error(),
+				"schema_version": 1,
+				"kind":           "dag_warning",
+				"source":         "_gc",
+				"message":        gcErr.Error(),
 			})
 		} else {
 			output.Fprintf("warning: %v (pipeline ran anyway; rerun GC at next pipeline start)\n", gcErr)
@@ -228,6 +255,13 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 			return errFindings
 		}
 		return fmt.Errorf("%d model(s) failed", failed)
+	}
+	// _gc was already reported above (human + JSON). Returning the
+	// silent sentinel propagates exit 1 without re-printing the
+	// warning — matches the documented "non-invocation runtime error"
+	// contract while keeping output deduplicated.
+	if hasGCErr {
+		return errFindings
 	}
 
 	return nil
