@@ -419,16 +419,27 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				continue
 			}
 			if !libClaimsAcked && len(sr.ClaimIDs) > 0 {
-				// Only nack claims that are NOT already committed to
+				// Only nack claims that we KNOW are not committed to
 				// lake. After materialize commits, _ondatra_acks holds
 				// the ack record; nacking those resets staging
 				// claim_id but leaves the ack record orphaned, and the
 				// next run can re-process the same rows under a new
 				// claim_id (silent duplicates). IsAcked discriminates.
+				//
+				// On IsAcked lookup error we leave the claim alone:
+				// claim_id stays set, so newStateCollector on the next
+				// pipeline run will retry the IsAcked check (and at
+				// that point return an error if it still fails, which
+				// is the safer of the two ambiguous outcomes).
 				toNack := sr.ClaimIDs[:0]
 				for _, cid := range sr.ClaimIDs {
 					acked, ackErr := script.IsAcked(r.sess, cid)
-					if ackErr != nil || !acked {
+					if ackErr != nil {
+						result.Warnings = append(result.Warnings,
+							fmt.Sprintf("ack lookup for claim %s failed; left claimed for next-run recovery: %v", cid, ackErr))
+						continue
+					}
+					if !acked {
 						toNack = append(toNack, cid)
 					}
 				}
