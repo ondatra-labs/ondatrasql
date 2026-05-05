@@ -388,50 +388,90 @@ func (se *pushExecutor) readRowsByEvents(events []state.SyncEvent) ([]map[string
 
 	// Read current-state rows (insert, update_postimage)
 	if len(currentEvents) > 0 {
-		rids := make([]string, len(currentEvents))
-		ridToType := make(map[string]string, len(currentEvents))
-		for i, ce := range currentEvents {
-			rids[i] = ce.rid
-			ridToType[ce.rid] = ce.changeType
+		// One rowid can carry multiple events with distinct change_types
+		// (e.g. insert + update_postimage in the same backlog batch).
+		// Build rid → []changeType so we can emit one row per event,
+		// not just one per unique rowid.
+		ridToTypes := make(map[string][]string, len(currentEvents))
+		for _, ce := range currentEvents {
+			ridToTypes[ce.rid] = append(ridToTypes[ce.rid], ce.changeType)
+		}
+		uniqueRids := make([]string, 0, len(ridToTypes))
+		for rid := range ridToTypes {
+			uniqueRids = append(uniqueRids, rid)
 		}
 		sql := fmt.Sprintf("SELECT *, rowid AS __ondatra_rowid FROM %s WHERE rowid IN (%s)",
-			target, strings.Join(rids, ","))
+			target, strings.Join(uniqueRids, ","))
 		rows, err := se.runner.sess.QueryRowsAny(sql)
 		if err != nil {
 			return nil, fmt.Errorf("read rows: %w", err)
 		}
 		for _, row := range rows {
 			ridStr := fmt.Sprintf("%d", toInt64(row["__ondatra_rowid"]))
-			row["__ondatra_change_type"] = ridToType[ridStr]
-			allRows = append(allRows, row)
+			for _, ct := range ridToTypes[ridStr] {
+				rowCopy := make(map[string]any, len(row)+1)
+				for k, v := range row {
+					rowCopy[k] = v
+				}
+				rowCopy["__ondatra_change_type"] = ct
+				allRows = append(allRows, rowCopy)
+			}
 		}
 	}
 
 	// Read historical rows (delete, update_preimage) from pre-change snapshots
 	for snap, hevents := range historicalBySnap {
-		rids := make([]string, len(hevents))
-		for i, he := range hevents {
-			rids[i] = he.rid
+		ridToTypes := make(map[string][]string, len(hevents))
+		for _, he := range hevents {
+			ridToTypes[he.rid] = append(ridToTypes[he.rid], he.changeType)
+		}
+		uniqueRids := make([]string, 0, len(ridToTypes))
+		for rid := range ridToTypes {
+			uniqueRids = append(uniqueRids, rid)
 		}
 		sql := fmt.Sprintf("SELECT *, rowid AS __ondatra_rowid FROM %s AT (VERSION => %d) WHERE rowid IN (%s)",
-			target, snap, strings.Join(rids, ","))
+			target, snap, strings.Join(uniqueRids, ","))
 		rows, err := se.runner.sess.QueryRowsAny(sql)
 		if err != nil {
 			return nil, fmt.Errorf("read historical rows at snapshot %d: %w", snap, err)
 		}
-		// Build rowid → change_type for this snapshot's events
-		ridToType := make(map[string]string, len(hevents))
-		for _, he := range hevents {
-			ridToType[he.rid] = he.changeType
-		}
 		for _, row := range rows {
 			ridStr := fmt.Sprintf("%d", toInt64(row["__ondatra_rowid"]))
-			row["__ondatra_change_type"] = ridToType[ridStr]
-			allRows = append(allRows, row)
+			for _, ct := range ridToTypes[ridStr] {
+				rowCopy := make(map[string]any, len(row)+1)
+				for k, v := range row {
+					rowCopy[k] = v
+				}
+				rowCopy["__ondatra_change_type"] = ct
+				allRows = append(allRows, rowCopy)
+			}
 		}
 	}
 
 	return allRows, nil
+}
+
+// ackAndRequeueWithRetry wraps SyncStore.AckAndRequeue with bounded
+// retry on transient failures. Without retry, a single TX hiccup would
+// trip the caller's `nackAll` fallback — which moves rows that already
+// completed (ok) and rows intentionally rejected back to sync_evt for
+// re-push, producing duplicate deliveries and resurrecting permanent
+// rejects. The TX is atomic so retry is safe; persistent failures still
+// fall through after the cap.
+func ackAndRequeueWithRetry(store *state.SyncStore, claimID, target string, failed []state.SyncEvent, deleteJobRef bool) error {
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := store.AckAndRequeue(claimID, target, failed, deleteJobRef); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		// Linear backoff capped at 200ms — caller path is push-batch
+		// completion; long retries would block a sink loop.
+		time.Sleep(time.Duration(attempt+1) * 40 * time.Millisecond)
+	}
+	return lastErr
 }
 
 // historicalEvent pairs a rowid string with its change_type for snapshot reads.
@@ -651,7 +691,7 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEve
 		// Determine what to requeue: only retryable failures, not rejected
 		if len(classified.Failed) > 0 || len(classified.Rejected) > 0 {
 			// Requeue only retryable failures. Rejected events are acked (removed).
-			if err := store.AckAndRequeue(claimID, target, classified.Failed, false); err != nil {
+			if err := ackAndRequeueWithRetry(store, claimID, target, classified.Failed, false); err != nil {
 				return nackAll(store, claimID, batchNum, events,
 					fmt.Errorf("ack-and-requeue: %w", err))
 			}
@@ -743,7 +783,7 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 				se.writeSyncLogEntry(se.model.Target, "*", "rejected", r)
 			}
 			if len(classified.Failed) > 0 || len(classified.Rejected) > 0 {
-				if err := store.AckAndRequeue(claimID, target, classified.Failed, true); err != nil {
+				if err := ackAndRequeueWithRetry(store, claimID, target, classified.Failed, true); err != nil {
 					return nackAll(store, claimID, batchNum, events,
 						fmt.Errorf("ack-and-requeue: %w", err))
 				}
@@ -754,7 +794,7 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 				}
 			}
 			// Atomically: ack claim + delete job_ref (no failures to requeue)
-			if err := store.AckAndRequeue(claimID, target, nil, true); err != nil {
+			if err := ackAndRequeueWithRetry(store, claimID, target, nil, true); err != nil {
 				return batchOutcome{ok: 0, failed: int64(len(events)),
 					err: fmt.Errorf("batch %d: ack+delete job_ref: %w", batchNum, err)}
 			}

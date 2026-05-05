@@ -111,8 +111,17 @@ func (c *saveCollector) createTempTable() (string, error) {
 			for j, col := range c.columns {
 				v := row[col]
 				// Fix JSON round-trip: float64 that are whole numbers → int64
-				// for BIGINT columns (json.Unmarshal converts all numbers to float64)
+				// for BIGINT columns (json.Unmarshal converts all numbers to float64).
+				// Refuse to silently truncate fractional values — if the type was
+				// inferred as BIGINT from earlier whole-number rows, a later
+				// fractional value means the inference was wrong and the caller
+				// needs to know rather than getting silently rounded data.
 				if f, ok := v.(float64); ok && colTypes[col] == "BIGINT" {
+					if f != float64(int64(f)) {
+						return fmt.Errorf(
+							"column %q: fractional value %v cannot be stored as BIGINT (column type was inferred from earlier whole-number rows; mix integer and decimal values explicitly or cast in the source)",
+							col, f)
+					}
 					v = int64(f)
 				}
 				// Convert slices/maps to JSON strings for VARCHAR columns.
