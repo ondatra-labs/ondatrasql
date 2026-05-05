@@ -212,7 +212,6 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 
 	runner := execute.NewRunner(sess, execute.ModeRun, dagRunID)
 	runner.SetGitInfo(gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL)
-	runner.SetAdminPort(resolveAdminPort(cfg))
 	runner.SetProjectDir(cfg.ProjectDir)
 	runner.SetLibRegistry(libReg)
 

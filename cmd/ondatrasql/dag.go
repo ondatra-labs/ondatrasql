@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -130,9 +129,6 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	// Get git info once for the entire run
 	gitInfo := git.GetInfo(cfg.ProjectDir)
 
-	// Resolve admin port for event daemon (empty if events not running)
-	adminPort := resolveAdminPort(cfg)
-
 	// Execute DAG using shared logic
 	failedTargets := make(map[string]string)
 	var failed, skipped int
@@ -141,7 +137,6 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 
 	_, dagErrs := execute.RunDAG(ctx, sess, sortedModels, dependents, dagRunID,
 		gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL,
-		adminPort,
 		cfg.ProjectDir,
 		libReg,
 		func(model *parser.Model, result *execute.Result, err error) bool {
@@ -219,13 +214,3 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	return nil
 }
 
-// resolveAdminPort returns the event daemon admin port from the runtime file
-// written by `ondatrasql events`. Returns empty if events daemon is not running.
-func resolveAdminPort(cfg *config.Config) string {
-	portFile := filepath.Join(cfg.ProjectDir, ".ondatra", "events.admin.port")
-	data, err := os.ReadFile(portFile)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}

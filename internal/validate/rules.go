@@ -29,7 +29,6 @@ const (
 	RuleParserInvalidIncremental  RuleID = "parser.invalid_incremental"
 	RuleParserInvalidSortedBy     RuleID = "parser.invalid_sorted_by"
 	RuleParserInvalidPartitioned  RuleID = "parser.invalid_partitioned_by"
-	RuleParserEventsMissingCols   RuleID = "parser.events_missing_columns"
 	RuleParserMissingDirective    RuleID = "parser.missing_directive"
 	RuleParserOther               RuleID = "parser.other"
 	RuleParserDuplicateTarget     RuleID = "parser.duplicate_target"

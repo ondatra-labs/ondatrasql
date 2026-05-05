@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
 // Structural invariant: every dot-separated part must be individually quoted,
@@ -140,84 +138,6 @@ func FuzzQuoteTableName(f *testing.F) {
 		if len(resultParts) != len(inputParts) {
 			t.Errorf("part count mismatch: input %d parts, output %d parts\n  input: %q\n  output: %q",
 				len(inputParts), len(resultParts), name, result)
-		}
-	})
-}
-
-func FuzzBuildEventsCreateSQL(f *testing.F) {
-	if testing.Short() {
-		f.Skip("skipping in short mode")
-	}
-	f.Add("event_name", "VARCHAR", true, "raw.events")
-	f.Add("count", "INTEGER", false, "staging.metrics")
-	f.Add("data", "JSON", false, "mart.output")
-
-	f.Fuzz(func(t *testing.T, colName, colType string, notNull bool, target string) {
-		// Skip invalid inputs
-		if colName == "" || colType == "" || target == "" {
-			return
-		}
-		if strings.ContainsAny(colName, " \t\n'\"();") || strings.ContainsAny(colType, " \t\n'\"();") {
-			return
-		}
-
-		model := &parser.Model{
-			Target: target,
-			Kind:   "events",
-			Columns: []parser.ColumnDef{
-				{Name: colName, Type: colType, NotNull: notNull},
-			},
-		}
-		result := buildEventsCreateSQL(model)
-
-		// Must start with CREATE TABLE IF NOT EXISTS
-		if !strings.HasPrefix(result, "CREATE TABLE IF NOT EXISTS") {
-			t.Errorf("missing CREATE TABLE prefix: %s", result)
-		}
-		// Must contain the target
-		if !strings.Contains(result, target) {
-			t.Errorf("missing target %q in: %s", target, result)
-		}
-		// Must contain the column name and type
-		if !strings.Contains(result, colName) {
-			t.Errorf("missing column %q in: %s", colName, result)
-		}
-		if !strings.Contains(result, colType) {
-			t.Errorf("missing type %q in: %s", colType, result)
-		}
-		// NOT NULL check
-		if notNull && !strings.Contains(result, "NOT NULL") {
-			t.Errorf("missing NOT NULL in: %s", result)
-		}
-	})
-}
-
-func FuzzFormatSQLValue(f *testing.F) {
-	if testing.Short() {
-		f.Skip("skipping in short mode")
-	}
-	f.Add("hello")
-	f.Add("O'Brien")
-	f.Add("")
-	f.Add("it's a 'test'")
-
-	f.Fuzz(func(t *testing.T, input string) {
-		result := formatSQLValue(input)
-		// String values must be quoted
-		if len(result) < 2 || result[0] != '\'' || result[len(result)-1] != '\'' {
-			t.Errorf("string not properly quoted: %q -> %q", input, result)
-		}
-		// Single quotes in input must be escaped (doubled)
-		inner := result[1 : len(result)-1]
-		// Count unescaped single quotes (should be 0)
-		for i := 0; i < len(inner); i++ {
-			if inner[i] == '\'' {
-				if i+1 < len(inner) && inner[i+1] == '\'' {
-					i++ // Skip escaped pair
-				} else {
-					t.Errorf("unescaped single quote in: %q", result)
-				}
-			}
 		}
 	})
 }

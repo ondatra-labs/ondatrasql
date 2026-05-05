@@ -61,8 +61,6 @@ type Runner struct {
 	gitInfo          gitInfo              // Cached Git metadata
 	runTypeDecisions RunTypeDecisions     // Pre-computed run_type decisions (batch optimization)
 	astCache         map[string]string    // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
-	adminPort        string               // Admin port for event daemon (flush operations)
-	claimLimit       int                  // Max events per claim batch (0 = default 1000)
 	libRegistry      *libregistry.Registry // Registered lib functions from lib/*.star
 }
 
@@ -92,17 +90,6 @@ func (r *Runner) SetGitInfo(commit, branch, repoURL string) {
 // When set, the runner skips individual backfill detection queries.
 func (r *Runner) SetRunTypeDecisions(decisions RunTypeDecisions) {
 	r.runTypeDecisions = decisions
-}
-
-// SetAdminPort sets the event daemon admin port for flush operations.
-func (r *Runner) SetAdminPort(port string) {
-	r.adminPort = port
-}
-
-// SetClaimLimit sets the max events per claim batch for event flush.
-// Default is 1000 if not set.
-func (r *Runner) SetClaimLimit(limit int) {
-	r.claimLimit = limit
 }
 
 // SetLibRegistry sets the lib function registry for FROM lib_func() support.
@@ -186,13 +173,6 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return nil, fmt.Errorf("starlark script models (.star) are no longer supported — use SQL models with lib/ blueprints instead")
 	}
 
-
-
-	// Events models: flush from daemon's Badger store into DuckLake.
-	// Early dispatch — bypasses batch run_type decisions entirely.
-	if model.Kind == "events" {
-		return r.runEvents(ctx, model, result, start)
-	}
 
 	// Trace: Calculate SQL hash (in-memory, should be fast)
 	var stepStart time.Time

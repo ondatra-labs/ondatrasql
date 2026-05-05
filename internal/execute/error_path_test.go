@@ -256,7 +256,7 @@ func TestRunDAG_PropagatesDecisionError(t *testing.T) {
 		{Target: "staging.x", Kind: "table", SQL: "SELECT 1 AS id"},
 	}
 	results, errors := RunDAG(context.Background(), sess, models, nil, "test-dag",
-		"", "", "", "", "", nil, nil)
+		"", "", "", "", nil, nil)
 
 	if results != nil {
 		t.Errorf("results = %v, want nil when decisions failed", results)

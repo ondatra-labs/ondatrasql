@@ -40,7 +40,6 @@ type DAGCallback func(model *parser.Model, result *Result, err error) bool
 func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	dependents map[string][]string, dagRunID string,
 	gitCommit, gitBranch, gitRepoURL string,
-	adminPort string,
 	projectDir string,
 	libReg *libregistry.Registry,
 	callback DAGCallback,
@@ -96,9 +95,6 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 			runner.SetGitInfo(gitCommit, gitBranch, gitRepoURL)
 		}
 		runner.SetRunTypeDecisions(decisions)
-		if adminPort != "" {
-			runner.SetAdminPort(adminPort)
-		}
 		if projectDir != "" {
 			runner.SetProjectDir(projectDir)
 		}

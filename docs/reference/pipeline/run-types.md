@@ -10,10 +10,9 @@ weight: 8
 | Run type | Trigger | Kinds |
 |---|---|---|
 | `skip` | Hash unchanged, no dep changes | All |
-| `backfill` | Hash changed, first run, config changed | All except events |
+| `backfill` | Hash changed, first run, config changed | All |
 | `incremental` | Hash unchanged, source data may have changed | append, merge, scd2, tracked |
 | `full` | Upstream dep changed, dep metadata missing/invalid, destructive schema evolution | table |
-| `flush` | Events buffered in Badger | events |
 
 ## Hash inputs
 
@@ -21,15 +20,15 @@ The run-type hash includes: SQL body, `@kind`, `@unique_key`, `@group_key`, `@pa
 
 ## What executes per run type
 
-| Step | skip | backfill | incremental | full | flush |
-|---|---|---|---|---|---|
-| SQL execution | no | full query | CDC-filtered (append/merge) or full query (other kinds) | full query | no |
-| Schema evolution | no | yes | yes | yes | no |
-| Constraints | no | yes | yes | yes | no |
-| Audits | no | yes (transactional) | yes (transactional) | yes (transactional) | no |
-| Materialize | no | yes | yes | yes | if events buffered |
-| Sink | backlog only | yes | yes | yes | no |
-| Commit metadata | no | yes | yes | yes | if events buffered |
+| Step | skip | backfill | incremental | full |
+|---|---|---|---|---|
+| SQL execution | no | full query | CDC-filtered (append/merge) or full query (other kinds) | full query |
+| Schema evolution | no | yes | yes | yes |
+| Constraints | no | yes | yes | yes |
+| Audits | no | yes (transactional) | yes (transactional) | yes (transactional) |
+| Materialize | no | yes | yes | yes |
+| Sink | backlog only | yes | yes | yes |
+| Commit metadata | no | yes | yes | yes |
 
 ## Sink on skip
 

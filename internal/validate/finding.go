@@ -23,7 +23,8 @@ package validate
 //     (validate.extensions_load_failed, validate.blueprint_load_failed,
 //     validate.builtin_introspection_failed)
 //   - 3: removed parser.expose_on_non_table (OData support removed in v0.32)
-const SchemaVersion = 3
+//   - 4: removed parser.events_missing_columns (events kind removed in v0.33)
+const SchemaVersion = 4
 
 // Severity classifies a Finding by how much attention it demands.
 type Severity string

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"pgregory.net/rapid"
 )
 
@@ -314,68 +313,3 @@ func TestRapid_QuoteTableName_Recoverable(t *testing.T) {
 	})
 }
 
-func TestRapid_BuildEventsCreateSQL_MultiColumn(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		n := rapid.IntRange(1, 8).Draw(rt, "n")
-		target := genSchemaTable().Draw(rt, "target")
-		var cols []parser.ColumnDef
-		for i := 0; i < n; i++ {
-			name := rapid.StringMatching(`^[a-z][a-z0-9_]{1,10}$`).Draw(rt, "col")
-			typ := rapid.SampledFrom([]string{"VARCHAR", "INTEGER", "BIGINT", "BOOLEAN", "TIMESTAMPTZ", "JSON", "DOUBLE"}).Draw(rt, "type")
-			notNull := rapid.Bool().Draw(rt, "notNull")
-			cols = append(cols, parser.ColumnDef{Name: name, Type: typ, NotNull: notNull})
-		}
-
-		model := &parser.Model{
-			Target:  target,
-			Kind:    "events",
-			Columns: cols,
-		}
-		result := buildEventsCreateSQL(model)
-
-		// All column names must appear
-		for _, col := range cols {
-			if !strings.Contains(result, col.Name) {
-				rt.Fatalf("column %q not found in: %s", col.Name, result)
-			}
-		}
-		// Target must appear
-		if !strings.Contains(result, target) {
-			rt.Fatalf("target %q not found in: %s", target, result)
-		}
-	})
-}
-
-func TestRapid_FormatSQLValue_StringEscaped(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		input := rapid.String().Draw(rt, "input")
-		result := formatSQLValue(input)
-
-		// Must be quoted
-		if len(result) < 2 || result[0] != '\'' || result[len(result)-1] != '\'' {
-			rt.Fatalf("not quoted: %q -> %q", input, result)
-		}
-
-		// Oracle: escapeSQL doubles single quotes
-		want := "'" + escapeSQL(input) + "'"
-		if result != want {
-			rt.Fatalf("formatSQLValue(%q) = %q, want %q", input, result, want)
-		}
-	})
-}
-
-func TestRapid_FormatSQLValue_NilIsNULL(t *testing.T) {
-	t.Parallel()
-	result := formatSQLValue(nil)
-	if result != "NULL" {
-		t.Fatalf("formatSQLValue(nil) = %q, want NULL", result)
-	}
-}

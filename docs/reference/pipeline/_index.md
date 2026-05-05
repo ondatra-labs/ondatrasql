@@ -9,4 +9,4 @@ The user-facing pipeline contract: what you write in models, what you call on th
 - [CLI Reference](/reference/pipeline/cli/) — every command with syntax and options
 - [Directives](/reference/pipeline/directives/) — `@kind`, `@unique_key`, `@incremental`, and friends
 - [Environment Variables](/reference/pipeline/env/) — `.env` loading, ONDATRA_* runtime vars
-- [Run Types](/reference/pipeline/run-types/) — skip / backfill / incremental / full / flush, what triggers each, what executes
+- [Run Types](/reference/pipeline/run-types/) — skip / backfill / incremental / full, what triggers each, what executes

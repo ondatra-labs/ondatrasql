@@ -13,7 +13,6 @@ Single binary. All commands listed below.
 | [`run`](#run) | Execute the pipeline |
 | [`sandbox`](#sandbox) | Preview changes before committing |
 | [`schedule`](#schedule) | Install OS-native scheduler |
-| [`events`](#events) | Start event collection endpoint |
 | [`init`](#init) | Create a new project |
 | [`new`](#new) | Create a model file |
 | [`edit`](#edit) | Open file in $EDITOR |
@@ -69,16 +68,6 @@ ondatrasql schedule remove          # Remove
 | Windows | [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) |
 
 See [Schedule Pipeline Runs](/guides/schedule-pipeline-runs/).
-
-## events
-
-```bash
-ondatrasql events 8080            # Public on 8080, admin on 8081
-```
-
-Admin endpoint runs on `port + 1` (localhost-only).
-
-See [Collect Events](/guides/collect-events/).
 
 ---
 
@@ -288,8 +277,8 @@ StandardError=file:/var/log/ondatrasql.err
 |---|---|
 | `schema_version` | Always emitted as `2`. Bump signals breaking shape change. (v2 made `errors`/`warnings` always-emit instead of `omitempty`.) |
 | `model` | Target table |
-| `kind` | `table`, `append`, `merge`, `scd2`, `tracked`, `events` |
-| `run_type` | `skip`, `backfill`, `incremental`, `full`, `flush` |
+| `kind` | `table`, `append`, `merge`, `scd2`, `tracked` |
+| `run_type` | `skip`, `backfill`, `incremental`, `full` |
 | `run_reason` | Why this run type was chosen (omitted when empty) |
 | `rows_affected` | Rows written (0 for skip) |
 | `duration_ms` | Execution time |
@@ -317,7 +306,7 @@ Exit codes follow the eslint/ruff convention and apply to **every** subcommand, 
 
 `validate.*` WARN findings always trigger exit 1 regardless of `--strict` because they signal validate's own analysis was incomplete — CI consumers can't treat a degraded run as a clean one.
 
-The exit-2 contract is enforced for the following surfaces (regression-tested in `cli_contract_test.go`): `version`, `init`, `stats`, `lineage`, `history`, `query`, `sql`, `describe`, `describe blueprint`, `edit`, `new`, `events`, `auth`, `schedule`, `validate`, plus the `unknown_command` fallthrough. CI scripts that gate on exit code can rely on `1` vs `2` to distinguish "real failure" from "you typed it wrong".
+The exit-2 contract is enforced for the following surfaces (regression-tested in `cli_contract_test.go`): `version`, `init`, `stats`, `lineage`, `history`, `query`, `sql`, `describe`, `describe blueprint`, `edit`, `new`, `auth`, `schedule`, `validate`, plus the `unknown_command` fallthrough. CI scripts that gate on exit code can rely on `1` vs `2` to distinguish "real failure" from "you typed it wrong".
 
 ---
 
@@ -334,5 +323,3 @@ ondatrasql rewrite                # Rewrite files with many deletes
 ```
 
 See [Maintain DuckLake Storage](/guides/maintain-ducklake-storage/).
-
-

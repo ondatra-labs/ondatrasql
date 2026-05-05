@@ -66,17 +66,6 @@ SELECT 1 AS id, 'test@test.com' AS email, 'Alice' AS name`)
 -- @column: notes = Free text | redact
 SELECT 1 AS id, '123' AS ssn, 'secret' AS notes`)
 
-	// Events model
-	f.Add(`-- @kind: events
-event_name VARCHAR NOT NULL,
-page_url VARCHAR,
-received_at TIMESTAMPTZ`)
-
-	f.Add(`-- @kind: events
--- @description: Analytics events
-user_id VARCHAR NOT NULL,
-event_params JSON`)
-
 	// Edge cases
 	f.Add(``)
 	f.Add(`-- no kind directive
@@ -125,17 +114,6 @@ SELECT 1`)
 				t.Errorf("ColumnDescriptions[%q] is empty", k)
 			}
 		}
-		// Events models must have columns with valid names and types
-		if m.Kind == "events" {
-			for i, col := range m.Columns {
-				if col.Name == "" {
-					t.Errorf("Columns[%d].Name is empty", i)
-				}
-				if col.Type == "" {
-					t.Errorf("Columns[%d].Type is empty", i)
-				}
-			}
-		}
 		// Column tags should have non-empty keys and non-empty single-word values
 		for k, tags := range m.ColumnTags {
 			if k == "" {
@@ -152,38 +130,6 @@ SELECT 1`)
 		}
 	})
 }
-
-func FuzzParseColumnDefs(f *testing.F) {
-	f.Add("event_name VARCHAR NOT NULL,\npage_url VARCHAR")
-	f.Add("id INTEGER,\nname VARCHAR NOT NULL,\ncount BIGINT")
-	f.Add("received_at TIMESTAMPTZ")
-	f.Add("")
-	f.Add("invalid")
-	f.Add(",,,")
-	f.Add("-- comment\nevent_name VARCHAR")
-	f.Add("a B NOT NULL,\nc D,\ne F NOT NULL")
-
-	f.Fuzz(func(t *testing.T, input string) {
-		cols, err := parseColumnDefs(input)
-		if err != nil {
-			return
-		}
-		// Each column must have non-empty Name and Type
-		for i, col := range cols {
-			if col.Name == "" {
-				t.Errorf("col[%d].Name is empty", i)
-			}
-			if col.Type == "" {
-				t.Errorf("col[%d].Type is empty", i)
-			}
-			// Name must pass ValidateColumnName
-			if err := ValidateColumnName(col.Name); err != nil {
-				t.Errorf("col[%d].Name %q invalid: %v", i, col.Name, err)
-			}
-		}
-	})
-}
-
 
 func FuzzValidateIdentifier(f *testing.F) {
 	f.Add("staging.orders")

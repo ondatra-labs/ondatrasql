@@ -88,25 +88,6 @@ SELECT id FROM source
 	}
 }
 
-func TestParsePushRejectsEventsKind(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	path := writeSinkModel(t, dir, "sync/bad.sql", `-- @kind: events
--- @push: crm_push
-
-SELECT id FROM source
-`)
-
-	_, err := ParseModel(path, dir)
-	if err == nil {
-		t.Fatal("expected error for @sink with events kind")
-	}
-	if !strings.Contains(err.Error(), "not supported for events") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
 func TestParsePushAllowsSCD2Syntax(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

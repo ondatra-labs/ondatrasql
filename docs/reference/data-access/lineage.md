@@ -38,8 +38,8 @@ Every run stores metadata in `commit_extra_info` on the DuckLake snapshot. All f
 | Field | Description |
 |---|---|
 | `model` | Target table name |
-| `kind` | `table`, `append`, `merge`, `scd2`, `tracked`, `events` |
-| `run_type` | `backfill`, `incremental`, `full`, `skip`, `flush` |
+| `kind` | `table`, `append`, `merge`, `scd2`, `tracked` |
+| `run_type` | `backfill`, `incremental`, `full`, `skip` |
 | `rows_affected` | Rows written |
 | `start_time` | Run start (ISO 8601) |
 | `end_time` | Run end (ISO 8601) |

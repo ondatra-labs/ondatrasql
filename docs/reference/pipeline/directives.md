@@ -18,7 +18,7 @@ Directives are SQL comments that control materialization, change detection, and 
 
 | Directive | What it does |
 |---|---|
-| `@kind` | Materialization strategy: `table`, `merge`, `append`, `scd2`, `tracked`, `events` |
+| `@kind` | Materialization strategy: `table`, `merge`, `append`, `scd2`, `tracked` |
 | `@unique_key` | Row matching key (required for merge, scd2) |
 | `@group_key` | Group key for content-hash detection (required for tracked) |
 | `@incremental` | Cursor column for incremental state |
@@ -48,7 +48,7 @@ Directives are SQL comments that control materialization, change detection, and 
 
 A `@fetch` model is a passthrough projection of API rows: every output column must be `<col>::TYPE AS alias`. JOIN, WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT, OFFSET, UNION are rejected at parse time — push transformation to a downstream model that reads from the @fetch table.
 
-`@fetch` is forbidden on `@kind: events` (events have their own ingest pipeline) and cannot be combined with `@push` on the same model (split into a fetch model and a downstream push model).
+`@fetch` cannot be combined with `@push` on the same model (split into a fetch model and a downstream push model).
 
 ## Outbound Sync
 
@@ -56,7 +56,7 @@ A `@fetch` model is a passthrough projection of API rows: every output column mu
 |---|---|
 | `@push` | Push function name in `lib/` for outbound sync. See [Sync Data to External APIs](/guides/outbound-sync/) |
 
-`@push` works with `table`, `append`, `merge`, and `tracked` kinds. Not supported with `scd2` (use `@kind: table` with `WHERE is_current = true` instead) or `events`. The runtime exposes raw DuckLake `change_type` values (`insert`, `update_preimage`, `update_postimage`, `delete`) to your push function via `__ondatra_change_type`. Your Starlark code decides how to handle each change type.
+`@push` works with `table`, `append`, `merge`, and `tracked` kinds. Not supported with `scd2` (use `@kind: table` with `WHERE is_current = true` instead). The runtime exposes raw DuckLake `change_type` values (`insert`, `update_preimage`, `update_postimage`, `delete`) to your push function via `__ondatra_change_type`. Your Starlark code decides how to handle each change type.
 
 A `@push` model produces the shape sent to the API. The strict-push validator only inspects the **outermost SELECT projection** — every output column must be `<expr>::TYPE AS alias` (cast + alias on every projection, no `SELECT *`). Inside the model SQL is fully free: JOIN, WHERE, GROUP BY, aggregates, DISTINCT, ORDER BY, CTEs, derived expressions are all legitimate shape construction. The cross-cutting LIMIT/OFFSET ban still applies. Lib calls in FROM are rejected (that would be a `@fetch` model — read from the materialized fetch table instead).
 
@@ -102,20 +102,20 @@ WHERE active = true
 
 ## Compatibility Matrix
 
-| Directive | table | append | merge | scd2 | tracked | events |
-|---|---|---|---|---|---|---|
-| `@unique_key` | -- | -- | Required | Required | -- | -- |
-| `@group_key` | -- | -- | -- | -- | Required | -- |
-| `@incremental` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@fetch` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@push` | Yes | Yes | Yes | -- | Yes | -- |
-| `@partitioned_by` | Hint | Hint | Hint | Hint | Hint | -- |
-| `@sorted_by` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@column` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@constraint` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@audit` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@warning` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@extension` | Yes | Yes | Yes | Yes | Yes | -- |
-| `@description` | Yes | Yes | Yes | Yes | Yes | Yes |
+| Directive | table | append | merge | scd2 | tracked |
+|---|---|---|---|---|---|
+| `@unique_key` | -- | -- | Required | Required | -- |
+| `@group_key` | -- | -- | -- | -- | Required |
+| `@incremental` | Yes | Yes | Yes | Yes | Yes |
+| `@fetch` | Yes | Yes | Yes | Yes | Yes |
+| `@push` | Yes | Yes | Yes | -- | Yes |
+| `@partitioned_by` | Hint | Hint | Hint | Hint | Hint |
+| `@sorted_by` | Yes | Yes | Yes | Yes | Yes |
+| `@column` | Yes | Yes | Yes | Yes | Yes |
+| `@constraint` | Yes | Yes | Yes | Yes | Yes |
+| `@audit` | Yes | Yes | Yes | Yes | Yes |
+| `@warning` | Yes | Yes | Yes | Yes | Yes |
+| `@extension` | Yes | Yes | Yes | Yes | Yes |
+| `@description` | Yes | Yes | Yes | Yes | Yes |
 
 `@fetch` and `@push` cannot be combined on the same model — split into a `@fetch` model that materializes raw API data and a downstream `@push` model that reads from it.

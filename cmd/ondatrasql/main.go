@@ -257,15 +257,6 @@ func run(args []string) error {
 	case "schedule":
 		return runSchedule(cfg, args[1:])
 
-	case "events":
-		if len(args) < 2 {
-			return &invocationErr{fmt.Errorf("usage: ondatrasql events <port>")}
-		}
-		if len(args) > 2 {
-			return &invocationErr{fmt.Errorf("usage: ondatrasql events <port> (got %d extra args)", len(args)-2)}
-		}
-		return runEvents(ctx, cfg, args[1])
-
 	case "auth":
 		if len(args) < 2 {
 			return runAuthList(ctx)
@@ -329,7 +320,6 @@ Run:
   run [model]             Run all models or specific model
   sandbox [model]         Preview changes without affecting data
   schedule [cron]         Install/show/remove OS scheduler (no args = show)
-  events <port>           Start event collection (admin = port+1)
 
 Introspection:
   stats                          Project overview and all models

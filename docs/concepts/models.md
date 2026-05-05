@@ -45,17 +45,3 @@ The full directive list is in the [reference](/reference/pipeline/directives/).
 Every model produces exactly one table. If you need two tables, you write two models. This constraint might feel limiting at first, but it's what makes everything else work: the dependency graph is unambiguous, lineage is straightforward, and the runtime knows exactly what each file produces.
 
 Dependencies between your models are detected automatically from SQL table references and executed in topological order. You never have to declare them. See [Dependency Graph](/concepts/dag/).
-
-## Events: the exception
-
-Events models are the one case where a model isn't a query. They define a column schema instead of a SELECT, and receive data via HTTP POST rather than computing it from SQL.
-
-```sql
--- @kind: events
-
-event_name VARCHAR NOT NULL,
-page_url VARCHAR,
-user_id VARCHAR
-```
-
-If you need to collect data from external systems in real time, that's what events are for. See [Event Collection](/guides/collect-events/) for how to set it up.

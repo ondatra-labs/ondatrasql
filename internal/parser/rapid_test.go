@@ -405,7 +405,7 @@ func TestRapid_Validation_InvalidKind(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		invalid := rapid.StringMatching(`^[a-z]{3,10}$`).Filter(func(s string) bool {
 			switch s {
-			case "table", "append", "merge", "scd2", "events", "tracked", "partition":
+			case "table", "append", "merge", "scd2", "tracked", "partition", "events", "view":
 				return false
 			}
 			return true
@@ -521,114 +521,4 @@ func TestRapid_Parse_StripsSemicolon(t *testing.T) {
 	})
 }
 
-// --- Events Kind Properties ---
-
-// Property: events model preserves the number of columns.
-func TestRapid_Events_ColumnCountPreserved(t *testing.T) {
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		n := rapid.IntRange(1, 6).Draw(rt, "n")
-		var lines []string
-		lines = append(lines, "-- @kind: events")
-		for i := 0; i < n; i++ {
-			col := genColumnName().Draw(rt, "col")
-			typ := rapid.SampledFrom([]string{"VARCHAR", "INTEGER", "BIGINT", "BOOLEAN", "TIMESTAMPTZ", "JSON", "DOUBLE"}).Draw(rt, "type")
-			lines = append(lines, col+" "+typ+",")
-		}
-
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "models", "raw"), 0o755)
-		path := filepath.Join(dir, "models", "raw", "events.sql")
-		os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
-
-		m, err := ParseModel(path, dir)
-		if err != nil {
-			return // Invalid column names may cause errors
-		}
-		if len(m.Columns) != n {
-			rt.Fatalf("got %d columns, want %d", len(m.Columns), n)
-		}
-	})
-}
-
-// Property: events model preserves NOT NULL on columns.
-func TestRapid_Events_NotNullPreserved(t *testing.T) {
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		col := genColumnName().Draw(rt, "col")
-		notNull := rapid.Bool().Draw(rt, "notNull")
-		typ := rapid.SampledFrom([]string{"VARCHAR", "INTEGER", "BIGINT"}).Draw(rt, "type")
-
-		line := col + " " + typ
-		if notNull {
-			line += " NOT NULL"
-		}
-
-		content := "-- @kind: events\n" + line
-
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "models", "raw"), 0o755)
-		path := filepath.Join(dir, "models", "raw", "events.sql")
-		os.WriteFile(path, []byte(content), 0o644)
-
-		m, err := ParseModel(path, dir)
-		if err != nil {
-			return
-		}
-		if len(m.Columns) != 1 {
-			rt.Fatalf("got %d columns, want 1", len(m.Columns))
-		}
-		if m.Columns[0].NotNull != notNull {
-			rt.Fatalf("NotNull = %v, want %v", m.Columns[0].NotNull, notNull)
-		}
-	})
-}
-
-// Property: events models reject disallowed directives.
-func TestRapid_Events_RejectsInvalidDirectives(t *testing.T) {
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		directive := rapid.SampledFrom([]string{
-			"-- @unique_key: id",
-			"-- @incremental: ts",
-			"-- @constraint: not_null(x)",
-			"-- @audit: row_count(>, 0)",
-			"-- @warning: row_count(>, 0)",
-		}).Draw(rt, "directive")
-
-		content := "-- @kind: events\n" + directive + "\nevent_name VARCHAR"
-
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "models", "raw"), 0o755)
-		path := filepath.Join(dir, "models", "raw", "events.sql")
-		os.WriteFile(path, []byte(content), 0o644)
-
-		_, err := ParseModel(path, dir)
-		if err == nil {
-			rt.Fatalf("expected error for events model with %s", directive)
-		}
-	})
-}
-
-// Property: events kind is always "events" in the parsed model.
-func TestRapid_Events_KindPreserved(t *testing.T) {
-	t.Parallel()
-	rapid.Check(t, func(rt *rapid.T) {
-		col := genColumnName().Draw(rt, "col")
-		content := "-- @kind: events\n" + col + " VARCHAR"
-
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "models", "raw"), 0o755)
-		path := filepath.Join(dir, "models", "raw", "events.sql")
-		os.WriteFile(path, []byte(content), 0o644)
-
-		m, err := ParseModel(path, dir)
-		if err != nil {
-			return
-		}
-		if m.Kind != "events" {
-			rt.Fatalf("kind = %q, want events", m.Kind)
-		}
-	})
-}
 

@@ -1,10 +1,10 @@
 ---
-description: Why OndatraSQL has six model kinds and when to choose each one.
+description: Why OndatraSQL has five model kinds and when to choose each one.
 draft: false
 title: Model Kinds
 weight: 3
 ---
-The `@kind` directive controls how your table is built and updated. There are six kinds because different data has different update needs. This page helps you understand when to pick which one.
+The `@kind` directive controls how your table is built and updated. There are five kinds because different data has different update needs. This page helps you understand when to pick which one.
 
 ## The core question: rebuild or update?
 
@@ -12,7 +12,7 @@ The simplest thing is to rebuild the entire table every time. That's `@kind: tab
 
 The alternative is to update incrementally: only process what changed. But that requires knowing *what* changed, and different data shapes need different strategies. That's why the kinds exist.
 
-All kinds except `events` and `scd2` support `@push` for outbound sync. The runtime exposes raw DuckLake change types to your push function, so your Starlark code decides how to handle each type.
+All kinds except `scd2` support `@push` for outbound sync. The runtime exposes raw DuckLake change types to your push function, so your Starlark code decides how to handle each type.
 
 ## table — the safe default
 
@@ -54,12 +54,6 @@ SCD2 (Slowly Changing Dimension Type 2) keeps every version of a row. When a pro
 
 `@push` is not supported with scd2. To push current state to an external system, use `@kind: table` with `WHERE is_current = true` in a separate sync model.
 
-## events — data from the outside
-
-Events models are the odd one out. They don't run a query — they define a column schema and receive data via HTTP POST. Think product analytics, webhook handlers, or IoT sensor data. Events is the only kind that doesn't support `@push` — it has its own ingest pipeline.
-
-See [Event Collection](/guides/collect-events/) for how to set this up.
-
 ## How to choose
 
 Ask yourself:
@@ -69,6 +63,5 @@ Ask yourself:
 - **Is it one row per entity?** → `merge`
 - **Is it multiple rows per entity?** → `tracked`
 - **Do I need historical versions?** → `scd2`
-- **Is it coming from outside via HTTP?** → `events`
 
 The per-kind directive compatibility and storage hints are in the [Directives reference](/reference/pipeline/directives/).

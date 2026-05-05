@@ -30,13 +30,6 @@ func IsModelFile(path string) bool {
 	return ext == ".sql"
 }
 
-// ColumnDef represents a column definition for @kind: events models.
-type ColumnDef struct {
-	Name    string
-	Type    string
-	NotNull bool
-}
-
 // Model represents a parsed SQL model file with its directives.
 type Model struct {
 	// Target is the fully qualified table name (schema.table).
@@ -98,10 +91,6 @@ type Model struct {
 	// SortedBy lists columns for DuckLake native sorted table optimization.
 	// Set via @sorted_by directive. Applied as ALTER TABLE SET SORTED BY after materialization.
 	SortedBy []string
-
-	// Columns holds column definitions for @kind: events models.
-	// Parsed from the model body (DDL-style column definitions instead of SQL).
-	Columns []ColumnDef
 
 	// Source is the Starlark function name for lib/ blueprints (e.g. "gam_report").
 	// The function is loaded from lib/<source>.star via load().
@@ -554,15 +543,6 @@ func ParseModel(path, projectDir string) (*Model, error) {
 		return nil, fmt.Errorf("model contains %d SQL statements (separated by ;), but only single-statement models are supported. Remove extra statements or split into separate models", len(statements))
 	}
 
-	// For events kind, parse body as column definitions instead of SQL
-	if model.Kind == "events" {
-		cols, err := parseColumnDefs(model.SQL)
-		if err != nil {
-			return nil, fmt.Errorf("parse column definitions: %w", err)
-		}
-		model.Columns = cols
-	}
-
 	// Validate
 	if err := validateModel(model); err != nil {
 		return nil, err
@@ -727,19 +707,20 @@ func stripBlockComments(line string, inOpen bool) (string, bool) {
 func validateModel(m *Model) error {
 	// Validate kind
 	switch m.Kind {
-	case "table", "append", "merge", "scd2", "events", "tracked":
+	case "table", "append", "merge", "scd2", "tracked":
 		// OK
 	case "partition":
 		return fmt.Errorf("@kind: partition was removed — use @kind: tracked with @group_key instead")
 	case "view":
 		return fmt.Errorf("the 'view' kind was removed in v0.14.0. Use '@kind: table' instead — DuckLake makes table storage essentially free, and you gain snapshots, sandbox, lineage, validation, and CDC")
+	case "events":
+		return fmt.Errorf("@kind: events was removed in v0.33.0 — use a @fetch model with a Starlark script and save.row() instead")
 	default:
-		return fmt.Errorf("invalid kind %q: must be table, append, merge, scd2, events, or tracked", m.Kind)
+		return fmt.Errorf("invalid kind %q: must be table, append, merge, scd2, or tracked", m.Kind)
 	}
 
-	// SQL models must have a non-empty body. Scripts and events kind have
-	// their own body semantics and are exempt. (Bug 11)
-	if m.ScriptType == ScriptTypeNone && m.Kind != "events" && strings.TrimSpace(m.SQL) == "" {
+	// SQL models must have a non-empty body.
+	if m.ScriptType == ScriptTypeNone && strings.TrimSpace(m.SQL) == "" {
 		return fmt.Errorf("model %s has no SQL body — write a SELECT statement after the directives", m.Target)
 	}
 
@@ -748,57 +729,12 @@ func validateModel(m *Model) error {
 		return fmt.Errorf("invalid target: %w", err)
 	}
 
-	// Events models have restricted directives — only @description is allowed
-	if m.Kind == "events" {
-		if len(m.Columns) == 0 {
-			return fmt.Errorf("events model must define at least 1 column")
-		}
-		if m.UniqueKey != "" {
-			return fmt.Errorf("@unique_key is not supported for events")
-		}
-		if len(m.PartitionedBy) > 0 {
-			return fmt.Errorf("@partitioned_by is not supported for events")
-		}
-		if m.Incremental != "" {
-			return fmt.Errorf("@incremental is not supported for events")
-		}
-		if len(m.SortedBy) > 0 {
-			return fmt.Errorf("@sorted_by is not supported for events")
-		}
-		if len(m.Constraints) > 0 {
-			return fmt.Errorf("@constraint is not supported for events")
-		}
-		if len(m.Audits) > 0 {
-			return fmt.Errorf("@audit is not supported for events")
-		}
-		if len(m.Warnings) > 0 {
-			return fmt.Errorf("@warning is not supported for events")
-		}
-		if len(m.ColumnDescriptions) > 0 {
-			return fmt.Errorf("@column is not supported for events (use column definitions in the body)")
-		}
-		if len(m.ColumnTags) > 0 {
-			return fmt.Errorf("@column tags are not supported for events")
-		}
-		if len(m.Extensions) > 0 {
-			return fmt.Errorf("@extension is not supported for events")
-		}
-	}
-
-	// Validate @sink directives
-	if m.Push != "" && m.Kind == "events" {
-		return fmt.Errorf("@sink is not supported for events kind (events has its own ingest pipeline)")
-	}
-
 	// @fetch directive validations.
 	// The lib-call relationship rules (@fetch ↔ at least one lib call,
 	// no @fetch ↔ no lib calls) are enforced at runtime in the execute
 	// package, since they require the lib registry. Here we only enforce
 	// the directive-only combinations that don't need lib knowledge.
 	if m.Fetch {
-		if m.Kind == "events" {
-			return fmt.Errorf("@fetch is not compatible with @kind: events (events models have their own ingest pipeline)")
-		}
 		if m.Push != "" {
 			return fmt.Errorf("@fetch and @push cannot be combined on the same model — split into a @fetch model that materializes raw data and a downstream @push model that reads from it")
 		}
@@ -995,74 +931,6 @@ func splitParenAware(s string) []string {
 	}
 	parts = append(parts, s[start:])
 	return parts
-}
-
-// parseColumnDefs parses DDL-style column definitions from an events model body.
-// Format: "col_name TYPE [NOT NULL]," — one per line, trailing commas optional.
-// Example:
-//
-//	event_name VARCHAR NOT NULL,
-//	page_url VARCHAR,
-//	received_at TIMESTAMPTZ
-func parseColumnDefs(body string) ([]ColumnDef, error) {
-	var cols []ColumnDef
-
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "--") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// Strip trailing comma
-		line = strings.TrimRight(line, ",")
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("invalid column definition: %q (expected: name TYPE [NOT NULL])", line)
-		}
-
-		// Parse: name TYPE [NOT NULL]
-		// Supports multi-word types like DOUBLE PRECISION, TIMESTAMP WITH TIME ZONE.
-		// Rejects inline constraints (PRIMARY KEY, DEFAULT, CHECK, UNIQUE, REFERENCES).
-		notNullIdx := -1
-		for i := 1; i < len(parts)-1; i++ {
-			if strings.EqualFold(parts[i], "NOT") && strings.EqualFold(parts[i+1], "NULL") {
-				notNullIdx = i
-				break
-			}
-		}
-
-		var typeParts []string
-		col := ColumnDef{Name: parts[0]}
-		var trailingIdx int // first token after type+NOT NULL
-		if notNullIdx > 0 {
-			typeParts = parts[1:notNullIdx]
-			col.NotNull = true
-			trailingIdx = notNullIdx + 2
-		} else {
-			typeParts = parts[1:]
-			trailingIdx = len(parts)
-		}
-		col.Type = strings.Join(typeParts, " ")
-
-		// Reject trailing tokens — events columns only support name TYPE [NOT NULL]
-		if trailingIdx < len(parts) {
-			return nil, fmt.Errorf("invalid column definition: %q (only name TYPE [NOT NULL] is supported, found extra: %s)",
-				line, strings.Join(parts[trailingIdx:], " "))
-		}
-
-		if err := ValidateColumnName(col.Name); err != nil {
-			return nil, fmt.Errorf("column %q: %w", col.Name, err)
-		}
-
-		cols = append(cols, col)
-	}
-
-	return cols, nil
 }
 
 // parsePushArgs splits a sink argument string respecting quoted values.

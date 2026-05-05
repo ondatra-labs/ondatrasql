@@ -149,9 +149,7 @@ func TestParseModel_BlockCommentNonDirective_OK(t *testing.T) {
 // TestParseModel_UnterminatedBlockCommentInHeader_Rejected pins
 // R10 #6: a `/*` in the header with no closing `*/` must produce a
 // clear error. Pre-R10 the stripper consumed the rest of the file
-// silently, and with `@kind: events` already parsed the model was
-// accepted with empty SQL (events-kind is exempt from the
-// empty-SQL check).
+// silently, leading to a model with empty SQL being silently accepted.
 func TestParseModel_UnterminatedBlockCommentInHeader_Rejected(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -159,7 +157,7 @@ func TestParseModel_UnterminatedBlockCommentInHeader_Rejected(t *testing.T) {
 	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	src := "-- @kind: events\n/* unterminated note about the model\n@id: int"
+	src := "-- @kind: table\n/* unterminated note about the model\nSELECT 1 AS id"
 	path := filepath.Join(modelsDir, "broken.sql")
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
@@ -475,23 +473,6 @@ func TestParseModel_FetchDirective_WithSpaceArg_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bare marker") {
 		t.Errorf("error should explain @fetch is a bare marker, got: %v", err)
-	}
-}
-
-func TestParseModel_FetchDirective_WithEventsKind_Rejected(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	modelsDir := filepath.Join(dir, "models", "raw")
-	os.MkdirAll(modelsDir, 0o755)
-	os.WriteFile(filepath.Join(modelsDir, "bad.sql"), []byte(
-		"-- @kind: events\n-- @fetch\nid BIGINT NOT NULL"), 0o644)
-
-	_, err := ParseModel(filepath.Join(modelsDir, "bad.sql"), dir)
-	if err == nil {
-		t.Fatal("@fetch + @kind: events should be rejected")
-	}
-	if !strings.Contains(err.Error(), "events") {
-		t.Errorf("error should mention events, got: %v", err)
 	}
 }
 

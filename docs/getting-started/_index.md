@@ -138,6 +138,5 @@ ondatrasql sql "SELECT * FROM mart.population"
 
 - **Outbound sync**: [push data to APIs](/guides/outbound-sync/) with `@push` and automatic change detection
 - **Ingest from APIs**: [blueprints](/reference/lib-functions/api-dict/) with HTTP, OAuth, and pagination
-- **Collect events**: [POST to an embedded endpoint](/guides/collect-events/) with in-memory and batch buffering
 - **Validate data**: [constraints, audits, and warnings](/reference/) with atomic rollback
 - **Track lineage**: [column-level lineage](/reference/data-access/lineage/) extracted from SQL AST

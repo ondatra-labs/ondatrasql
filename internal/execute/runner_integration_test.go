@@ -4930,7 +4930,7 @@ UNION ALL SELECT 5, 'Eve', 'NO', 500, 'active', 'web'
 	}
 
 	dagResults, dagErrors := execute.RunDAG(context.Background(), p.Sess, dagModels, depMap,
-		dag.GenerateRunID(), "", "", "", "", "", nil, nil)
+		dag.GenerateRunID(), "", "", "", "", nil, nil)
 
 	for _, m := range dagModels {
 		if err := dagErrors[m.Target]; err != nil {
@@ -5357,30 +5357,3 @@ SELECT 'A' AS grp, '' AS val
 }
 
 // ---------------------------------------------------------------------------
-// Flush run type for events (docs/reference/pipeline/run-types.md)
-// ---------------------------------------------------------------------------
-
-// TestRun_EventsFlushRunType verifies that events models are dispatched
-// to the flush path. Without a running daemon the runner errors, but the
-// run_type is assigned before the health check. We verify by checking
-// that the error mentions the daemon and the model kind is events.
-func TestRun_EventsFlushRunType(t *testing.T) {
-	p := testutil.NewProject(t)
-
-	p.AddModel("raw/clicks.sql", `-- @kind: events
-
-event_name VARCHAR NOT NULL,
-user_id VARCHAR
-`)
-
-	// Without a daemon, runEvents errors on health check.
-	// This verifies the events path is dispatched (not the SQL path).
-	_, err := runModelErr(t, p, "raw/clicks.sql")
-	if err == nil {
-		t.Fatal("expected error without daemon running")
-	}
-	if !strings.Contains(err.Error(), "daemon") && !strings.Contains(err.Error(), "events") {
-		t.Fatalf("expected daemon/events error, got: %v", err)
-	}
-}
-

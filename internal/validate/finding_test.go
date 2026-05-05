@@ -240,12 +240,12 @@ func TestRender_Human_FindingHasMarkerAndRuleID(t *testing.T) {
 	}
 }
 
-// TestSchemaVersion_Is3 pins the schema version. Bump only when
+// TestSchemaVersion_Is4 pins the schema version. Bump only when
 // rule-IDs/severity/output structure change. The test exists so a casual
 // edit doesn't silently regress consumers' expectations.
-func TestSchemaVersion_Is3(t *testing.T) {
-	if SchemaVersion != 3 {
-		t.Errorf("SchemaVersion = %d, want 3 (parser.expose_on_non_table removed in v3)", SchemaVersion)
+func TestSchemaVersion_Is4(t *testing.T) {
+	if SchemaVersion != 4 {
+		t.Errorf("SchemaVersion = %d, want 4 (parser.events_missing_columns removed in v4)", SchemaVersion)
 	}
 }
 

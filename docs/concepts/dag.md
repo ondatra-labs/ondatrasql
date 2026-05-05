@@ -24,7 +24,6 @@ Each model gets a run type before execution:
 - **backfill** — first run or definition changed, rebuild from scratch
 - **incremental** — new or changed data, process only the delta
 - **full** — upstream model changed, re-evaluate
-- **flush** — events model, drain buffered data
 
 These decisions propagate through the graph. If `raw.events` runs (new data arrived), downstream models like `staging.events` are re-evaluated — they might run incrementally or do a full rebuild depending on what changed. If nothing changed anywhere in the pipeline, models skip based on their own batch-computed run types.
 

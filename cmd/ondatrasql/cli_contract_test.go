@@ -92,7 +92,6 @@ SELECT 1 AS id`)
 		{"edit_no_target", []string{"edit"}, 2, "usage:"},
 		{"new_no_target", []string{"new"}, 2, "usage:"},
 		{"init_extra_arg", []string{"init", "extra"}, 2, "unexpected args"},
-		{"events_no_port", []string{"events"}, 2, "usage:"},
 		{"schedule_extra_arg", []string{"schedule", "*/5 * * * *", "extra"}, 2, "extra args"},
 	}
 
