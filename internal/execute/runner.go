@@ -24,6 +24,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/lineage"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/validation"
 )
 
@@ -56,12 +57,13 @@ type Runner struct {
 	sess             *duckdb.Session
 	mode             Mode
 	dagRunID         string
-	projectDir       string               // Project root directory (for Starlark load())
-	configHash       string               // SHA256 of config/*.sql files (Bug S21: macros/variables bust hash)
-	gitInfo          gitInfo              // Cached Git metadata
-	runTypeDecisions RunTypeDecisions     // Pre-computed run_type decisions (batch optimization)
-	astCache         map[string]string    // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
+	projectDir       string                // Project root directory (for Starlark load())
+	configHash       string                // SHA256 of config/*.sql files (Bug S21: macros/variables bust hash)
+	gitInfo          gitInfo               // Cached Git metadata
+	runTypeDecisions RunTypeDecisions      // Pre-computed run_type decisions (batch optimization)
+	astCache         map[string]string     // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
 	libRegistry      *libregistry.Registry // Registered lib functions from lib/*.star
+	stateStore       *state.State          // Lazily opened state.duckdb (durable fetch buffer)
 }
 
 // gitInfo holds Git repository metadata for the current run.
@@ -102,6 +104,34 @@ func (r *Runner) SetLibRegistry(reg *libregistry.Registry) {
 func (r *Runner) SetProjectDir(dir string) {
 	r.projectDir = dir
 	r.configHash = backfill.ConfigHash(filepath.Join(dir, "config"))
+}
+
+// getStateStore lazily opens .ondatra/state.duckdb and caches the handle on
+// the runner. Returns nil if projectDir isn't set (in-memory mode only).
+func (r *Runner) getStateStore() (*state.State, error) {
+	if r.projectDir == "" {
+		return nil, nil
+	}
+	if r.stateStore != nil {
+		return r.stateStore, nil
+	}
+	st, err := state.Open(r.projectDir)
+	if err != nil {
+		return nil, fmt.Errorf("open state.duckdb: %w", err)
+	}
+	r.stateStore = st
+	return st, nil
+}
+
+// CloseState closes the state.duckdb handle if it was opened. Safe to call
+// when no state store was ever opened.
+func (r *Runner) CloseState() error {
+	if r.stateStore == nil {
+		return nil
+	}
+	err := r.stateStore.Close()
+	r.stateStore = nil
+	return err
 }
 
 // getAST returns the AST JSON for a SQL query, using cache if available.
@@ -540,7 +570,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 					rt := script.NewRuntime(r.sess, nil, r.projectDir)
 					if r.projectDir != "" && model.Kind != "table" {
-						rt.SetIngestDir(filepath.Join(r.projectDir, ".ondatra", "ingest"))
+						st, err := r.getStateStore()
+						if err != nil {
+							return nil, err
+						}
+						rt.SetStateStore(st)
 					}
 
 					// Execute lib function (unique target per call to avoid temp table collision)

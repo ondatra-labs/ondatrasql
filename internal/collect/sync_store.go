@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,20 @@ const (
 	syncInflightMaxAge = 10 * time.Minute
 	syncDefaultLimit   = 1000
 )
+
+// claimTimestamp extracts the timestamp from a claim ID.
+// Claim ID format: "{nanoTimestamp}_{counter}"
+func claimTimestamp(claimID string) (time.Time, error) {
+	parts := strings.SplitN(claimID, "_", 2)
+	if len(parts) == 0 {
+		return time.Time{}, fmt.Errorf("invalid claim ID: %s", claimID)
+	}
+	nanos, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(0, nanos), nil
+}
 
 // SyncStore provides durable outbound sync tracking backed by Badger.
 // Unlike Store (which stores full row data for inbound events), SyncStore

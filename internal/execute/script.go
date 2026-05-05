@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -167,15 +166,19 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// Execute the Starlark script to collect data into temp table
 	rt := script.NewRuntime(r.sess, incrState, r.projectDir)
 
-	// Enable durable Badger-backed buffering when projectDir is set.
+	// Enable durable state.duckdb-backed buffering when projectDir is set.
 	// If projectDir is empty, all kinds fall back to the default in-memory
 	// collector (no on-disk staging).
 	// Exception: @kind: table uses the in-memory collector even when
 	// projectDir is set, because table materialization uses CREATE OR
-	// REPLACE (all-or-nothing) — partial Badger recovery between runs
+	// REPLACE (all-or-nothing) — partial state recovery between runs
 	// would create duplicates against an already-populated target.
 	if r.projectDir != "" && model.Kind != "table" {
-		rt.SetIngestDir(filepath.Join(r.projectDir, ".ondatra", "ingest"))
+		st, err := r.getStateStore()
+		if err != nil {
+			return nil, err
+		}
+		rt.SetStateStore(st)
 	}
 
 	stepStart = time.Now()

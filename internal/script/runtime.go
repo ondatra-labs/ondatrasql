@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"go.starlark.net/starlark"
 	starlarkjson "go.starlark.net/lib/json"
 	starlarktime "go.starlark.net/lib/time"
@@ -90,7 +91,7 @@ type Runtime struct {
 	sess       *duckdb.Session
 	incrState  *backfill.IncrementalState
 	projectDir string
-	ingestDir  string // When set, uses Badger for durable save() buffering
+	stateStore *state.State // When set, save() rows are durably buffered in state.duckdb
 }
 
 // NewRuntime creates a new script runtime with DuckDB access.
@@ -104,10 +105,10 @@ func NewRuntime(sess *duckdb.Session, incrState *backfill.IncrementalState, proj
 	return rt
 }
 
-// SetIngestDir enables durable Badger-backed save() buffering.
-// When set, save.row() writes to Badger at ingestDir instead of in-memory.
-func (r *Runtime) SetIngestDir(dir string) {
-	r.ingestDir = dir
+// SetStateStore enables durable state-backed save() buffering.
+// When set, save.row() writes rows to state.duckdb instead of in-memory.
+func (r *Runtime) SetStateStore(st *state.State) {
+	r.stateStore = st
 }
 
 // parseEmptyResult reads the optional "empty_result" key from a fetch
@@ -156,10 +157,10 @@ type Result struct {
 	TempTable   string            // Name of temp table with collected data
 	RowCount    int64             // Number of rows collected
 	Duration    time.Duration     // Script execution time
-	ClaimIDs    []string          // Badger claim IDs (non-nil only when Badger is used)
+	ClaimIDs    []string          // Claim IDs in state.duckdb (non-nil only when state-backed)
 	EmptyResult EmptyResultIntent // Lib's intent when RowCount==0; defaults to EmptyNoChange
 	collector   *saveCollector    // internal: deferred temp table creation (in-memory mode)
-	badger      *badgerCollector  // internal: durable mode
+	state       *stateCollector   // internal: durable state-backed mode
 }
 
 // blueprintFileOptions returns the strict Starlark syntax options used
@@ -354,16 +355,16 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (result *Result,
 	defer recoverScriptPanic(&err)
 	start := time.Now()
 
-	// Create collector: Badger-backed (durable) or in-memory
+	// Create collector: state.duckdb-backed (durable) or in-memory
 	var collector rowCollector
-	var bc *badgerCollector
-	if r.ingestDir != "" {
+	var sc *stateCollector
+	if r.stateStore != nil {
 		var err error
-		bc, err = newBadgerCollector(target, r.ingestDir, r.sess)
+		sc, err = newStateCollector(target, r.stateStore, r.sess)
 		if err != nil {
-			return nil, fmt.Errorf("create ingest collector: %w", err)
+			return nil, fmt.Errorf("create state collector: %w", err)
 		}
-		collector = bc
+		collector = sc
 	} else {
 		collector = &saveCollector{
 			target: target,
@@ -371,12 +372,12 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (result *Result,
 		}
 	}
 
-	// Track whether we returned successfully so defer can close bc on error
+	// Track whether we returned successfully so defer can close sc on error
 	var succeeded bool
-	if bc != nil {
+	if sc != nil {
 		defer func() {
 			if !succeeded {
-				_ = bc.close() // close logs internally on failure; runtime cleanup path
+				_ = sc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -433,7 +434,7 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (result *Result,
 		// RunSourcePaginated / RunSourceAsync) and avoids a footgun if a
 		// future code path routes script kind through allLibsReturnedNoChange.
 		EmptyResult: EmptyNoChange,
-		badger:      bc,
+		state:       sc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -451,16 +452,16 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 	defer recoverScriptPanic(&err)
 	start := time.Now()
 
-	// Create collector: Badger-backed (durable) or in-memory
+	// Create collector: state.duckdb-backed (durable) or in-memory
 	var collector rowCollector
-	var bc *badgerCollector
-	if r.ingestDir != "" {
+	var sc *stateCollector
+	if r.stateStore != nil {
 		var err error
-		bc, err = newBadgerCollector(target, r.ingestDir, r.sess)
+		sc, err = newStateCollector(target, r.stateStore, r.sess)
 		if err != nil {
-			return nil, fmt.Errorf("create ingest collector: %w", err)
+			return nil, fmt.Errorf("create state collector: %w", err)
 		}
-		collector = bc
+		collector = sc
 	} else {
 		collector = &saveCollector{
 			target: target,
@@ -468,12 +469,12 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 		}
 	}
 
-	// Track whether we returned successfully so defer can close bc on error
+	// Track whether we returned successfully so defer can close sc on error
 	var succeeded bool
-	if bc != nil {
+	if sc != nil {
 		defer func() {
 			if !succeeded {
-				_ = bc.close() // close logs internally on failure; runtime cleanup path
+				_ = sc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -559,7 +560,7 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 		// semantics — default to no_change so they get the same safe
 		// preserve-target behavior as the lib-API path.
 		EmptyResult: EmptyNoChange,
-		badger:      bc,
+		state:       sc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -583,24 +584,24 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 
 	// Create collector
 	var collector rowCollector
-	var bc *badgerCollector
-	if r.ingestDir != "" {
+	var sc *stateCollector
+	if r.stateStore != nil {
 		var err error
-		bc, err = newBadgerCollector(target, r.ingestDir, r.sess)
+		sc, err = newStateCollector(target, r.stateStore, r.sess)
 		if err != nil {
-			return nil, fmt.Errorf("create ingest collector: %w", err)
+			return nil, fmt.Errorf("create state collector: %w", err)
 		}
-		collector = bc
+		collector = sc
 	} else {
 		collector = &saveCollector{target: target, sess: r.sess}
 	}
 
-	// Track whether we returned successfully so defer can close bc on error
+	// Track whether we returned successfully so defer can close sc on error
 	var succeeded bool
-	if bc != nil {
+	if sc != nil {
 		defer func() {
 			if !succeeded {
-				_ = bc.close() // close logs internally on failure; runtime cleanup path
+				_ = sc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -746,7 +747,7 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 		Duration:    time.Since(start),
 		RowCount:    int64(collector.count()),
 		EmptyResult: emptyIntent,
-		badger:      bc,
+		state:       sc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -766,26 +767,26 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		cfg = httpCfg[0]
 	}
 
-	// Create collector: Badger-backed (durable) or in-memory
+	// Create collector: state.duckdb-backed (durable) or in-memory
 	var collector rowCollector
-	var bc *badgerCollector
-	if r.ingestDir != "" {
+	var sc *stateCollector
+	if r.stateStore != nil {
 		var err error
-		bc, err = newBadgerCollector(target, r.ingestDir, r.sess)
+		sc, err = newStateCollector(target, r.stateStore, r.sess)
 		if err != nil {
-			return nil, fmt.Errorf("create ingest collector: %w", err)
+			return nil, fmt.Errorf("create state collector: %w", err)
 		}
-		collector = bc
+		collector = sc
 	} else {
 		collector = &saveCollector{target: target, sess: r.sess}
 	}
 
-	// Track whether we returned successfully so defer can close bc on error
+	// Track whether we returned successfully so defer can close sc on error
 	var succeeded bool
-	if bc != nil {
+	if sc != nil {
 		defer func() {
 			if !succeeded {
-				_ = bc.close() // close logs internally on failure; runtime cleanup path
+				_ = sc.close() // close logs internally on failure; runtime cleanup path
 			}
 		}()
 	}
@@ -1033,7 +1034,7 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		Duration:    time.Since(start),
 		RowCount:    int64(collector.count()),
 		EmptyResult: emptyIntent,
-		badger:      bc,
+		state:       sc,
 	}
 	if sc, ok := collector.(*saveCollector); ok {
 		result.collector = sc
@@ -1447,9 +1448,9 @@ func (r *Runtime) RunPushPoll(ctx context.Context, sinkName string, jobRef map[s
 // This is separated from Run() so the caller can suspend DuckDB during script
 // execution and resume before creating the temp table.
 func (r *Result) CreateTempTable() error {
-	if r.badger != nil {
-		// Durable mode: claim from Badger → temp table
-		tmpTable, rowCount, claimIDs, err := r.badger.createTempTable()
+	if r.state != nil {
+		// Durable mode: claim from state.duckdb → temp table
+		tmpTable, rowCount, claimIDs, err := r.state.createTempTable()
 		if err != nil {
 			return err
 		}
@@ -1471,26 +1472,26 @@ func (r *Result) CreateTempTable() error {
 	return nil
 }
 
-// AckClaims acknowledges all Badger claims (successful DuckDB commit).
+// AckClaims acknowledges all state-backed claims (successful DuckLake commit).
 func (r *Result) AckClaims() error {
-	if r.badger == nil || len(r.ClaimIDs) == 0 {
+	if r.state == nil || len(r.ClaimIDs) == 0 {
 		return nil
 	}
-	return r.badger.ack(r.ClaimIDs)
+	return r.state.ack(r.ClaimIDs)
 }
 
-// NackClaims returns all claimed events back to Badger (DuckDB commit failed).
+// NackClaims returns all claimed events back to state.duckdb (DuckLake commit failed).
 func (r *Result) NackClaims() error {
-	if r.badger == nil || len(r.ClaimIDs) == 0 {
+	if r.state == nil || len(r.ClaimIDs) == 0 {
 		return nil
 	}
-	return r.badger.nack(r.ClaimIDs)
+	return r.state.nack(r.ClaimIDs)
 }
 
-// Close releases resources (closes Badger store if used).
+// Close releases resources held by the result.
 func (r *Result) Close() error {
-	if r.badger != nil {
-		return r.badger.close()
+	if r.state != nil {
+		return r.state.close()
 	}
 	return nil
 }
