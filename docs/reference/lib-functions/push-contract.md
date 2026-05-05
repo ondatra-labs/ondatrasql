@@ -305,7 +305,7 @@ def finalize(succeeded=0, failed=0):
         http.post("/webhooks", json={"event": "sync_complete", "rows": succeeded})
 ```
 
-Not called if any batch failed. Declare only the parameters you need — the runtime filters automatically.
+Not called if any batch failed OR any run-level error occurred — that includes per-row push failures, state-store ack failures (rows delivered but the queue couldn't be cleaned up), and context cancellation. The gate is "every batch succeeded AND no syncErrors were collected during the run", so finalize won't fire while a recoverable inconsistency exists; it'll fire on the next run after retries clear it. Declare only the parameters you need — the runtime filters automatically.
 
 ## Building outbound JSON in SQL
 
@@ -333,6 +333,6 @@ Push receives `properties` as a JSON string. DuckDB handles the nesting — Star
 
 ## Delivery guarantees
 
-At-least-once. DuckLake commits before push. Failed events retry from the state-store queue (`.ondatra/state.duckdb`). The `_sync_acked` table records successful pushes — on restart, already-pushed batches are skipped.
+At-least-once. DuckLake commits before push. Failed events retry from the state-store queue (`.ondatra/state.duckdb`). The `_sync_acked` table transiently records successful pushes for crash-safety — entries are removed once the state-store ack confirms, so the table is normally empty between runs and only populated when a run was killed mid-ack. On restart, surviving rows let the next run skip already-pushed batches before retrying.
 
 Your push function must be idempotent. Batches are delivered in snapshot order, rows within a batch are unordered. In `sync` mode, failed rows retry independently. New columns from schema changes appear immediately in push kwargs.

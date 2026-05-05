@@ -140,7 +140,6 @@ All models execute in the same pipeline and share the same dependency graph.
 |---|---|
 | SQL transformation | SQL models with automatic materialization and CDC |
 | API ingestion | Built-in HTTP, OAuth, pagination via Starlark |
-| Event collection | Embedded HTTP endpoint with in-memory and durable buffering |
 | Outbound sync | Push to APIs via @push with raw DuckLake change types |
 | Validation | 30 constraint macros, 18 audit macros, 14 warning macros |
 | Schema evolution | Automatic via ALTER TABLE (metadata-only in DuckLake) |
