@@ -162,12 +162,44 @@ func (s *Session) loadExtensions() error {
 // only downloaded once per machine.
 func defaultExtensionDir() string {
 	if isTestBinary() {
+		reapStaleTestExtDirs()
 		return filepath.Join(os.TempDir(), fmt.Sprintf("duckdb-ext-%d", os.Getpid()))
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".duckdb", "extensions")
 	}
 	return filepath.Join(os.TempDir(), "duckdb-extensions")
+}
+
+// reapStaleTestExtDirsOnce ensures the cleanup scan runs at most once per
+// test process, regardless of how many sessions get created.
+var reapStaleTestExtDirsOnce sync.Once
+
+// reapStaleTestExtDirs deletes `duckdb-ext-<PID>` directories under
+// $TMPDIR whose mtime is older than one hour. Each test binary creates
+// its own per-PID dir (~98 MB of extension data) and Go has no
+// process-exit hook to remove it, so without periodic reaping the
+// directory accumulates indefinitely (~46 GB observed in the wild).
+// One hour is enough grace for concurrent `go test ./...` invocations.
+func reapStaleTestExtDirs() {
+	reapStaleTestExtDirsOnce.Do(func() {
+		base := os.TempDir()
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			return
+		}
+		cutoff := time.Now().Add(-time.Hour)
+		for _, e := range entries {
+			if !e.IsDir() || !strings.HasPrefix(e.Name(), "duckdb-ext-") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil || info.ModTime().After(cutoff) {
+				continue
+			}
+			_ = os.RemoveAll(filepath.Join(base, e.Name()))
+		}
+	})
 }
 
 // isTestBinary reports whether the current process is a Go test binary.
