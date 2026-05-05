@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ondatra-labs/ondatrasql/internal/collect"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 )
 
 // createPushDelta computes the outbound sync delta AFTER materialization
@@ -18,7 +18,7 @@ import (
 // All kinds use the same table_changes() query — no filtering, no mapping.
 // The Starlark push() function receives the raw change_type and decides
 // what to do with each row.
-func (r *Runner) createPushDelta(model *parser.Model, _ string, prevSnapshot, newSnapshot int64) ([]collect.SyncEvent, error) {
+func (r *Runner) createPushDelta(model *parser.Model, _ string, prevSnapshot, newSnapshot int64) ([]state.SyncEvent, error) {
 	if model.Push == "" {
 		return nil, nil
 	}
@@ -36,9 +36,9 @@ func (r *Runner) createPushDelta(model *parser.Model, _ string, prevSnapshot, ne
 		return nil, fmt.Errorf("table_changes for %s: %w", model.Target, err)
 	}
 
-	events := make([]collect.SyncEvent, 0, len(rows))
+	events := make([]state.SyncEvent, 0, len(rows))
 	for _, row := range rows {
-		events = append(events, collect.SyncEvent{
+		events = append(events, state.SyncEvent{
 			ChangeType: fmt.Sprintf("%v", row["change_type"]),
 			RowID:      toInt64(row["rowid"]),
 			Snapshot:   toInt64(row["snapshot_id"]),

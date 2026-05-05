@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ondatra-labs/ondatrasql/internal/collect"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
@@ -757,7 +757,7 @@ SELECT id::BIGINT AS id, total::BIGINT AS total FROM raw.orders
 
 // Ensure unused imports don't cause compilation errors
 var (
-	_ = collect.OpenSyncStore
+	_ = state.NewSyncStore
 	_ = script.NewRuntime
 	_ = http.Get
 	_ = httptest.NewServer

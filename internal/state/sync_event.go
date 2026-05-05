@@ -2,11 +2,12 @@
 // Copyright (C) 2026 Marcus Hernandez
 // Licensed under the GNU AGPL v3 - see LICENSE file
 
-package collect
+package state
 
-// SyncEvent represents an outbound sync tracking entry in Badger.
-// Badger stores only the rowid, change type, and snapshot reference --
-// actual row data is read from DuckLake at push time.
+// SyncEvent represents an outbound sync tracking entry. It stores only
+// the rowid, change type, and snapshot reference — the actual row data
+// is read from DuckLake at push time.
+//
 // ChangeType is the raw DuckLake table_changes() change_type value,
 // exposing full change semantics to the Starlark push() function.
 type SyncEvent struct {

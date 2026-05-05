@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ondatra-labs/ondatrasql/internal/collect"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
@@ -923,7 +923,12 @@ func TestCreatePushDelta_EmptyPush(t *testing.T) {
 func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
 	t.Parallel()
 
-	store, err := collect.OpenSyncStore(t.TempDir())
+	st, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	store, err := state.NewSyncStore(st)
 	if err != nil {
 		t.Fatalf("OpenSyncStore: %v", err)
 	}
@@ -932,7 +937,7 @@ func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
 	target := "mart.orders"
 
 	// Backlog: rowid=2 has BOTH preimage and postimage
-	backlog := []collect.SyncEvent{
+	backlog := []state.SyncEvent{
 		{ChangeType: "insert", RowID: 1, Snapshot: 100},
 		{ChangeType: "update_preimage", RowID: 2, Snapshot: 100},
 		{ChangeType: "update_postimage", RowID: 2, Snapshot: 100},
@@ -944,7 +949,7 @@ func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
 
 	// Delta: replaces (rowid=2, update_preimage) only — rowid=2's postimage
 	// must remain. Also adds a new (rowid=4, insert).
-	delta := []collect.SyncEvent{
+	delta := []state.SyncEvent{
 		{ChangeType: "update_preimage", RowID: 2, Snapshot: 200},
 		{ChangeType: "insert", RowID: 4, Snapshot: 200},
 	}
@@ -1003,7 +1008,7 @@ func TestClassifyPerRowStatus_RequiresCompositeKey(t *testing.T) {
 		{"__ondatra_rowid": int64(2), "__ondatra_change_type": "update_preimage"},
 		{"__ondatra_rowid": int64(2), "__ondatra_change_type": "update_postimage"},
 	}
-	events := []collect.SyncEvent{
+	events := []state.SyncEvent{
 		{RowID: 1, ChangeType: "insert"},
 		{RowID: 2, ChangeType: "update_preimage"},
 		{RowID: 2, ChangeType: "update_postimage"},
@@ -1075,15 +1080,20 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 
 	// Helper: open a fresh store, populate with two existing events, and
 	// return the store. Caller closes.
-	openWithBacklog := func(t *testing.T) (*collect.SyncStore, string) {
+	openWithBacklog := func(t *testing.T) (*state.SyncStore, string) {
 		t.Helper()
-		store, err := collect.OpenSyncStore(t.TempDir())
+		st, err := state.Open(t.TempDir())
+		if err != nil {
+			t.Fatalf("state.Open: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		store, err := state.NewSyncStore(st)
 		if err != nil {
 			t.Fatalf("OpenSyncStore: %v", err)
 		}
 		target := "mart.orders"
 		// Existing backlog: non-overlapping with the delta below
-		err = store.WriteBatch(target, []collect.SyncEvent{
+		err = store.WriteBatch(target, []state.SyncEvent{
 			{ChangeType: "insert", RowID: 10, Snapshot: 100},
 			{ChangeType: "insert", RowID: 11, Snapshot: 100},
 		})
@@ -1094,7 +1104,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 	}
 
 	// Helper: collect (RowID, ChangeType) → bool for a target.
-	keysOf := func(t *testing.T, store *collect.SyncStore, target string) map[string]bool {
+	keysOf := func(t *testing.T, store *state.SyncStore, target string) map[string]bool {
 		t.Helper()
 		all, err := store.ReadAllEvents(target)
 		if err != nil {
@@ -1107,7 +1117,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 		return out
 	}
 
-	delta := []collect.SyncEvent{
+	delta := []state.SyncEvent{
 		{ChangeType: "insert", RowID: 20, Snapshot: 200},
 		{ChangeType: "insert", RowID: 21, Snapshot: 200},
 	}
@@ -1210,7 +1220,7 @@ func TestClassifyPerRowStatus_ExpiredSnapshotDeleteIsRejected(t *testing.T) {
 	se := &pushExecutor{}
 
 	// Events include a delete that has no corresponding row read from the lake.
-	events := []collect.SyncEvent{
+	events := []state.SyncEvent{
 		{RowID: 1, ChangeType: "insert"},
 		{RowID: 99, ChangeType: "delete"}, // row data unavailable (expired snapshot)
 	}

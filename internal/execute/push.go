@@ -9,17 +9,16 @@ import (
 	"crypto/md5"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ondatra-labs/ondatrasql/internal/collect"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 )
 
 // pushExecutor handles outbound sync after materialization.
@@ -29,14 +28,14 @@ type pushExecutor struct {
 	pushLib            *libregistry.LibFunc
 	result             *Result
 	rl                 *rateLimiter
-	sinkEvents         []collect.SyncEvent // delta from createPushDelta (nil for table/skip)
+	sinkEvents         []state.SyncEvent // delta from createPushDelta (nil for table/skip)
 	postCommitSnapshot int64               // for reading current state from DuckLake
 }
 
 // executePush runs the outbound sync pipeline after materialization.
 // It receives pre-computed SyncEvents (rowid + op + snapshot), batches them,
 // reads row data from DuckLake at push time, and calls push() per batch.
-func (r *Runner) executePush(ctx context.Context, model *parser.Model, result *Result, sinkEvents []collect.SyncEvent, postCommitSnapshot int64) error {
+func (r *Runner) executePush(ctx context.Context, model *parser.Model, result *Result, sinkEvents []state.SyncEvent, postCommitSnapshot int64) error {
 	if model.Push == "" {
 		return nil
 	}
@@ -198,7 +197,7 @@ func (se *pushExecutor) run(ctx context.Context) error {
 		sem <- struct{}{}
 		wg.Add(1)
 
-		go func(num int, events []collect.SyncEvent, cid string) {
+		go func(num int, events []state.SyncEvent, cid string) {
 			defer func() { <-sem; wg.Done() }()
 
 			// Rate limit
@@ -279,9 +278,9 @@ func (se *pushExecutor) callFinalize(ctx context.Context, succeeded, failed int6
 
 // perRowResult holds the outcome of per-row status validation.
 type perRowResult struct {
-	OK         []collect.SyncEvent // events whose rows got "ok" or "warn:" status
-	Failed     []collect.SyncEvent // events whose rows got "error:" status (retryable)
-	Rejected   []collect.SyncEvent // events whose rows got "reject:" status (permanent, dead letter)
+	OK         []state.SyncEvent // events whose rows got "ok" or "warn:" status
+	Failed     []state.SyncEvent // events whose rows got "error:" status (retryable)
+	Rejected   []state.SyncEvent // events whose rows got "reject:" status (permanent, dead letter)
 	FailErrors []string            // error messages for failed rows
 	RejectMsgs []string            // rejection reasons (logged to _sync_log)
 	WarnMsgs   []string            // warning messages (logged to _sync_log)
@@ -292,7 +291,7 @@ type perRowResult struct {
 // Status keys from push() must be composite: "rowid:change_type"
 // (e.g. "42:insert", "42:update_postimage"). This ensures that update_preimage
 // and update_postimage for the same rowid can have independent statuses.
-func (se *pushExecutor) classifyPerRowStatus(perRow map[string]string, rows []map[string]any, events []collect.SyncEvent) (*perRowResult, error) {
+func (se *pushExecutor) classifyPerRowStatus(perRow map[string]string, rows []map[string]any, events []state.SyncEvent) (*perRowResult, error) {
 	// Validate completeness: every row must have a composite key status.
 	// Push must return status keyed by "rowid:change_type".
 	var missing []string
@@ -357,7 +356,7 @@ func formatCompositeKey(rowid, changeType any) string {
 // Historical rows (delete, update_preimage) are read from the snapshot before the
 // change, so push() receives the row data as it was before modification.
 // Each row gets __ondatra_rowid and __ondatra_change_type for the Starlark push().
-func (se *pushExecutor) readRowsByEvents(events []collect.SyncEvent) ([]map[string]any, error) {
+func (se *pushExecutor) readRowsByEvents(events []state.SyncEvent) ([]map[string]any, error) {
 	target := quoteTarget(se.model.Target)
 
 	// Separate events into current-state (insert, update_postimage) and
@@ -446,7 +445,7 @@ type historicalEvent struct {
 //   - backfill: ClearAllAndWrite (full replace, supersedes everything incl. inflight)
 //   - incremental + inflight: WriteBatch (preserve active claims, queue for later)
 //   - incremental + no inflight: merge + ClearAllAndWrite (dedup old backlog)
-func (se *pushExecutor) queueDelta(store *collect.SyncStore, target string, batchMode string, hasInflight bool) error {
+func (se *pushExecutor) queueDelta(store *state.SyncStore, target string, batchMode string, hasInflight bool) error {
 	if batchMode == "async" {
 		if err := store.WriteBatch(target, se.sinkEvents); err != nil {
 			return fmt.Errorf("queue delta for async (preserving job_ref): %w", err)
@@ -486,7 +485,7 @@ func (se *pushExecutor) queueDelta(store *collect.SyncStore, target string, batc
 
 // ackAll records the push success in DuckLake (_sync_acked), then acks Badger.
 // If Badger ack fails, _sync_acked ensures next run skips already-pushed rows.
-func (se *pushExecutor) ackAll(store *collect.SyncStore, claimID string, batchNum int, events []collect.SyncEvent) batchOutcome {
+func (se *pushExecutor) ackAll(store *state.SyncStore, claimID string, batchNum int, events []state.SyncEvent) batchOutcome {
 	target := "sync:" + se.model.Target
 
 	// Step 1: Record in DuckLake (survives Badger failures)
@@ -514,7 +513,7 @@ func (se *pushExecutor) ackAll(store *collect.SyncStore, claimID string, batchNu
 }
 
 // nackAll wraps store.Nack and returns allFailed outcome.
-func nackAll(store *collect.SyncStore, claimID string, batchNum int, events []collect.SyncEvent, pushErr error) batchOutcome {
+func nackAll(store *state.SyncStore, claimID string, batchNum int, events []state.SyncEvent, pushErr error) batchOutcome {
 	if nackErr := store.Nack(claimID); nackErr != nil {
 		return batchOutcome{
 			ok:     0,
@@ -533,16 +532,16 @@ type batchOutcome struct {
 	warnings []string // collected in goroutine, merged under mutex
 }
 
-func allFailed(events []collect.SyncEvent, err error) batchOutcome {
+func allFailed(events []state.SyncEvent, err error) batchOutcome {
 	return batchOutcome{ok: 0, failed: int64(len(events)), err: err}
 }
 
-func allOK(events []collect.SyncEvent) batchOutcome {
+func allOK(events []state.SyncEvent) batchOutcome {
 	return batchOutcome{ok: int64(len(events)), failed: 0, err: nil}
 }
 
 // executeBatch reads rows from DuckLake for claimed events, runs push, and handles ack/nack.
-func (se *pushExecutor) executeBatch(ctx context.Context, events []collect.SyncEvent, claimID string, batchNum int, store *collect.SyncStore) batchOutcome {
+func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEvent, claimID string, batchNum int, store *state.SyncStore) batchOutcome {
 	cfg := se.pushLib.PushConfig
 	target := "sync:" + se.model.Target
 
@@ -691,7 +690,7 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []collect.SyncE
 
 // pollAsyncJob runs the polling loop for an async batch mode job.
 // Used both for fresh push results and for resuming after crash (saved job_ref).
-func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any, rows []map[string]any, events []collect.SyncEvent, claimID string, batchNum int, store *collect.SyncStore, target string) batchOutcome {
+func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any, rows []map[string]any, events []state.SyncEvent, claimID string, batchNum int, store *state.SyncStore, target string) batchOutcome {
 	cfg := se.pushLib.PushConfig
 
 	pollInterval, _ := parseDuration(cfg.PollInterval)
@@ -782,10 +781,16 @@ func httpConfigFromLib(apiCfg *libregistry.APIConfig, ctx context.Context, proje
 	}
 }
 
-// openSyncStore opens the SyncStore (Badger) for outbound sync tracking.
-func (se *pushExecutor) openSyncStore() (*collect.SyncStore, error) {
-	dir := filepath.Join(se.runner.projectDir, ".ondatra", "sync")
-	return collect.OpenSyncStore(dir)
+// openSyncStore returns a SyncStore backed by the runner's state.duckdb.
+func (se *pushExecutor) openSyncStore() (*state.SyncStore, error) {
+	st, err := se.runner.getStateStore()
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, fmt.Errorf("openSyncStore: state store not available (projectDir not set)")
+	}
+	return state.NewSyncStore(st)
 }
 
 // ensureSyncLogTable creates _sync_log if it doesn't exist. Returns
@@ -859,7 +864,7 @@ func (se *pushExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
 //
 // Reads both evt: and inflight: because the caller uses ClearAllAndWrite which
 // clears everything. Without reading inflight events, they would be silently lost.
-func (se *pushExecutor) mergeBacklogWithDelta(store *collect.SyncStore, target string, delta []collect.SyncEvent) ([]collect.SyncEvent, error) {
+func (se *pushExecutor) mergeBacklogWithDelta(store *state.SyncStore, target string, delta []state.SyncEvent) ([]state.SyncEvent, error) {
 	backlog, err := store.ReadAllEvents(target)
 	if err != nil {
 		return nil, fmt.Errorf("read all events: %w", err)
@@ -877,7 +882,7 @@ func (se *pushExecutor) mergeBacklogWithDelta(store *collect.SyncStore, target s
 		deltaKeys[eventKey{e.RowID, e.ChangeType}] = true
 	}
 
-	var result []collect.SyncEvent
+	var result []state.SyncEvent
 	for _, e := range backlog {
 		if !deltaKeys[eventKey{e.RowID, e.ChangeType}] {
 			result = append(result, e)
@@ -910,7 +915,7 @@ func formatRowID(v any) string {
 // batchEventHash computes a content fingerprint of a batch of SyncEvents.
 // Used to verify that a saved async job_ref matches the current claimed batch.
 // Deterministic: sorts by RowID before hashing.
-func batchEventHash(events []collect.SyncEvent) string {
+func batchEventHash(events []state.SyncEvent) string {
 	ids := make([]string, len(events))
 	for i, e := range events {
 		ids[i] = fmt.Sprintf("%d:%s:%d", e.RowID, e.ChangeType, e.Snapshot)
