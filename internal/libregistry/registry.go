@@ -346,12 +346,18 @@ func ParseLibFile(name, relPath, code string) (*LibFunc, error) {
 
 // parseLibFile parses a single .star file and extracts the API dict.
 // Returns nil if the file has no API dict (helper library, silently skipped).
+//
+// Uses the strict blueprint options to match the runtime's
+// internal/script.blueprintFileOptions — keeping the static parser in
+// sync with what runtime actually accepts. Validate / describe surfaces
+// must reject anything runtime would reject; otherwise broken
+// blueprints sneak past `ondatrasql validate` and crash at run time.
 func parseLibFile(name, relPath, code string) (*LibFunc, error) {
 	opts := &syntax.FileOptions{
 		Set:             true,
 		While:           true,
-		TopLevelControl: true,
-		GlobalReassign:  true,
+		TopLevelControl: false,
+		GlobalReassign:  false,
 		Recursion:       true,
 	}
 

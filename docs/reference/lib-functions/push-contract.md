@@ -333,6 +333,6 @@ Push receives `properties` as a JSON string. DuckDB handles the nesting — Star
 
 ## Delivery guarantees
 
-At-least-once. DuckLake commits before push. Failed events retry from Badger queue. The `_sync_acked` table records successful pushes — on restart, already-pushed batches are skipped.
+At-least-once. DuckLake commits before push. Failed events retry from the state-store queue (`.ondatra/state.duckdb`). The `_sync_acked` table records successful pushes — on restart, already-pushed batches are skipped.
 
 Your push function must be idempotent. Batches are delivered in snapshot order, rows within a batch are unordered. In `sync` mode, failed rows retry independently. New columns from schema changes appear immediately in push kwargs.

@@ -295,17 +295,23 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		return result, fmt.Errorf("constraint validation failed")
 	}
 
-	// Build ack SQL for Badger claims — included in the materialize transaction
-	// so the ack record is atomic with the data commit. On audit failure,
-	// the ack record is undone too, and we nack Badger claims for retry.
+	// Build ack SQL for state-store claims — included in the materialize
+	// transaction so the ack record is atomic with the data commit. On audit
+	// failure, the ack record is undone too, and we nack the claims for retry.
+	//
+	// EnsureAckTable failure is fatal when there are claims to ack:
+	// proceeding without the ack record commits data without the
+	// dedup-marker that newStateCollector's IsAcked check relies on,
+	// which would silently replay the same rows on the next run.
 	var extraPreSQL []string
 	if len(scriptResult.ClaimIDs) > 0 {
 		if ackErr := script.EnsureAckTable(r.sess); ackErr != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("ack table: %v", ackErr))
-		} else {
-			for _, claimID := range scriptResult.ClaimIDs {
-				extraPreSQL = append(extraPreSQL, script.AckSQL(claimID, model.Target, scriptResult.RowCount))
-			}
+			r.cleanup(tmpTable)
+			result.Duration = time.Since(start)
+			return nil, fmt.Errorf("ensure ack table: %w", ackErr)
+		}
+		for _, claimID := range scriptResult.ClaimIDs {
+			extraPreSQL = append(extraPreSQL, script.AckSQL(claimID, model.Target, scriptResult.RowCount))
 		}
 	}
 

@@ -158,7 +158,6 @@ OndatraSQL executes on a single machine using DuckDB. It is not a distributed sy
 run [model]          Execute pipeline or specific model
 sandbox [model]      Preview changes before committing
 schedule [cron]      Install OS-native scheduler
-events <port>        Start event collection endpoint
 auth [provider]      Authenticate with OAuth2 providers
 new <model>          Create a model file
 edit <target>        Open file in $EDITOR

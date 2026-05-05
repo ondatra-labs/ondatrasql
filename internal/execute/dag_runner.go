@@ -6,6 +6,7 @@ package execute
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
@@ -53,12 +54,26 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		return nil, errors
 	}
 
-	// Cleanup: drop expired sync events and recover orphan claims from
-	// crashed workers. Idempotent and cheap; failures are non-fatal.
+	// Open .ondatra/state.duckdb once for the entire DAG. DuckDB takes a
+	// process-level file lock; opening per-Runner would conflict mid-DAG.
+	// Run GC before sharing the handle with model runners.
+	var sharedState *state.State
 	if projectDir != "" {
 		if st, err := state.Open(projectDir); err == nil {
-			_ = state.GC(st)
-			_ = st.Close()
+			if gcErr := state.GC(st); gcErr != nil {
+				// GC failure is non-fatal: log via the validation slot so
+				// it surfaces in JSON output without halting the DAG.
+				errors := make(map[string]error)
+				errors["_gc"] = fmt.Errorf("state GC: %w", gcErr)
+				_ = st.Close()
+				return nil, errors
+			}
+			sharedState = st
+			defer func() { _ = sharedState.Close() }()
+		} else {
+			errors := make(map[string]error)
+			errors["_validation"] = fmt.Errorf("open state.duckdb: %w", err)
+			return nil, errors
 		}
 	}
 
@@ -107,6 +122,9 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		runner.SetRunTypeDecisions(decisions)
 		if projectDir != "" {
 			runner.SetProjectDir(projectDir)
+		}
+		if sharedState != nil {
+			runner.SetStateStore(sharedState)
 		}
 		if libReg != nil {
 			runner.SetLibRegistry(libReg)

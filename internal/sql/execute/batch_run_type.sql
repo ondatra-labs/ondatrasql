@@ -78,8 +78,6 @@ SELECT
     ms.kind,
     ms.prev_hash,
     CASE
-        -- Events kind: always flush (handled by runner, not batch logic)
-        WHEN ms.kind = 'events' THEN 'flush'
         -- Non-table kinds: standard logic
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'backfill'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'backfill'
@@ -98,13 +96,11 @@ SELECT
         ELSE 'skip'
     END AS run_type,
     CASE
-        -- Events kind
-        WHEN ms.kind = 'events' THEN 'event flush'
         -- Non-table kinds
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'first run'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'sql changed'
-        -- For incremental kinds (append/merge/scd2/partition/tracked) the SQL
-        -- being unchanged doesn't mean nothing happens — the model still runs
+        -- For incremental kinds (append/merge/scd2/tracked) the SQL being
+        -- unchanged doesn't mean nothing happens — the model still runs
         -- to ingest new source rows. (Bug 15)
         WHEN ms.kind != 'table' THEN 'incremental run'
         -- Table kind

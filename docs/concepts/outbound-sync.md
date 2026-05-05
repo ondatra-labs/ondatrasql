@@ -8,13 +8,13 @@ When a model has `@push`, the runner pushes change events to an external system.
 
 ## Commit first, push second
 
-The runner always commits data to DuckLake before pushing to the external system. If the push fails, DuckLake already has the correct data. Failed events go back to the Badger queue and retry on the next run.
+The runner always commits data to DuckLake before pushing to the external system. If the push fails, DuckLake already has the correct data. Failed events go back to the state-store queue (`.ondatra/state.duckdb`) and retry on the next run.
 
 This means your DuckLake state is always authoritative. The external system may lag behind but never leads.
 
 ## Why at-least-once
 
-The same event can be pushed multiple times — if the push succeeded but the Badger ack failed (crash between push and ack), or if a batch partially succeeded. Exactly-once delivery across two independent systems (DuckLake and an external API) requires distributed transactions, which adds complexity that doesn't match the use case.
+The same event can be pushed multiple times — if the push succeeded but the state-store ack failed (crash between push and ack), or if a batch partially succeeded. Exactly-once delivery across two independent systems (DuckLake and an external API) requires distributed transactions, which adds complexity that doesn't match the use case.
 
 Instead, your push function should be idempotent. Use `__ondatra_rowid` and `__ondatra_change_type` to deduplicate on the receiving side.
 

@@ -305,9 +305,11 @@ func buildBlueprintDescription(projectDir string, lf *libregistry.LibFunc) (*Blu
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", lf.FilePath, err)
 	}
+	// Match runtime's internal/script.blueprintFileOptions so describe
+	// surfaces accept exactly what runtime would load.
 	opts := &syntax.FileOptions{
-		Set: true, While: true, TopLevelControl: true,
-		GlobalReassign: true, Recursion: true,
+		Set: true, While: true, TopLevelControl: false,
+		GlobalReassign: false, Recursion: true,
 	}
 	f, err := opts.Parse(lf.FilePath, src, 0)
 	if err != nil {

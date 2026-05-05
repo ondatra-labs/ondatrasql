@@ -9,10 +9,10 @@ weight: 8
 
 | Run type | Trigger | Kinds |
 |---|---|---|
-| `skip` | Hash unchanged, no dep changes | All |
+| `skip` | Hash unchanged, no dep changes, no `@fetch` | non-fetch table only |
 | `backfill` | Hash changed, first run, config changed | All |
 | `incremental` | Hash unchanged, source data may have changed | append, merge, scd2, tracked |
-| `full` | Upstream dep changed, dep metadata missing/invalid, destructive schema evolution | table |
+| `full` | Upstream dep changed, dep metadata missing/invalid, destructive schema evolution, OR `@kind: table @fetch` (always re-fetches) | table |
 
 ## Hash inputs
 
@@ -32,7 +32,7 @@ The run-type hash includes: SQL body, `@kind`, `@unique_key`, `@group_key`, `@pa
 
 ## Sink on skip
 
-When a model is skipped but has `@push`, the runner still drains pending Badger backlog from previous failed pushes. No new delta is generated.
+When a model is skipped but has `@push`, the runner still drains the pending state-store backlog from previous failed pushes. No new delta is generated.
 
 ## Incremental kwargs
 

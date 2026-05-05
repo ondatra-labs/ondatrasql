@@ -47,7 +47,12 @@ type stateCollector struct {
 // any inflight claims from a previous crashed run, and returns a collector
 // ready for save() calls.
 func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*stateCollector, error) {
-	tableName := "fetch_" + state.SanitizeTableName(target)
+	// The raw target (e.g. "raw.orders") is used as a quoted DuckDB
+	// identifier so distinct targets never collide. Earlier we sanitized
+	// dots → underscores, which made `raw.orders` and `raw_orders` map to
+	// the same table. ValidateIdentifier already rejects characters that
+	// would break the quoted form (e.g. embedded `"`).
+	tableName := "fetch:" + target
 	db := st.DB()
 
 	createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" (
@@ -87,12 +92,12 @@ func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*s
 	for _, claimID := range inflight {
 		alreadyAcked, ackErr := IsAcked(sess, claimID)
 		if ackErr != nil {
-			// Treat as unacked (safe default — at-least-once).
-			if _, err := db.Exec(fmt.Sprintf(
-				`UPDATE "%s" SET claim_id = NULL WHERE claim_id = ?`, tableName), claimID); err != nil {
-				return nil, fmt.Errorf("reset claim %s after ack lookup failure: %w (lookup: %v)", claimID, err, ackErr)
-			}
-			continue
+			// Failing IsAcked means we cannot tell whether this claim's
+			// rows were already committed. Resetting claim_id to NULL
+			// would replay them; deleting would risk data loss. Surface
+			// the error so the operator can fix the catalog and retry,
+			// rather than silently choosing one side of the dilemma.
+			return nil, fmt.Errorf("ack lookup for claim %s: %w", claimID, ackErr)
 		}
 		if alreadyAcked {
 			if _, err := db.Exec(fmt.Sprintf(
@@ -118,13 +123,25 @@ func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*s
 		startSeq = maxSeq.Int64 + 1
 	}
 
-	return &stateCollector{
+	// Seed rowCount from any rows that survived a prior crashed run so
+	// save.count() reports the true outstanding work, not just rows
+	// added in the current process. Without this, a resumed buffer
+	// undercounts and downstream "fetch returned N rows" telemetry is
+	// off by the carry-over amount.
+	var existing int64
+	if err := db.QueryRow(fmt.Sprintf(`SELECT count(*) FROM "%s"`, tableName)).Scan(&existing); err != nil {
+		return nil, fmt.Errorf("count existing rows: %w", err)
+	}
+
+	sc := &stateCollector{
 		target:    target,
 		tableName: tableName,
 		st:        st,
 		sess:      sess,
 		seq:       startSeq,
-	}, nil
+	}
+	sc.rowCount.Store(existing)
+	return sc, nil
 }
 
 // add writes a single row to state.duckdb as JSON. Empty rows are

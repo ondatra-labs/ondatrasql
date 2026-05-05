@@ -64,6 +64,7 @@ type Runner struct {
 	astCache         map[string]string     // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
 	libRegistry      *libregistry.Registry // Registered lib functions from lib/*.star
 	stateStore       *state.State          // Lazily opened state.duckdb (durable fetch buffer)
+	stateOwned       bool                  // True iff this Runner opened stateStore (controls Close)
 }
 
 // gitInfo holds Git repository metadata for the current run.
@@ -106,31 +107,48 @@ func (r *Runner) SetProjectDir(dir string) {
 	r.configHash = backfill.ConfigHash(filepath.Join(dir, "config"))
 }
 
-// getStateStore lazily opens .ondatra/state.duckdb and caches the handle on
-// the runner. Returns nil if projectDir isn't set (in-memory mode only).
+// SetStateStore lets the caller inject an externally-owned state.duckdb
+// handle so multiple Runners in the same DAG can share one open file
+// (DuckDB takes a process-level file lock; concurrent opens of the same
+// path fail). When set, the Runner does not own the handle and never
+// closes it.
+func (r *Runner) SetStateStore(st *state.State) {
+	r.stateStore = st
+	r.stateOwned = false
+}
+
+// getStateStore returns the shared state store if one was injected via
+// SetStateStore. Otherwise (single-Runner usage with projectDir set) it
+// lazily opens its own. Returns nil if projectDir isn't set (in-memory
+// mode only). Caller should defer CloseState() to release a
+// runner-owned handle.
 func (r *Runner) getStateStore() (*state.State, error) {
-	if r.projectDir == "" {
-		return nil, nil
-	}
 	if r.stateStore != nil {
 		return r.stateStore, nil
+	}
+	if r.projectDir == "" {
+		return nil, nil
 	}
 	st, err := state.Open(r.projectDir)
 	if err != nil {
 		return nil, fmt.Errorf("open state.duckdb: %w", err)
 	}
 	r.stateStore = st
+	r.stateOwned = true
 	return st, nil
 }
 
-// CloseState closes the state.duckdb handle if it was opened. Safe to call
-// when no state store was ever opened.
+// CloseState closes the state.duckdb handle iff this Runner opened it
+// itself. A handle injected via SetStateStore is owned by the caller
+// and left alone. Safe to call when no state store was ever opened.
 func (r *Runner) CloseState() error {
-	if r.stateStore == nil {
+	if r.stateStore == nil || !r.stateOwned {
+		r.stateStore = nil
 		return nil
 	}
 	err := r.stateStore.Close()
 	r.stateStore = nil
+	r.stateOwned = false
 	return err
 }
 
@@ -1158,12 +1176,17 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		if sr == nil || len(sr.ClaimIDs) == 0 {
 			continue
 		}
+		// EnsureAckTable failure is fatal: see corresponding comment in
+		// internal/execute/script.go. Without the ack-marker the next
+		// run can't tell that these rows were already committed and will
+		// replay them.
 		if ackErr := script.EnsureAckTable(r.sess); ackErr != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("ack table: %v", ackErr))
-		} else {
-			for _, claimID := range sr.ClaimIDs {
-				libExtraPreSQL = append(libExtraPreSQL, script.AckSQL(claimID, model.Target, sr.RowCount))
-			}
+			r.cleanup(tmpTable)
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("ensure ack table: %w", ackErr)
+		}
+		for _, claimID := range sr.ClaimIDs {
+			libExtraPreSQL = append(libExtraPreSQL, script.AckSQL(claimID, model.Target, sr.RowCount))
 		}
 	}
 

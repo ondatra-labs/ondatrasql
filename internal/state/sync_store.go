@@ -103,11 +103,14 @@ func (s *SyncStore) Close() error {
 
 // RunGC removes events older than SyncEventTTL and returns to the unclaimed
 // pool any inflight rows whose heartbeat is older than SyncInflightMaxAge.
-// Replaces badger's value-log GC.
-func (s *SyncStore) RunGC() {
+// Replaces badger's value-log GC. Returns the first error encountered;
+// partial progress is rolled back via the transaction.
+func (s *SyncStore) RunGC() error {
 	db := s.st.DB()
 	cutoff := time.Now().Add(-SyncEventTTL)
-	_, _ = db.Exec(`DELETE FROM sync_evt WHERE created_at < ?`, cutoff)
+	if _, err := db.Exec(`DELETE FROM sync_evt WHERE created_at < ?`, cutoff); err != nil {
+		return fmt.Errorf("expire sync_evt: %w", err)
+	}
 
 	hbCutoff := time.Now().Add(-SyncInflightMaxAge)
 	// Pull events from inflight tables for orphan claims back to sync_evt.
@@ -115,7 +118,7 @@ func (s *SyncStore) RunGC() {
 	// two statements within an explicit transaction so they commit atomically.
 	tx, err := db.Begin()
 	if err != nil {
-		return
+		return fmt.Errorf("begin gc tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -126,19 +129,22 @@ func (s *SyncStore) RunGC() {
 		WHERE claim_id IN (
 			SELECT claim_id FROM sync_claim WHERE heartbeat < ?
 		)`, hbCutoff); err != nil {
-		return
+		return fmt.Errorf("requeue orphan inflight: %w", err)
 	}
 	if _, err := tx.Exec(`
 		DELETE FROM sync_inflight
 		WHERE claim_id IN (
 			SELECT claim_id FROM sync_claim WHERE heartbeat < ?
 		)`, hbCutoff); err != nil {
-		return
+		return fmt.Errorf("delete orphan inflight: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM sync_claim WHERE heartbeat < ?`, hbCutoff); err != nil {
-		return
+		return fmt.Errorf("delete orphan claims: %w", err)
 	}
-	_ = tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit gc: %w", err)
+	}
+	return nil
 }
 
 // WriteBatch stores multiple sync events for a target in one transaction.
@@ -271,10 +277,12 @@ func (s *SyncStore) HasRecentInflight(target string) (bool, error) {
 // of outstanding work.
 func (s *SyncStore) ReadAllEvents(target string) ([]SyncEvent, error) {
 	rows, err := s.st.DB().Query(`
-		SELECT payload FROM sync_evt WHERE target = ?
-		UNION ALL
-		SELECT payload FROM sync_inflight WHERE target = ?
-		ORDER BY 1`,
+		WITH all_events AS (
+			SELECT seq, payload FROM sync_evt WHERE target = ?
+			UNION ALL
+			SELECT seq, payload FROM sync_inflight WHERE target = ?
+		)
+		SELECT payload FROM all_events ORDER BY seq`,
 		target, target)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
@@ -311,8 +319,23 @@ func (s *SyncStore) Claim(target string, limit int) (string, []SyncEvent, error)
 		limit = SyncDefaultLimit
 	}
 
-	claimID := s.newClaimID()
 	db := s.st.DB()
+
+	// Cheap up-front check so an empty queue doesn't write a sync_claim
+	// row that would later need cleanup. Avoids the "ghost claim
+	// tombstone" race where a transient cleanup-DELETE failure leaves a
+	// claim-only row that HasRecentInflight() then treats as active work.
+	var pending int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sync_evt WHERE target = ? LIMIT 1`,
+		target).Scan(&pending); err != nil {
+		return "", nil, fmt.Errorf("count pending: %w", err)
+	}
+	if pending == 0 {
+		return "", nil, nil
+	}
+
+	claimID := s.newClaimID()
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -373,11 +396,12 @@ func (s *SyncStore) Claim(target string, limit int) (string, []SyncEvent, error)
 		return "", nil, fmt.Errorf("commit claim: %w", err)
 	}
 
+	// The pending check above guarantees events is non-empty here under
+	// normal operation. If a concurrent worker drained the queue between
+	// the count and the INSERT-SELECT, fall through cleanly: the claim
+	// row + zero inflight rows will be reaped by RunGC's heartbeat-stale
+	// path on the next pipeline run rather than left as a tombstone.
 	if len(events) == 0 {
-		// Roll the empty claim back so the inflight tables don't accumulate
-		// no-op entries. The TX above already committed, so we delete the
-		// claim record explicitly.
-		_, _ = db.Exec(`DELETE FROM sync_claim WHERE claim_id = ?`, claimID)
 		return "", nil, nil
 	}
 	s.heartbeat.Store(claimID, time.Now())

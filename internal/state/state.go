@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	_ "github.com/duckdb/duckdb-go/v2" // duckdb driver registration
 )
@@ -81,6 +80,10 @@ func (s *State) Close() error {
 // Today this only delegates to SyncStore.RunGC() (sync_evt TTL +
 // orphan-inflight recovery). Fetch staging tables don't need TTL cleanup —
 // stateCollector handles per-target recovery at open time.
+//
+// Returns the first error encountered; partial progress is rolled back
+// via the underlying transaction. Callers should surface this so a
+// degraded state-store doesn't fail silently.
 func GC(st *State) error {
 	if st == nil {
 		return nil
@@ -89,27 +92,6 @@ func GC(st *State) error {
 	if err != nil {
 		return fmt.Errorf("open sync store for gc: %w", err)
 	}
-	sync.RunGC()
-	return nil
+	return sync.RunGC()
 }
 
-// SanitizeTableName replaces non-identifier characters in a target name
-// (e.g. "raw.orders") with underscores to produce a valid DuckDB table
-// name (e.g. "raw_orders"). Used by callers that derive per-target table
-// names from model targets.
-func SanitizeTableName(target string) string {
-	var b strings.Builder
-	b.Grow(len(target))
-	for _, r := range target {
-		switch {
-		case r >= 'a' && r <= 'z',
-			r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9',
-			r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-	}
-	return b.String()
-}

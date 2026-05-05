@@ -23,6 +23,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/git"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
@@ -210,9 +211,22 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	// Run model with Git metadata
 	gitInfo := git.GetInfo(cfg.ProjectDir)
 
+	// Open .ondatra/state.duckdb once and run GC before the model executes.
+	// Single-model run gets the same recovery + cleanup as RunDAG so a
+	// crashed prior `ondatrasql run <model>` doesn't leave orphaned claims.
+	st, err := state.Open(cfg.ProjectDir)
+	if err != nil {
+		return fmt.Errorf("open state.duckdb: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := state.GC(st); err != nil {
+		return fmt.Errorf("state GC: %w", err)
+	}
+
 	runner := execute.NewRunner(sess, execute.ModeRun, dagRunID)
 	runner.SetGitInfo(gitInfo.Commit, gitInfo.Branch, gitInfo.RepoURL)
 	runner.SetProjectDir(cfg.ProjectDir)
+	runner.SetStateStore(st)
 	runner.SetLibRegistry(libReg)
 
 	// Validate model + sink compatibility before execution

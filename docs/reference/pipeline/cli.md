@@ -265,7 +265,7 @@ Machine-readable output on stdout. Human output (status banners, progress, warni
 ondatrasql run --json 2>/dev/null | jq -s '.'
 ```
 
-**Stream separation is required.** `--json` only guarantees clean JSON on **stdout**; stderr may contain unstructured warnings (e.g. "badger: nack claim X failed"). Tooling that merges streams (`2>&1`, default systemd `StandardOutput=journal` + `StandardError=journal`) WILL produce non-JSON lines mixed into the stream. For service units, redirect stderr to a separate sink:
+**Stream separation is required.** `--json` only guarantees clean JSON on **stdout**; stderr may contain unstructured warnings (e.g. context cancellations, transient I/O messages from external lib calls). Tooling that merges streams (`2>&1`, default systemd `StandardOutput=journal` + `StandardError=journal`) WILL produce non-JSON lines mixed into the stream. For service units, redirect stderr to a separate sink:
 
 ```ini
 [Service]
