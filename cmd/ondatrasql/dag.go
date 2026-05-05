@@ -180,9 +180,18 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	// _gc errors are non-fatal — RunDAG ran the pipeline anyway — but
 	// they shouldn't be silent because a failed GC pass means stale
 	// orphaned inflight rows or unconsumed apply_log entries are
-	// accumulating. Print as a warning so operators see the regression.
-	if gcErr, ok := dagErrs["_gc"]; ok && !output.JSONEnabled {
-		output.Fprintf("warning: %v (pipeline ran anyway; rerun GC at next pipeline start)\n", gcErr)
+	// accumulating. Surface in human output AND --json mode so neither
+	// terminal users nor JSON consumers miss the regression.
+	if gcErr, ok := dagErrs["_gc"]; ok {
+		if output.JSONEnabled {
+			output.EmitJSON(map[string]any{
+				"kind":    "dag_warning",
+				"source":  "_gc",
+				"message": gcErr.Error(),
+			})
+		} else {
+			output.Fprintf("warning: %v (pipeline ran anyway; rerun GC at next pipeline start)\n", gcErr)
+		}
 	}
 
 	// Honour ctx cancellation. RunDAG returns partial results on SIGINT
@@ -210,12 +219,15 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	}
 
 	if failed > 0 {
-		err := fmt.Errorf("%d model(s) failed", failed)
-		// In sandbox mode, failures are shown in summary - don't print error again
+		// In sandbox mode the diff summary already showed each failure,
+		// so we return the silent sentinel — main() suppresses the error
+		// message but still exits with the right non-zero code so
+		// automation detects the failed run. Without the sentinel the
+		// command exited 0 in sandbox mode, hiding failures.
 		if sandboxMode {
-			return nil
+			return errFindings
 		}
-		return err
+		return fmt.Errorf("%d model(s) failed", failed)
 	}
 
 	return nil

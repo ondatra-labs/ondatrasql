@@ -367,6 +367,27 @@ func formatCompositeKey(rowid, changeType any) string {
 	return formatRowID(rowid) + ":" + fmt.Sprintf("%v", changeType)
 }
 
+// summarizeFailErrors returns a short, bounded summary of the first few
+// per-row failure reasons. Used in batch error messages so operators see
+// concrete reasons (the actual sink response strings), not just counts.
+// Caps at three entries with a "+N more" suffix to keep the error
+// message readable in logs.
+func summarizeFailErrors(errs []string) string {
+	if len(errs) == 0 {
+		return ""
+	}
+	const maxShown = 3
+	shown := errs
+	if len(shown) > maxShown {
+		shown = shown[:maxShown]
+	}
+	suffix := ""
+	if len(errs) > maxShown {
+		suffix = fmt.Sprintf(", +%d more", len(errs)-maxShown)
+	}
+	return " — " + strings.Join(shown, "; ") + suffix
+}
+
 // readRowsByEvents reads actual row data from DuckLake for a batch of SyncEvents.
 // Current-state rows (insert, update_postimage) are read from the live table.
 // Historical rows (delete, update_preimage) are read from the snapshot before the
@@ -501,6 +522,18 @@ func applyPushOutcomesWithRetry(store *state.SyncStore, claimID, target string, 
 	}
 
 	if err := store.RecordPushOutcomes(claimID, target, outcomes, deleteJobRef); err != nil {
+		// Ambiguous-commit safety net: if RecordPushOutcomes' tx.Commit
+		// succeeded server-side but the driver returned an error to us
+		// (network blip, signal mid-commit), the apply log is durable
+		// and the worker would otherwise leave it stranded until the
+		// claim heartbeat goes stale (~10 minutes). Trying
+		// ApplyLoggedOutcomes immediately is safe: if the commit truly
+		// failed the log is empty and Apply no-ops via its
+		// len(entries)==0 guard; if the commit really succeeded, Apply
+		// completes the work and Recover doesn't have to.
+		if applyErr := store.ApplyLoggedOutcomes(claimID); applyErr == nil {
+			return nil
+		}
 		return fmt.Errorf("record outcomes: %w", err)
 	}
 	const maxAttempts = 5
@@ -768,7 +801,9 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEve
 			return batchOutcome{
 				ok:     int64(len(classified.OK)) + int64(len(classified.Rejected)),
 				failed: int64(len(classified.Failed)),
-				err:    fmt.Errorf("push batch %d: %d ok, %d failed, %d rejected", batchNum, len(classified.OK), len(classified.Failed), len(classified.Rejected)),
+				err: fmt.Errorf("push batch %d: %d ok, %d failed, %d rejected%s",
+					batchNum, len(classified.OK), len(classified.Failed), len(classified.Rejected),
+					summarizeFailErrors(classified.FailErrors)),
 			}
 		}
 		return se.ackAll(store, claimID, batchNum, events)
@@ -863,7 +898,9 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 				return batchOutcome{
 					ok:     int64(len(classified.OK)) + int64(len(classified.Rejected)),
 					failed: int64(len(classified.Failed)),
-					err:    fmt.Errorf("poll batch %d: %d ok, %d failed, %d rejected", batchNum, len(classified.OK), len(classified.Failed), len(classified.Rejected)),
+					err: fmt.Errorf("poll batch %d: %d ok, %d failed, %d rejected%s",
+						batchNum, len(classified.OK), len(classified.Failed), len(classified.Rejected),
+						summarizeFailErrors(classified.FailErrors)),
 				}
 			}
 			// Atomically: ack claim + delete job_ref (no failures to requeue)

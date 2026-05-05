@@ -244,10 +244,12 @@ func (s *SyncStore) ClearAllAndWrite(target string, events []SyncEvent) error {
 		WHERE target = ?`, target); err != nil {
 		return fmt.Errorf("clear sync_apply_log: %w", err)
 	}
-	if _, err := tx.Exec(`
-		DELETE FROM sync_claim
-		WHERE claim_id IN (SELECT DISTINCT claim_id FROM sync_inflight WHERE target = ?)`,
-		target); err != nil {
+	// Match by target directly: sync_claim has its own target column.
+	// Going via sync_inflight (the prior implementation) missed
+	// "claim-only tombstones" — sync_claim rows whose inflight had
+	// already drained but the claim row itself survived. Those would
+	// keep HasRecentInflight() returning true and falsely block pushes.
+	if _, err := tx.Exec(`DELETE FROM sync_claim WHERE target = ?`, target); err != nil {
 		return fmt.Errorf("clear sync_claim: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM sync_inflight WHERE target = ?`, target); err != nil {
@@ -289,10 +291,12 @@ func (s *SyncStore) ClearAll(target string) error {
 		WHERE target = ?`, target); err != nil {
 		return fmt.Errorf("clear sync_apply_log: %w", err)
 	}
-	if _, err := tx.Exec(`
-		DELETE FROM sync_claim
-		WHERE claim_id IN (SELECT DISTINCT claim_id FROM sync_inflight WHERE target = ?)`,
-		target); err != nil {
+	// Match by target directly: sync_claim has its own target column.
+	// Going via sync_inflight (the prior implementation) missed
+	// "claim-only tombstones" — sync_claim rows whose inflight had
+	// already drained but the claim row itself survived. Those would
+	// keep HasRecentInflight() returning true and falsely block pushes.
+	if _, err := tx.Exec(`DELETE FROM sync_claim WHERE target = ?`, target); err != nil {
 		return fmt.Errorf("clear sync_claim: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM sync_inflight WHERE target = ?`, target); err != nil {
