@@ -6,6 +6,7 @@ package execute
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
@@ -38,14 +39,26 @@ func writeSyncAck(sess *duckdb.Session, claimID, target string, rowCount int64) 
 // On any error (table-create failure, query failure) returns false to
 // signal "we don't know whether it was acked" — the caller will then
 // re-push, which is at-least-once and matches the contract.
+//
+// The fallback is correct (idempotent sinks tolerate re-push), but
+// silent fallback hides the dedup-signal degradation from the
+// operator. We log to stderr so a recurring _sync_acked failure is
+// visible — recurring re-pushes are usually a symptom of catalog
+// corruption or write permissions, not a transient blip.
 func isSyncAcked(sess *duckdb.Session, claimID string) bool {
 	if err := ensureSyncAckTable(sess); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: _sync_acked table unavailable for claim %s, will re-push (at-least-once): %v\n",
+			claimID, err)
 		return false
 	}
 	result, err := sess.QueryValue(fmt.Sprintf(
 		"SELECT COUNT(*) FROM _sync_acked WHERE claim_id = '%s'",
 		escSyncSQL(claimID)))
 	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: _sync_acked lookup failed for claim %s, will re-push (at-least-once): %v\n",
+			claimID, err)
 		return false
 	}
 	return result != "0"

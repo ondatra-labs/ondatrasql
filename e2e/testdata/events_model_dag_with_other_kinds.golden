@@ -1,3 +1,0 @@
-model_count: 2
-  raw.events (events)
-  staging.page_views (table)

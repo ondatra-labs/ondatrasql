@@ -563,10 +563,19 @@ func applyPushOutcomesWithRetry(store *state.SyncStore, claimID, target string, 
 		// failed the log is empty and Apply no-ops via its
 		// len(entries)==0 guard; if the commit really succeeded, Apply
 		// completes the work and Recover doesn't have to.
-		if applyErr := store.ApplyLoggedOutcomes(claimID); applyErr == nil {
+		applyErr := store.ApplyLoggedOutcomes(claimID)
+		if applyErr == nil {
 			return nil
 		}
-		return fmt.Errorf("record outcomes: %w", err)
+		// Both phases reported failure. Surface BOTH so the operator
+		// can tell whether the underlying commit was ambiguous (in
+		// which case the apply log may still hold rows for next-run
+		// recovery) or the commit was a clean failure (no log
+		// persisted). %w wraps the record err so errors.Is/As still
+		// work; applyErr is interpolated as plain %v since only one
+		// error can be the wrapped chain root.
+		return fmt.Errorf("record outcomes: %w (subsequent apply attempt also failed: %v)",
+			err, applyErr)
 	}
 	const maxAttempts = 5
 	var lastErr error
