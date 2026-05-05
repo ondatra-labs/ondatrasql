@@ -318,15 +318,31 @@ func (se *pushExecutor) classifyPerRowStatus(perRow map[string]string, rows []ma
 		eventKey := fmt.Sprintf("%d:%s", event.RowID, event.ChangeType)
 		status, ok := rowStatus[eventKey]
 		if !ok {
-			// Event's row wasn't in the read set. For deletes this means the
-			// snapshot expired — classify as rejected. For all other change types
-			// the row was removed by a later materialization — ack as no-op.
-			if event.ChangeType == "delete" {
+			// Event's row wasn't in the read set. The reason depends on
+			// the change type:
+			//
+			//   delete / update_preimage: the row was read from a
+			//     historical snapshot. Missing means the snapshot was
+			//     expired by `expire_snapshots` between when the event
+			//     was queued and now. Classify as rejected so the
+			//     operator can decide (typically dead-letter); silently
+			//     acking would lose a delivery the sink contract
+			//     promised.
+			//
+			//   insert / update_postimage: the row was read from
+			//     current state. Missing means the row was removed by
+			//     a later materialization (no longer current). Ack as
+			//     no-op — the row no longer exists, no work to deliver.
+			switch event.ChangeType {
+			case "delete":
 				result.Rejected = append(result.Rejected, event)
 				result.RejectMsgs = append(result.RejectMsgs, fmt.Sprintf("row %d: delete row not found (snapshot may have expired)", event.RowID))
-				continue
+			case "update_preimage":
+				result.Rejected = append(result.Rejected, event)
+				result.RejectMsgs = append(result.RejectMsgs, fmt.Sprintf("row %d: update_preimage row not found (historical snapshot may have expired)", event.RowID))
+			default:
+				result.OK = append(result.OK, event) // no-op ack
 			}
-			result.OK = append(result.OK, event) // no-op ack
 			continue
 		}
 		switch {

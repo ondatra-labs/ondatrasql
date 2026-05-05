@@ -41,18 +41,31 @@ func quoteTarget(target string) string {
 // schemasDiffer compares the column lists of `target` between the sandbox
 // catalog and the prod catalog and returns true if they differ in any way
 // (added, removed, renamed, or type-changed columns). Filtering excludes
-// kind-specific metadata columns like _content_hash and SCD2 valid_from/to
-// so the diff reflects user-meaningful schema changes only.
+// kind-specific internal materialization columns so the diff reflects
+// user-meaningful schema changes only — but only the columns that are
+// *actually internal for this kind*. A regular `@kind: table` model that
+// happens to have a column literally named `valid_from_snapshot` must
+// still surface that column as a real schema change.
 //
 // Bug S6 fix: showDagSandboxSummary used to compare only row counts, so a
 // pure schema change (column added with identical row count) was reported
 // as "unchanged".
-func schemasDiffer(sess *duckdb.Session, target string) (bool, error) {
+func schemasDiffer(sess *duckdb.Session, target, kind string) (bool, error) {
 	parts := strings.SplitN(target, ".", 2)
 	if len(parts) != 2 {
 		return false, fmt.Errorf("invalid target %q (expected schema.table)", target)
 	}
 	schema, table := parts[0], parts[1]
+
+	internalCols := internalMaterializationColumns(kind)
+	notInClause := ""
+	if len(internalCols) > 0 {
+		quoted := make([]string, len(internalCols))
+		for i, c := range internalCols {
+			quoted[i] = "'" + duckdb.EscapeSQL(c) + "'"
+		}
+		notInClause = "AND column_name NOT IN (" + strings.Join(quoted, ",") + ")"
+	}
 
 	colsForCatalog := func(catalog string) (map[string]string, error) {
 		q := fmt.Sprintf(`
@@ -61,9 +74,9 @@ func schemasDiffer(sess *duckdb.Session, target string) (bool, error) {
 			WHERE table_catalog = '%s'
 			  AND table_schema = '%s'
 			  AND table_name = '%s'
-			  AND column_name NOT IN ('_content_hash', 'valid_from_snapshot', 'valid_to_snapshot', 'is_current')
+			  %s
 			ORDER BY ordinal_position`,
-			duckdb.EscapeSQL(catalog), duckdb.EscapeSQL(schema), duckdb.EscapeSQL(table))
+			duckdb.EscapeSQL(catalog), duckdb.EscapeSQL(schema), duckdb.EscapeSQL(table), notInClause)
 		rows, err := sess.QueryRowsMap(q)
 		if err != nil {
 			return nil, err
@@ -94,6 +107,22 @@ func schemasDiffer(sess *duckdb.Session, target string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// internalMaterializationColumns returns the column names the runtime
+// adds to a model's storage but should be hidden from public schema
+// surfaces (sandbox diffs, describe). The set is kind-scoped so a
+// regular `@kind: table` user column literally named e.g.
+// `valid_from_snapshot` is NOT silently filtered.
+func internalMaterializationColumns(kind string) []string {
+	switch kind {
+	case "tracked":
+		return []string{"_content_hash"}
+	case "scd2":
+		return []string{"valid_from_snapshot", "valid_to_snapshot", "is_current"}
+	default:
+		return nil
+	}
 }
 
 // tableExistsIn checks via information_schema whether a schema.table exists
@@ -226,7 +255,7 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 		// check, compare schemas. A column add/drop/rename without a row-count
 		// change used to be reported as "unchanged" — exactly what users care
 		// about validating in sandbox.
-		schemaDiffers, schemaErr := schemasDiffer(sess, m.Target)
+		schemaDiffers, schemaErr := schemasDiffer(sess, m.Target, m.Kind)
 		if schemaErr != nil {
 			printPaddedLine(fmt.Sprintf("  [WARN] %s: schema check error: %s", m.Target, truncate(schemaErr.Error(), 40)))
 			warnings++
@@ -344,13 +373,17 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 	// code split sess.Query's CSV output on '\t' and silently dropped
 	// every row, hiding all schema-evolution rendering in DAG summary.
 	if rows, err := sess.QueryRowsMap(schemaSQL); err == nil && len(rows) > 0 {
+		internalCols := make(map[string]bool)
+		for _, c := range internalMaterializationColumns(kind) {
+			internalCols[c] = true
+		}
 		var added, removed, changed []string
 		for _, row := range rows {
 			colName := row["column_name"]
 			prodType := row["prod_type"]
 			sandboxType := row["sandbox_type"]
 			changeType := row["change_type"]
-			if colName == "" {
+			if colName == "" || internalCols[colName] {
 				continue
 			}
 			switch changeType {
@@ -468,14 +501,14 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 	}
 	if !existsInProd {
 		printPaddedLine("(new table)")
-		showNewTableSchema(sess, target)
+		showNewTableSchema(sess, target, kind)
 		printEmptyLine()
 		return
 	}
 	prodCount, _ := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.ProdAlias(), quoteTarget(target)))
 
 	// Show schema changes first
-	showSchemaDiff(sess, target)
+	showSchemaDiff(sess, target, kind)
 
 	// Get sandbox count
 	sandboxCount, sandboxErr := sess.QueryValue(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sess.CatalogAlias(), quoteTarget(target)))
@@ -594,8 +627,11 @@ func min(a, b int) int {
 	return b
 }
 
-// showSchemaDiff shows schema changes between sandbox and prod.
-func showSchemaDiff(sess *duckdb.Session, target string) {
+// showSchemaDiff shows schema changes between sandbox and prod. Internal
+// materialization columns are filtered out only for the kinds that
+// actually use them — a regular `@kind: table` column literally named
+// `valid_from_snapshot` still surfaces here.
+func showSchemaDiff(sess *duckdb.Session, target, kind string) {
 	// Pass the full schema.table target — the SQL filters by both
 	// catalog AND schema to avoid cross-schema name collisions.
 	schemaSQL := sql.MustFormat("queries/sandbox_schema_diff.sql", sess.CatalogAlias(), sess.ProdAlias(), target)
@@ -608,6 +644,11 @@ func showSchemaDiff(sess *duckdb.Session, target string) {
 		return
 	}
 
+	internalCols := make(map[string]bool)
+	for _, c := range internalMaterializationColumns(kind) {
+		internalCols[c] = true
+	}
+
 	hasChanges := false
 	var added, removed, changed []string
 
@@ -617,6 +658,9 @@ func showSchemaDiff(sess *duckdb.Session, target string) {
 		sandboxType := row["sandbox_type"]
 		changeType := row["change_type"]
 		if colName == "" {
+			continue
+		}
+		if internalCols[colName] {
 			continue
 		}
 
@@ -651,7 +695,9 @@ func showSchemaDiff(sess *duckdb.Session, target string) {
 }
 
 // showNewTableSchema shows the schema of a new table in sandbox.
-func showNewTableSchema(sess *duckdb.Session, target string) {
+// Internal materialization columns are filtered out only for the kinds
+// that actually use them.
+func showNewTableSchema(sess *duckdb.Session, target, kind string) {
 	// Parse schema.table format. Schema is REQUIRED in the WHERE clause —
 	// otherwise raw.orders and staging.orders would mix columns into one
 	// listing because they share the same table_name in the same catalog.
@@ -677,9 +723,17 @@ func showNewTableSchema(sess *duckdb.Session, target string) {
 		return
 	}
 
+	internalCols := make(map[string]bool)
+	for _, c := range internalMaterializationColumns(kind) {
+		internalCols[c] = true
+	}
+
 	printPaddedLine("Columns:")
 	for _, row := range rows {
 		colName := row["column_name"]
+		if internalCols[colName] {
+			continue
+		}
 		colType := row["data_type"]
 		if colName != "" {
 			printPaddedLine(fmt.Sprintf("  • %s (%s)", colName, colType))
