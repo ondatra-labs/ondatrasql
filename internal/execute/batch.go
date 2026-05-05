@@ -39,6 +39,7 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, confi
 		target      string
 		currentHash string
 		kind        string
+		fetch       bool
 	}
 
 	cfgHash := ""
@@ -61,7 +62,8 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, confi
 				Push:               m.Push,
 				ConfigHash:         cfgHash,
 			}),
-			kind: m.Kind,
+			kind:  m.Kind,
+			fetch: m.Fetch,
 		})
 	}
 
@@ -69,14 +71,14 @@ func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, confi
 		return make(RunTypeDecisions), nil
 	}
 
-	// Build VALUES list for model input: ('t1','h1','k1'),('t2','h2','k2')
+	// Build VALUES list for model input: ('t1','h1','k1',f1),('t2','h2','k2',f2)
 	var valueRows []string
 	for _, info := range infos {
 		// Escape values for SQL safety
 		target := strings.ReplaceAll(info.target, "'", "''")
 		hash := strings.ReplaceAll(info.currentHash, "'", "''")
 		kind := strings.ReplaceAll(info.kind, "'", "''")
-		valueRows = append(valueRows, fmt.Sprintf("('%s','%s','%s')", target, hash, kind))
+		valueRows = append(valueRows, fmt.Sprintf("('%s','%s','%s',%t)", target, hash, kind, info.fetch))
 	}
 
 	// v0.12.0+: snapshots() resolves via USE to the active catalog. In sandbox
@@ -134,7 +136,7 @@ func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model, configHash 
 		ConfigHash:         cfgHash,
 	}), "'", "''")
 	kind := strings.ReplaceAll(model.Kind, "'", "''")
-	valueRow := fmt.Sprintf("('%s','%s','%s')", target, hash, kind)
+	valueRow := fmt.Sprintf("('%s','%s','%s',%t)", target, hash, kind, model.Fetch)
 
 	query := sql.MustFormat("execute/batch_run_type.sql", valueRow)
 

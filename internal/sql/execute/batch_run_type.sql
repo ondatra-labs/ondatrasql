@@ -3,7 +3,7 @@
 -- Args: 1) VALUES list like ('t1','h1','k1'),('t2','h2','k2')
 -- Logic: table kind uses dependency tracking to skip when nothing changed
 WITH model_input AS (
-    SELECT * FROM (VALUES %s) AS t(target, current_hash, kind)
+    SELECT * FROM (VALUES %s) AS t(target, current_hash, kind, is_fetch)
 ),
 -- Get ALL latest commits in one scan (instead of N individual lookups)
 latest_commits AS (
@@ -24,6 +24,7 @@ model_status AS (
         m.target,
         m.current_hash,
         m.kind,
+        m.is_fetch,
         COALESCE(lc.prev_hash, '') AS prev_hash,
         lc.depends_raw,
         TRY_CAST(lc.depends_raw AS VARCHAR[]) AS depends_array,
@@ -86,6 +87,9 @@ SELECT
         -- Table kind: dependency-aware skip logic
         WHEN ms.prev_hash = '' THEN 'backfill'
         WHEN ms.prev_hash != ms.current_hash THEN 'backfill'
+        -- @kind: table @fetch pulls from external APIs whose state isn't
+        -- visible to the runtime — never skip, always do a full re-fetch.
+        WHEN ms.is_fetch THEN 'full'
         WHEN ms.depends_raw IS NULL THEN 'full'
         WHEN ms.depends_invalid THEN 'full'
         WHEN tds.dep_count IS NULL OR tds.dep_count = 0 THEN 'skip'
@@ -106,6 +110,7 @@ SELECT
         -- Table kind
         WHEN ms.prev_hash = '' THEN 'first run'
         WHEN ms.prev_hash != ms.current_hash THEN 'sql changed'
+        WHEN ms.is_fetch THEN 'fetch source'
         WHEN ms.depends_raw IS NULL THEN 'missing depends metadata'
         WHEN ms.depends_invalid THEN 'invalid depends metadata'
         WHEN tds.dep_count IS NULL OR tds.dep_count = 0 THEN 'no dependencies'
