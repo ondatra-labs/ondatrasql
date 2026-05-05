@@ -12,6 +12,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 )
 
 // DAGRunResult holds the outcome of a single model execution in a DAG run.
@@ -50,6 +51,15 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		errors := make(map[string]error)
 		errors["_validation"] = err
 		return nil, errors
+	}
+
+	// Cleanup: drop expired sync events and recover orphan claims from
+	// crashed workers. Idempotent and cheap; failures are non-fatal.
+	if projectDir != "" {
+		if st, err := state.Open(projectDir); err == nil {
+			_ = state.GC(st)
+			_ = st.Close()
+		}
 	}
 
 	cfgHash := backfill.ConfigHash(filepath.Join(projectDir, "config"))

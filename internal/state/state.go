@@ -73,6 +73,26 @@ func (s *State) Close() error {
 	return s.db.Close()
 }
 
+// GC runs periodic cleanup on operational state. Idempotent and cheap to
+// call repeatedly. The intended invocation point is once at the start of
+// each pipeline run (RunDAG) so stale events and orphaned claims don't
+// accumulate over time.
+//
+// Today this only delegates to SyncStore.RunGC() (sync_evt TTL +
+// orphan-inflight recovery). Fetch staging tables don't need TTL cleanup —
+// stateCollector handles per-target recovery at open time.
+func GC(st *State) error {
+	if st == nil {
+		return nil
+	}
+	sync, err := NewSyncStore(st)
+	if err != nil {
+		return fmt.Errorf("open sync store for gc: %w", err)
+	}
+	sync.RunGC()
+	return nil
+}
+
 // SanitizeTableName replaces non-identifier characters in a target name
 // (e.g. "raw.orders") with underscores to produce a valid DuckDB table
 // name (e.g. "raw_orders"). Used by callers that derive per-target table
