@@ -467,13 +467,62 @@ func (se *pushExecutor) readRowsByEvents(events []state.SyncEvent) ([]map[string
 	return allRows, nil
 }
 
+// applyPushOutcomes records per-row push() classifications durably,
+// then applies them to inflight/queue state. Supersedes the old
+// AckAndRequeue → nackAll fallback chain, which resurrected ok and
+// rejected events on transient failures.
+//
+// Two-phase commit:
+//
+//  1. RecordPushOutcomes writes the (claim_id, rid → status) rows to
+//     sync_apply_log atomically. If this fails, no inflight state has
+//     been touched yet — caller can retry or fall back to nackAll
+//     since no classification has been promised.
+//
+//  2. ApplyLoggedOutcomes consumes the log, applies the
+//     classifications (failed→sync_evt, all→delete inflight), and
+//     deletes the log entries on success. If this fails after retry,
+//     the log persists and RunGC's RecoverOrphanApplyLogs picks it
+//     up on the next pipeline run — replaying the SAME per-row
+//     decisions, so ok and rejected events are NOT resurrected.
+//
+// Callers can retry the whole pipeline cheaply: if both phases keep
+// failing, surface the error and let the operator intervene.
+func applyPushOutcomesWithRetry(store *state.SyncStore, claimID, target string, classified *perRowResult, deleteJobRef bool) error {
+	outcomes := make([]state.EventOutcome, 0, len(classified.OK)+len(classified.Failed)+len(classified.Rejected))
+	for _, ev := range classified.OK {
+		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: "ok"})
+	}
+	for _, ev := range classified.Failed {
+		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: "failed"})
+	}
+	for _, ev := range classified.Rejected {
+		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: "reject"})
+	}
+
+	if err := store.RecordPushOutcomes(claimID, target, outcomes, deleteJobRef); err != nil {
+		return fmt.Errorf("record outcomes: %w", err)
+	}
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := store.ApplyLoggedOutcomes(claimID, target); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Duration(attempt+1) * 40 * time.Millisecond)
+	}
+	// Apply persistently failed. The log survives — RunGC at next
+	// pipeline run will pick it up. Surface the error so the operator
+	// sees the inflight state is in a known-recoverable state.
+	return fmt.Errorf("apply logged outcomes (claim left in sync_apply_log for next-run recovery): %w", lastErr)
+}
+
 // ackAndRequeueWithRetry wraps SyncStore.AckAndRequeue with bounded
-// retry on transient failures. Without retry, a single TX hiccup would
-// trip the caller's `nackAll` fallback — which moves rows that already
-// completed (ok) and rows intentionally rejected back to sync_evt for
-// re-push, producing duplicate deliveries and resurrecting permanent
-// rejects. The TX is atomic so retry is safe; persistent failures still
-// fall through after the cap.
+// retry on transient failures. Used by paths that don't have a
+// per-row classification (e.g. the "no failures, just clean up jobref"
+// case).
 func ackAndRequeueWithRetry(store *state.SyncStore, claimID, target string, failed []state.SyncEvent, deleteJobRef bool) error {
 	const maxAttempts = 5
 	var lastErr error
@@ -704,12 +753,17 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEve
 			se.writeSyncLogEntry(se.model.Target, "*", "rejected", r)
 		}
 
-		// Determine what to requeue: only retryable failures, not rejected
+		// Determine what to requeue: only retryable failures, not rejected.
+		// Use applyPushOutcomesWithRetry so a transient apply failure
+		// doesn't trigger nackAll — RunGC will resume from sync_apply_log
+		// on next pipeline run instead of resurrecting ok/rejected events.
 		if len(classified.Failed) > 0 || len(classified.Rejected) > 0 {
-			// Requeue only retryable failures. Rejected events are acked (removed).
-			if err := ackAndRequeueWithRetry(store, claimID, target, classified.Failed, false); err != nil {
-				return nackAll(store, claimID, batchNum, events,
-					fmt.Errorf("ack-and-requeue: %w", err))
+			if err := applyPushOutcomesWithRetry(store, claimID, target, classified, false); err != nil {
+				return batchOutcome{
+					ok:     0,
+					failed: int64(len(events)),
+					err:    fmt.Errorf("apply outcomes: %w", err),
+				}
 			}
 			return batchOutcome{
 				ok:     int64(len(classified.OK)) + int64(len(classified.Rejected)),
@@ -799,9 +853,12 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 				se.writeSyncLogEntry(se.model.Target, "*", "rejected", r)
 			}
 			if len(classified.Failed) > 0 || len(classified.Rejected) > 0 {
-				if err := ackAndRequeueWithRetry(store, claimID, target, classified.Failed, true); err != nil {
-					return nackAll(store, claimID, batchNum, events,
-						fmt.Errorf("ack-and-requeue: %w", err))
+				if err := applyPushOutcomesWithRetry(store, claimID, target, classified, true); err != nil {
+					return batchOutcome{
+						ok:     0,
+						failed: int64(len(events)),
+						err:    fmt.Errorf("apply outcomes: %w", err),
+					}
 				}
 				return batchOutcome{
 					ok:     int64(len(classified.OK)) + int64(len(classified.Rejected)),

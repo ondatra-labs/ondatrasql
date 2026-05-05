@@ -85,6 +85,25 @@ func NewSyncStore(st *State) (*SyncStore, error) {
 			row_hash VARCHAR,
 			updated_at TIMESTAMP DEFAULT now()
 		)`,
+		// sync_apply_log persists per-row push() classifications BEFORE
+		// AckAndRequeue mutates sync_inflight / sync_evt. This makes the
+		// classify-then-apply step idempotent: if AckAndRequeue's TX
+		// fails (transient DuckDB error, crash), the log survives and
+		// the next attempt can replay the same per-row decisions
+		// instead of falling back to a destructive nackAll that
+		// resurrects ok/rejected events.
+		//
+		// Status values: 'ok' (delivered, ack), 'failed' (retry, requeue
+		// to sync_evt), 'reject' (permanent, ack and drop).
+		`CREATE TABLE IF NOT EXISTS sync_apply_log (
+			claim_id VARCHAR NOT NULL,
+			target VARCHAR NOT NULL,
+			seq BIGINT NOT NULL,
+			status VARCHAR NOT NULL,
+			delete_jobref BOOLEAN DEFAULT false,
+			recorded_at TIMESTAMP DEFAULT now(),
+			PRIMARY KEY (claim_id, target, seq)
+		)`,
 	}
 	for _, stmt := range createStmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -141,6 +160,13 @@ func (s *SyncStore) RunGC() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit gc: %w", err)
+	}
+
+	// Resume any push-outcome logs that crashed between RecordPushOutcomes
+	// and ApplyLoggedOutcomes. These belong inside the GC pass conceptually
+	// (they're a recovery action, not the steady-state push path).
+	if err := s.RecoverOrphanApplyLogs(); err != nil {
+		return fmt.Errorf("recover orphan apply logs: %w", err)
 	}
 	return nil
 }
@@ -468,6 +494,174 @@ func (s *SyncStore) AckAndRequeue(claimID string, target string, failedEvents []
 		return fmt.Errorf("commit requeue: %w", err)
 	}
 	s.heartbeat.Delete(claimID)
+	return nil
+}
+
+// EventOutcome pairs a SyncEvent with its push() outcome for durable
+// classification before AckAndRequeue mutates inflight state.
+type EventOutcome struct {
+	Event  SyncEvent
+	Status string // "ok" | "failed" | "reject"
+}
+
+// RecordPushOutcomes durably persists per-row push() classifications
+// for a claim into sync_apply_log. Returns once committed.
+//
+// The point: if the subsequent AckAndRequeue fails (transient DuckDB
+// error, crash), the classifications survive and the next attempt
+// (either a retry on the same path or recovery on the next pipeline
+// run via ApplyLoggedOutcomes) replays the same per-row decisions
+// instead of resurrecting ok/rejected events via a destructive nackAll.
+func (s *SyncStore) RecordPushOutcomes(claimID, target string, outcomes []EventOutcome, deleteJobRef bool) error {
+	if len(outcomes) == 0 {
+		return nil
+	}
+	db := s.st.DB()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin record outcomes tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Idempotent: if a previous attempt persisted some rows, drop them
+	// before re-inserting so a retry with the same outcomes succeeds
+	// instead of hitting the (claim_id, target, seq) PK.
+	if _, err := tx.Exec(
+		`DELETE FROM sync_apply_log WHERE claim_id = ?`, claimID); err != nil {
+		return fmt.Errorf("clear prior outcomes: %w", err)
+	}
+
+	for _, o := range outcomes {
+		// We need a stable seq per (claim_id, target, event). Re-use the
+		// SyncEvent's RowID as the seq surrogate — it's unique per row
+		// in DuckLake and matches what sync_inflight already keys on.
+		if _, err := tx.Exec(
+			`INSERT INTO sync_apply_log(claim_id, target, seq, status, delete_jobref) VALUES (?, ?, ?, ?, ?)`,
+			claimID, target, o.Event.RowID, o.Status, deleteJobRef); err != nil {
+			return fmt.Errorf("insert outcome: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// ApplyLoggedOutcomes consumes the persisted classifications for a
+// claim from sync_apply_log and applies them: failed events go to
+// sync_evt, the inflight rows + claim record go away, and (if any
+// row has delete_jobref=true) the jobref is cleared.
+//
+// Idempotent: re-running on a partially-applied claim is safe because
+// each step is bounded by the claim_id.
+func (s *SyncStore) ApplyLoggedOutcomes(claimID, target string) error {
+	db := s.st.DB()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin apply tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Read failed events from inflight + log so we can requeue them.
+	rows, err := tx.Query(`
+		SELECT i.payload, l.delete_jobref
+		FROM sync_inflight i
+		JOIN sync_apply_log l
+		  ON l.claim_id = i.claim_id AND l.target = i.target AND l.seq = i.seq
+		WHERE l.claim_id = ? AND l.status = 'failed'`, claimID)
+	if err != nil {
+		return fmt.Errorf("query failed events: %w", err)
+	}
+	type pendingFailure struct {
+		payload      []byte
+		deleteJobref bool
+	}
+	var failures []pendingFailure
+	for rows.Next() {
+		var p pendingFailure
+		if err := rows.Scan(&p.payload, &p.deleteJobref); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan failed event: %w", err)
+		}
+		failures = append(failures, p)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate failed events: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close cursor: %w", err)
+	}
+
+	// One representative delete_jobref flag for the claim. They're
+	// recorded uniformly per RecordPushOutcomes call.
+	var deleteJobref bool
+	if err := tx.QueryRow(
+		`SELECT COALESCE(MAX(CAST(delete_jobref AS INT)), 0) FROM sync_apply_log WHERE claim_id = ?`,
+		claimID).Scan(&deleteJobref); err != nil {
+		return fmt.Errorf("read jobref flag: %w", err)
+	}
+
+	for _, f := range failures {
+		seq := s.nextSeq()
+		if _, err := tx.Exec(
+			`INSERT INTO sync_evt(target, seq, payload) VALUES (?, ?, ?)`,
+			target, seq, f.payload); err != nil {
+			return fmt.Errorf("requeue failed event: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(`DELETE FROM sync_inflight WHERE claim_id = ?`, claimID); err != nil {
+		return fmt.Errorf("delete inflight: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM sync_claim WHERE claim_id = ?`, claimID); err != nil {
+		return fmt.Errorf("delete claim: %w", err)
+	}
+	if deleteJobref {
+		if _, err := tx.Exec(`DELETE FROM sync_jobref WHERE target = ?`, target); err != nil {
+			return fmt.Errorf("delete jobref: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM sync_apply_log WHERE claim_id = ?`, claimID); err != nil {
+		return fmt.Errorf("delete apply log: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit apply: %w", err)
+	}
+	s.heartbeat.Delete(claimID)
+	return nil
+}
+
+// RecoverOrphanApplyLogs resumes any sync_apply_log entries left
+// behind by a crash that happened between RecordPushOutcomes (which
+// committed the log) and ApplyLoggedOutcomes (which would have
+// consumed it). Called from RunGC.
+func (s *SyncStore) RecoverOrphanApplyLogs() error {
+	rows, err := s.st.DB().Query(
+		`SELECT DISTINCT claim_id, target FROM sync_apply_log`)
+	if err != nil {
+		return fmt.Errorf("scan apply log: %w", err)
+	}
+	type claim struct{ id, target string }
+	var orphans []claim
+	for rows.Next() {
+		var c claim
+		if err := rows.Scan(&c.id, &c.target); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan apply-log row: %w", err)
+		}
+		orphans = append(orphans, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate apply log: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close apply-log cursor: %w", err)
+	}
+
+	for _, o := range orphans {
+		if err := s.ApplyLoggedOutcomes(o.id, o.target); err != nil {
+			return fmt.Errorf("recover claim %s: %w", o.id, err)
+		}
+	}
 	return nil
 }
 
