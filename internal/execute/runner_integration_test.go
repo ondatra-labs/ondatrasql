@@ -4270,6 +4270,61 @@ SELECT 42 AS value
 	}
 }
 
+// @kind: table @fetch must NEVER skip — even when hash and deps are
+// stable, the external API state isn't visible to the runtime so
+// re-fetching is the only way to pick up new source data. Pins the
+// commit 06ad4d5 fix so the dep-count skip path can't re-introduce
+// the bug.
+//
+// We don't run the model end-to-end (that would need a real lib).
+// Instead we exercise ComputeSingleRunType with a synthesized model
+// against a clean catalog (no prior commit → backfill) and against a
+// catalog where a commit was synthesized to match the hash (no prior
+// commit + deps unchanged should land on 'full' for fetch, 'skip' for
+// non-fetch).
+func TestComputeSingleRunType_TableFetchAlwaysFull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	p := testutil.NewProject(t)
+
+	// First, verify a non-fetch table without deps lands on 'skip' once
+	// committed (the baseline behavior we don't want to break).
+	p.AddModel("staging/baseline.sql", `-- @kind: table
+SELECT 1 AS id
+`)
+	runModel(t, p, "staging/baseline.sql")
+	baselinePath := filepath.Join(p.Dir, "models", "staging/baseline.sql")
+	baseline, err := parser.ParseModel(baselinePath, p.Dir)
+	if err != nil {
+		t.Fatalf("parse baseline: %v", err)
+	}
+	if d, err := execute.ComputeSingleRunType(p.Sess, baseline); err != nil {
+		t.Fatalf("baseline compute: %v", err)
+	} else if d.RunType != "skip" {
+		t.Errorf("non-fetch table baseline: run_type = %q, want skip", d.RunType)
+	}
+
+	// A synthesized fetch model: same shape, but Fetch=true. Without the
+	// commit 06ad4d5 fix this would also report 'skip'. With the fix it
+	// must report 'backfill' (no prior commit yet) → and after we mock
+	// a matching commit, 'full'.
+	fetchModel := &parser.Model{
+		Target: "staging.fetch_baseline",
+		Kind:   "table",
+		Fetch:  true,
+		SQL:    baseline.SQL, // same SQL, but Fetch differs → different hash
+	}
+	d, err := execute.ComputeSingleRunType(p.Sess, fetchModel)
+	if err != nil {
+		t.Fatalf("fetch first-run compute: %v", err)
+	}
+	// First run with no prior commit → backfill regardless of fetch.
+	if d.RunType != "backfill" {
+		t.Errorf("first-run fetch: run_type = %q, want backfill", d.RunType)
+	}
+}
+
 func TestComputeSingleRunType_TableBackfillOnNewSQL(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")

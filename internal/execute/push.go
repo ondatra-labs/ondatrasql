@@ -84,7 +84,7 @@ func (r *Runner) executePush(ctx context.Context, model *parser.Model, result *R
 func (se *pushExecutor) run(ctx context.Context) error {
 	cfg := se.pushLib.PushConfig
 
-	// Open SyncStore (Badger-backed, stores only SyncEvent not full rows)
+	// Open SyncStore (state-store-backed, stores only SyncEvent not full rows)
 	store, err := se.openSyncStore()
 	if err != nil {
 		return fmt.Errorf("open sync store: %w", err)
@@ -152,7 +152,7 @@ func (se *pushExecutor) run(ctx context.Context) error {
 		}
 	}
 
-	// Process loop: claim batches from Badger until empty.
+	// Process loop: claim batches from state-store until empty.
 	// This handles both fresh delta and backlog from previous failed runs.
 	batchSize := cfg.BatchSize
 	if batchSize <= 0 {
@@ -181,7 +181,7 @@ func (se *pushExecutor) run(ctx context.Context) error {
 			break
 		}
 
-		// Claim next batch from Badger
+		// Claim next batch from state-store
 		claimID, claimed, err := store.Claim(target, batchSize)
 		if err != nil {
 			mu.Lock()
@@ -440,7 +440,7 @@ type historicalEvent struct {
 	changeType string
 }
 
-// queueDelta writes new sink events to Badger. Strategy is kind-agnostic:
+// queueDelta writes new sink events to state-store. Strategy is kind-agnostic:
 //   - async: WriteBatch only (preserve job_ref for polling resume)
 //   - backfill: ClearAllAndWrite (full replace, supersedes everything incl. inflight)
 //   - incremental + inflight: WriteBatch (preserve active claims, queue for later)
@@ -483,30 +483,30 @@ func (se *pushExecutor) queueDelta(store *state.SyncStore, target string, batchM
 	return nil
 }
 
-// ackAll records the push success in DuckLake (_sync_acked), then acks Badger.
-// If Badger ack fails, _sync_acked ensures next run skips already-pushed rows.
+// ackAll records the push success in DuckLake (_sync_acked), then acks state-store.
+// If state-store ack fails, _sync_acked ensures next run skips already-pushed rows.
 func (se *pushExecutor) ackAll(store *state.SyncStore, claimID string, batchNum int, events []state.SyncEvent) batchOutcome {
 	target := "sync:" + se.model.Target
 
-	// Step 1: Record in DuckLake (survives Badger failures)
+	// Step 1: Record in DuckLake (survives state-store failures)
 	if err := writeSyncAck(se.runner.sess, claimID, target, int64(len(events))); err != nil {
-		// DuckLake write failed -- still ack Badger (push DID succeed)
+		// DuckLake write failed -- still ack state-store (push DID succeed)
 		se.result.Warnings = append(se.result.Warnings,
 			fmt.Sprintf("_sync_acked write failed (push succeeded): %v", err))
 	}
 
-	// Step 2: Ack Badger
+	// Step 2: Ack state-store
 	if err := store.Ack(claimID); err != nil {
-		// Badger ack failed but _sync_acked recorded it.
+		// state-store ack failed but _sync_acked recorded it.
 		// Next run: isSyncAcked → skip re-push → retry ack.
 		return batchOutcome{
 			ok:     int64(len(events)),
 			failed: 0,
-			err:    fmt.Errorf("batch %d: badger ack failed but push was recorded in _sync_acked: %w", batchNum, err),
+			err:    fmt.Errorf("batch %d: state-store ack failed but push was recorded in _sync_acked: %w", batchNum, err),
 		}
 	}
 
-	// Step 3: Cleanup _sync_acked (Badger confirmed, no longer needed)
+	// Step 3: Cleanup _sync_acked (state-store confirmed, no longer needed)
 	recordSyncAckCleanupWarning(se.result, deleteSyncAck(se.runner.sess, claimID))
 
 	return allOK(events)
@@ -545,7 +545,7 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEve
 	cfg := se.pushLib.PushConfig
 	target := "sync:" + se.model.Target
 
-	// Check if this claim was already pushed (crash recovery: Badger ack
+	// Check if this claim was already pushed (crash recovery: state-store ack
 	// failed but _sync_acked recorded the success). Skip re-push, just ack.
 	if isSyncAcked(se.runner.sess, claimID) {
 		if err := store.Ack(claimID); err != nil {
@@ -677,7 +677,7 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEve
 		if sinkResult.RawReturn == nil {
 			return nackAll(store, claimID, batchNum, events, fmt.Errorf("push: must return job reference dict"))
 		}
-		// Persist job_ref in Badger so polling can resume after crash
+		// Persist job_ref in state-store so polling can resume after crash
 		if err := store.SaveJobRef(target, sinkResult.RawReturn, batchEventHash(events)); err != nil {
 			return nackAll(store, claimID, batchNum, events, fmt.Errorf("save job ref: %w", err))
 		}
@@ -857,7 +857,7 @@ func (se *pushExecutor) writeSyncLogEntry(target, syncKey, status, msg string) {
 }
 
 // mergeBacklogWithDelta reads ALL existing events (both pending and inflight) from
-// Badger, merges them with new delta events. Dedup by (RowID, ChangeType): if an
+// state-store, merges them with new delta events. Dedup by (RowID, ChangeType): if an
 // event with the same identity appears in both backlog and delta, the delta version
 // wins. This preserves both update_preimage and update_postimage for the same RowID.
 // Kind-agnostic — relies on DuckLake's stable row lineage for identity.

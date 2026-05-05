@@ -735,7 +735,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		}
 	}
 
-	// Execute extraPreSQL (e.g. Badger ack records) inside the transaction
+	// Execute extraPreSQL (e.g. state-store ack records) inside the transaction
 	for _, extra := range extraPreSQL {
 		if err := r.sess.Exec(extra); err != nil {
 			return rollbackOnErr(err, "extra pre-sql")

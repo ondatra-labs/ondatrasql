@@ -13,7 +13,7 @@ import (
 
 // ensureSyncAckTable creates _sync_acked if it doesn't exist.
 // Tracks which outbound sync claims have been successfully pushed.
-// If Badger ack fails after push, next run checks this table to
+// If state-store ack fails after push, next run checks this table to
 // avoid re-pushing already-delivered rows.
 func ensureSyncAckTable(sess *duckdb.Session) error {
 	return sess.Exec(`CREATE TABLE IF NOT EXISTS _sync_acked (
@@ -51,7 +51,7 @@ func isSyncAcked(sess *duckdb.Session, claimID string) bool {
 	return result != "0"
 }
 
-// deleteSyncAck removes the ack record after Badger confirms.
+// deleteSyncAck removes the ack record after state-store confirms.
 // Returns an error if the DELETE fails so the caller can surface it
 // as a warning — leaving stale rows around isn't fatal but observers
 // should know the cleanup didn't run.
@@ -64,13 +64,13 @@ func deleteSyncAck(sess *duckdb.Session, claimID string) error {
 // recordSyncAckCleanupWarning appends a non-fatal cleanup-failure
 // warning to result when err != nil, no-op when err == nil. Extracted
 // from ackAll so the warning wiring is testable without standing up
-// the full pushExecutor + Badger store.
+// the full pushExecutor + state.SyncStore.
 func recordSyncAckCleanupWarning(result *Result, err error) {
 	if err == nil {
 		return
 	}
 	result.Warnings = append(result.Warnings,
-		fmt.Sprintf("_sync_acked cleanup failed (push and badger ack succeeded): %v", err))
+		fmt.Sprintf("_sync_acked cleanup failed (push and state-store ack succeeded): %v", err))
 }
 
 func escSyncSQL(s string) string {

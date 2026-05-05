@@ -11,7 +11,7 @@ import (
 )
 
 // EnsureAckTable creates the _ondatra_acks table if it doesn't exist.
-// This table tracks which Badger claim IDs have been successfully committed to DuckDB.
+// This table tracks which state-store claim IDs have been successfully committed to DuckDB.
 func EnsureAckTable(sess *duckdb.Session) error {
 	return sess.Exec(`CREATE TABLE IF NOT EXISTS _ondatra_acks (
 		claim_id VARCHAR NOT NULL,
@@ -39,7 +39,7 @@ func IsAcked(sess *duckdb.Session, claimID string) (bool, error) {
 	return result != "0", nil
 }
 
-// DeleteAck removes an ack record after Badger has confirmed the ack.
+// DeleteAck removes an ack record after state-store has confirmed the ack.
 // At that point the crash-recovery window is closed and the record is
 // no longer needed. Returns the DELETE error so the caller can decide
 // whether to surface it as a warning — leaving stale rows in

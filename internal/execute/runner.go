@@ -294,7 +294,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Skip: nothing changed, no work to do -- but check for pending sink work
 	if result.RunType == "skip" {
 		if model.Push != "" {
-			// No delta table on skip -- only process existing Badger backlog
+			// No delta table on skip -- only process existing state-store backlog
 			if err := r.executePush(ctx, model, result, nil, 0); err != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("sink: %v", err))
 			}
@@ -380,11 +380,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	var libCalls []LibCall
 	var hasInferredStubs bool        // true when 0-row lib stubs were created from AST/column inference
 	var trackedOpts trackedRunOpts   // populated when tracked + lib + all-empty + no_change semantics
-	// Ensure all lib-call Badger stores are cleaned up on any exit path.
+	// Ensure all lib-call state-store stores are cleaned up on any exit path.
 	// Claims that were not explicitly acked are nacked (returned to queue).
 	// The acked flag is set in the success path after materialize.
 	var libClaimsAcked bool
-	// ackLibClaims acks all lib-call Badger claims and deletes ack records.
+	// ackLibClaims acks all lib-call state-store claims and deletes ack records.
 	// Sets libClaimsAcked only if ALL acks succeed. If any ack fails,
 	// libClaimsAcked stays false and defer will nack all claims.
 	ackLibClaims := func() {
@@ -1168,7 +1168,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return result, fmt.Errorf("audit parse errors")
 	}
 
-	// Build ack SQL for lib-call Badger claims — included in the materialize
+	// Build ack SQL for lib-call state-store claims — included in the materialize
 	// transaction so the ack record is atomic with the data commit (same as script.go).
 	var libExtraPreSQL []string
 	for i := range libCalls {
@@ -1216,7 +1216,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// clean if the error came from a non-transactional path).
 		_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
 
-		// Lib-call Badger claim handling on materialize failure
+		// Lib-call state-store claim handling on materialize failure
 		// (same logic as script.go: audit fail → ack, other fail → nack)
 		if strings.Contains(err.Error(), "audit failed") {
 			// Audit failure: ack claims (data was valid, just reverted).
@@ -1246,7 +1246,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
 
-	// Success — ack lib-call Badger claims and delete ack records.
+	// Success — ack lib-call state-store claims and delete ack records.
 	// Same lifecycle as script.go. Stores are closed by defer.
 	ackLibClaims()
 
@@ -1259,7 +1259,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Outbound sync: compute delta AFTER commit, then push.
 	// Delta is a list of SyncEvents (rowid + operation + snapshot).
-	// Row data is read from DuckLake at push time, not stored in Badger.
+	// Row data is read from DuckLake at push time, not stored in state-store.
 	if model.Push != "" {
 		// Get post-commit snapshot. All sink kinds need this:
 		// All sink-enabled kinds need table_changes() range
@@ -1302,7 +1302,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			r.trace(result, "sink.delta", stepStart, "ok")
 		}
 
-		// Run sink: processes new delta AND existing Badger backlog.
+		// Run sink: processes new delta AND existing state-store backlog.
 		stepStart = time.Now()
 		if err := r.executePush(ctx, model, result, sinkEvents, postCommitSnapshot); err != nil {
 			r.trace(result, "sink", stepStart, "error")

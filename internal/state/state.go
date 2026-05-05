@@ -10,12 +10,11 @@
 // pipeline. It must NOT contain any user data — only operational metadata
 // and in-flight rows that haven't yet been materialized into DuckLake.
 //
-// The package replaces the badger-backed `internal/collect.Store` for fetch
-// (and, in a later phase, `internal/collect.SyncStore` for push). It
-// inherits the same crash-recovery semantics as badger: inflight claims
-// from a crashed run are detected at startup and either discarded (if the
-// claim already committed, per the `_ondatra_acks` table in the main
-// catalog) or reset for re-processing.
+// The package replaces the previous `internal/collect`-based stores
+// (fetch's `Store` and push's `SyncStore`). Crash-recovery semantics are
+// preserved: inflight claims from a crashed run are detected at startup
+// and either discarded (if the claim already committed, per the
+// `_ondatra_acks` table in the main catalog) or reset for re-processing.
 package state
 
 import (

@@ -201,7 +201,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	r.trace(result, "script_execute", stepStart, "ok")
 
 	// Create temp table from collected data (DuckDB is now resumed).
-	// This must happen before the "no data" check because in Badger mode,
+	// This must happen before the "no data" check because in state-store mode,
 	// pre-existing events from previous runs are included in the claim.
 	stepStart = time.Now()
 	if err := scriptResult.CreateTempTable(); err != nil {
@@ -218,8 +218,8 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	tmpTable := scriptResult.TempTable
 
-	// Deduplicate temp table by key column for kinds that may have Badger duplicates.
-	// When a script crashes after save.row() but before materialization, Badger retains
+	// Deduplicate temp table by key column for kinds that may have state-store duplicates.
+	// When a script crashes after save.row() but before materialization, state-store retains
 	// the rows. On the next run, the script produces the same rows again, resulting in
 	// duplicates in the temp table. Dedup keeps only the last row per key column.
 	// Determine the key column for dedup
@@ -317,7 +317,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	// Render audits as a transactional pre-commit check (same path as
 	// runner.go's SQL flow). Parse errors abort BEFORE materialize so a
-	// broken @audit directive doesn't waste a Badger ack cycle.
+	// broken @audit directive doesn't waste a state-store ack cycle.
 	stepStart = time.Now()
 	auditSQL, auditParseErrors := r.buildAuditSQL(model)
 	r.trace(result, "audits.render", stepStart, "ok")
@@ -344,7 +344,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		// same batch can start its own transaction. Best-effort.
 		_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
 
-		// Badger claim handling differs by failure cause:
+		// state-store claim handling differs by failure cause:
 		//
 		//   * Audit failure → ACK the claims. The script's data was
 		//     valid output; only the materialize result was reverted
@@ -379,7 +379,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	r.trace(result, "materialize", stepStart, "ok")
 	result.RowsAffected = rowsAffected
 
-	// Everything succeeded — ack Badger claims (remove from inflight).
+	// Everything succeeded — ack state-store claims (remove from inflight).
 	// Then delete ack records — the crash window is closed.
 	if ackErr := scriptResult.AckClaims(); ackErr != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("ack claims: %v", ackErr))

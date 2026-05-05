@@ -21,7 +21,7 @@ import (
 // state.duckdb, then claims and materializes them into a DuckDB temp
 // table.
 //
-// Replaces the badger-backed implementation. Same external interface as
+// Replaces the previous badger-backed implementation. Same external interface as
 // the previous badgerCollector (add/count/createTempTable/ack/nack/close)
 // — the runtime calls through a small adapter.
 //
@@ -65,7 +65,8 @@ func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*s
 		return nil, fmt.Errorf("create staging table %q: %w", tableName, err)
 	}
 
-	// Recover inflight claims from previous runs. Same logic as badger:
+	// Recover inflight claims from previous runs. Same logic as the prior
+	// badger-backed implementation:
 	// already-committed claims (per _ondatra_acks in the main catalog) are
 	// discarded; uncommitted claims are reset to unclaimed for retry.
 	rows, err := db.Query(fmt.Sprintf(
@@ -113,7 +114,7 @@ func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*s
 	}
 
 	// Initialize seq counter to MAX(seq)+1 so per-process sequences stay
-	// monotonic across this run's writes (matches badger counter).
+	// monotonic across this run's writes.
 	var maxSeq sql.NullInt64
 	if err := db.QueryRow(fmt.Sprintf(`SELECT MAX(seq) FROM "%s"`, tableName)).Scan(&maxSeq); err != nil {
 		return nil, fmt.Errorf("read max seq: %w", err)
@@ -273,7 +274,7 @@ func (sc *stateCollector) nack(claimIDs []string) error {
 }
 
 // close is a no-op — the underlying State is owned by the caller and
-// closed by them. Provided for parity with the previous badger collector
+// closed by them. Provided for parity with the previous collector
 // API so the runtime's defer plumbing stays unchanged.
 func (sc *stateCollector) close() error {
 	return nil

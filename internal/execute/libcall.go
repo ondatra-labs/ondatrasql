@@ -21,11 +21,11 @@ import (
 // The static-analysis view (FuncName, CallIndex, Lib, ArgNodes, ASTNode)
 // lives in libcall.Call and is shared with the validate/describe paths.
 // Runtime-only fields (TempTable, ScriptResult) live here because they
-// are populated during materialize/Badger claim lifecycle.
+// are populated during materialize/state-store claim lifecycle.
 type LibCall struct {
 	libcall.Call
 	TempTable    string         // set after execution, used for AST rewrite
-	ScriptResult *script.Result // set after execution, for Badger claim lifecycle
+	ScriptResult *script.Result // set after execution, for state-store claim lifecycle
 }
 
 // detectLibCalls walks the AST for TABLE_FUNCTION nodes matching registered

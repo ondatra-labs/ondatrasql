@@ -17,7 +17,7 @@ import (
 
 const (
 	// SyncEventTTL is how long pending events are retained before periodic
-	// GC removes them. Matches the badger TTL.
+	// GC removes them.
 	SyncEventTTL = 7 * 24 * time.Hour
 
 	// SyncInflightMaxAge is the heartbeat-staleness threshold beyond which
@@ -44,8 +44,8 @@ func claimTimestamp(claimID string) (time.Time, error) {
 }
 
 // SyncStore tracks outbound sync state in state.duckdb. Replaces the
-// badger-backed implementation that previously lived in `internal/collect`.
-// Same external API, same crash-recovery semantics.
+// previous implementation that lived in `internal/collect`. Same
+// external API, same crash-recovery semantics.
 type SyncStore struct {
 	st        *State
 	counter   atomic.Uint64
@@ -103,8 +103,8 @@ func (s *SyncStore) Close() error {
 
 // RunGC removes events older than SyncEventTTL and returns to the unclaimed
 // pool any inflight rows whose heartbeat is older than SyncInflightMaxAge.
-// Replaces badger's value-log GC. Returns the first error encountered;
-// partial progress is rolled back via the transaction.
+// Returns the first error encountered; partial progress is rolled back
+// via the transaction.
 func (s *SyncStore) RunGC() error {
 	db := s.st.DB()
 	cutoff := time.Now().Add(-SyncEventTTL)
@@ -311,7 +311,7 @@ func (s *SyncStore) ReadAllEvents(target string) ([]SyncEvent, error) {
 // returns the claim ID + payload list. Callers process the events and
 // then call Ack/Nack/AckAndRequeue.
 //
-// Phase 1 of the badger implementation also recovered orphaned inflight
+// Phase 1 of the state-store implementation also recovered orphaned inflight
 // claims back to evt: in the same TX. We do that explicitly via RunGC
 // here — the caller can choose when to reap.
 func (s *SyncStore) Claim(target string, limit int) (string, []SyncEvent, error) {
@@ -528,7 +528,7 @@ func (s *SyncStore) RecoverOldInflight(target string) error {
 // workers so their inflight rows aren't reaped by RunGC.
 //
 // The ttl argument is ignored — heartbeat semantics now rely on the
-// SyncInflightMaxAge constant rather than per-claim TTLs (badger's
+// SyncInflightMaxAge constant rather than per-claim TTLs (state-store's
 // model). Kept in the signature for API compatibility.
 func (s *SyncStore) TouchClaim(claimID string, _ time.Duration) error {
 	if _, err := s.st.DB().Exec(
@@ -624,7 +624,7 @@ func (s *SyncStore) nextSeq() int64 {
 }
 
 // newClaimID returns a claim ID in the format "{nanoTimestamp}_{counter}"
-// matching the badger implementation. The format is parsed by
+// matching the state-store implementation. The format is parsed by
 // claimTimestamp for age-based recovery.
 func (s *SyncStore) newClaimID() string {
 	return fmt.Sprintf("%d_%d", time.Now().UnixNano(), s.counter.Add(1))
