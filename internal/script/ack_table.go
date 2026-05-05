@@ -29,7 +29,18 @@ func AckSQL(claimID, target string, rowCount int64) string {
 }
 
 // IsAcked checks if a claim ID has already been committed.
+//
+// EnsureAckTable runs first because the resume path in
+// internal/script/state_collector.go can call IsAcked BEFORE the first
+// materialize has had a chance to create the table. On a fresh project
+// where state.duckdb already has inflight claims from a prior crash but
+// no successful run has populated _ondatra_acks yet, the SELECT would
+// fail with a Catalog Error and crash-recovery would refuse to proceed.
+// CREATE IF NOT EXISTS is cheap and idempotent.
 func IsAcked(sess *duckdb.Session, claimID string) (bool, error) {
+	if err := EnsureAckTable(sess); err != nil {
+		return false, fmt.Errorf("ensure _ondatra_acks: %w", err)
+	}
 	result, err := sess.QueryValue(fmt.Sprintf(
 		"SELECT COUNT(*) FROM _ondatra_acks WHERE claim_id = '%s'",
 		escapeAckSQL(claimID)))
