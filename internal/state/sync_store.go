@@ -103,25 +103,23 @@ func (s *SyncStore) Close() error {
 
 // RunGC removes events older than SyncEventTTL and returns to the unclaimed
 // pool any inflight rows whose heartbeat is older than SyncInflightMaxAge.
-// Returns the first error encountered; partial progress is rolled back
-// via the transaction.
+// Returns the first error encountered; the entire pass — TTL purge plus
+// orphan recovery — runs inside a single transaction so callers either
+// see all four DELETE/INSERT statements committed or none.
 func (s *SyncStore) RunGC() error {
 	db := s.st.DB()
 	cutoff := time.Now().Add(-SyncEventTTL)
-	if _, err := db.Exec(`DELETE FROM sync_evt WHERE created_at < ?`, cutoff); err != nil {
-		return fmt.Errorf("expire sync_evt: %w", err)
-	}
-
 	hbCutoff := time.Now().Add(-SyncInflightMaxAge)
-	// Pull events from inflight tables for orphan claims back to sync_evt.
-	// DuckDB doesn't allow writing to two tables in one query — do it in
-	// two statements within an explicit transaction so they commit atomically.
+
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin gc tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err := tx.Exec(`DELETE FROM sync_evt WHERE created_at < ?`, cutoff); err != nil {
+		return fmt.Errorf("expire sync_evt: %w", err)
+	}
 	if _, err := tx.Exec(`
 		INSERT INTO sync_evt(target, seq, payload, created_at)
 		SELECT target, seq, payload, now()
@@ -360,6 +358,23 @@ func (s *SyncStore) Claim(target string, limit int) (string, []SyncEvent, error)
 		return "", nil, fmt.Errorf("move to inflight: %w", err)
 	}
 
+	// Count what actually moved. The pending check above is racy against
+	// a concurrent drain, so we re-verify here BEFORE committing — if
+	// zero rows ended up inflight we abandon the claim entirely (rollback)
+	// rather than commit a sync_claim row with no inflight, which would
+	// otherwise show up as a ghost tombstone for HasRecentInflight().
+	var moved int
+	if err := tx.QueryRow(
+		`SELECT count(*) FROM sync_inflight WHERE claim_id = ?`,
+		claimID).Scan(&moved); err != nil {
+		return "", nil, fmt.Errorf("count moved rows: %w", err)
+	}
+	if moved == 0 {
+		// Defer rollback runs and discards everything: the sync_claim
+		// INSERT, the empty INSERT-SELECT, the DELETE — all undone.
+		return "", nil, nil
+	}
+
 	if _, err := tx.Exec(`
 		DELETE FROM sync_evt
 		WHERE (target, seq) IN (
@@ -388,6 +403,13 @@ func (s *SyncStore) Claim(target string, limit int) (string, []SyncEvent, error)
 		}
 		events = append(events, ev)
 	}
+	// rows.Err() must be checked AFTER the loop — without it a cursor
+	// failure mid-iteration silently truncates the events slice and the
+	// caller acks/nacks a partial batch (silent data drop).
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", nil, fmt.Errorf("iterate claimed rows: %w", err)
+	}
 	if err := rows.Close(); err != nil {
 		return "", nil, fmt.Errorf("close payload rows: %w", err)
 	}
@@ -396,14 +418,6 @@ func (s *SyncStore) Claim(target string, limit int) (string, []SyncEvent, error)
 		return "", nil, fmt.Errorf("commit claim: %w", err)
 	}
 
-	// The pending check above guarantees events is non-empty here under
-	// normal operation. If a concurrent worker drained the queue between
-	// the count and the INSERT-SELECT, fall through cleanly: the claim
-	// row + zero inflight rows will be reaped by RunGC's heartbeat-stale
-	// path on the next pipeline run rather than left as a tombstone.
-	if len(events) == 0 {
-		return "", nil, nil
-	}
 	s.heartbeat.Store(claimID, time.Now())
 	return claimID, events, nil
 }
@@ -513,6 +527,10 @@ func (s *SyncStore) RecoverOldInflight(target string) error {
 			stale = append(stale, cid)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate inflight claims: %w", err)
+	}
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close cursor: %w", err)
 	}
@@ -528,17 +546,35 @@ func (s *SyncStore) RecoverOldInflight(target string) error {
 // workers so their inflight rows aren't reaped by RunGC.
 //
 // The ttl argument is ignored — heartbeat semantics now rely on the
-// SyncInflightMaxAge constant rather than per-claim TTLs (state-store's
-// model). Kept in the signature for API compatibility.
+// SyncInflightMaxAge constant rather than per-claim TTLs. Kept in the
+// signature for API compatibility.
+//
+// Returns ErrClaimNotFound when the claim no longer exists in
+// sync_claim (because RunGC reaped it, the worker was nack'd, or
+// somebody else acked the claim). The caller must treat that as
+// "ownership lost" and stop processing this claim — silently ignoring
+// it would mask split-brain conditions.
 func (s *SyncStore) TouchClaim(claimID string, _ time.Duration) error {
-	if _, err := s.st.DB().Exec(
+	res, err := s.st.DB().Exec(
 		`UPDATE sync_claim SET heartbeat = now() WHERE claim_id = ?`,
-		claimID); err != nil {
+		claimID)
+	if err != nil {
 		return fmt.Errorf("touch claim: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("touch claim rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrClaimNotFound
 	}
 	s.heartbeat.Store(claimID, time.Now())
 	return nil
 }
+
+// ErrClaimNotFound is returned by TouchClaim when the claim no longer
+// exists. Callers should stop processing the claim (ownership lost).
+var ErrClaimNotFound = fmt.Errorf("claim not found")
 
 // SaveJobRef stores per-target idempotency state (job reference + row
 // hash). Overwrites any previous entry for the target.

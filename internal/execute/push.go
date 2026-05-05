@@ -488,11 +488,18 @@ func (se *pushExecutor) queueDelta(store *state.SyncStore, target string, batchM
 func (se *pushExecutor) ackAll(store *state.SyncStore, claimID string, batchNum int, events []state.SyncEvent) batchOutcome {
 	target := "sync:" + se.model.Target
 
-	// Step 1: Record in DuckLake (survives state-store failures)
-	if err := writeSyncAck(se.runner.sess, claimID, target, int64(len(events))); err != nil {
-		// DuckLake write failed -- still ack state-store (push DID succeed)
-		se.result.Warnings = append(se.result.Warnings,
-			fmt.Sprintf("_sync_acked write failed (push succeeded): %v", err))
+	// Step 1: Record in DuckLake (survives state-store failures). This is
+	// the dedup marker — if it fails we MUST NOT proceed to ack the
+	// state-store, because then we'd have neither a _sync_acked row nor
+	// inflight rows, and the next run would silently re-push the same
+	// batch with no way to detect the duplicate.
+	syncAckErr := writeSyncAck(se.runner.sess, claimID, target, int64(len(events)))
+	if syncAckErr != nil {
+		return batchOutcome{
+			ok:     0,
+			failed: int64(len(events)),
+			err:    fmt.Errorf("batch %d: _sync_acked write failed (claim left inflight for retry): %w", batchNum, syncAckErr),
+		}
 	}
 
 	// Step 2: Ack state-store

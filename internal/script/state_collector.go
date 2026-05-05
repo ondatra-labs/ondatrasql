@@ -186,6 +186,20 @@ func (sc *stateCollector) createTempTable() (string, int64, []string, error) {
 
 	db := sc.st.DB()
 
+	// resetClaim un-claims rows for this claim_id so a transient failure
+	// after the UPDATE doesn't strand them as claimed-but-unprocessed.
+	// Surface reset failures alongside the original error rather than
+	// swallowing — operators need to know if the row state is now
+	// inconsistent.
+	resetClaim := func(orig error) error {
+		if _, resetErr := db.Exec(fmt.Sprintf(
+			`UPDATE "%s" SET claim_id = NULL WHERE claim_id = ?`,
+			sc.tableName), claimID); resetErr != nil {
+			return fmt.Errorf("%w (reset on failure also failed: %v)", orig, resetErr)
+		}
+		return orig
+	}
+
 	// Atomically mark all currently-unclaimed rows for this target as
 	// belonging to this claim.
 	if _, err := db.Exec(fmt.Sprintf(
@@ -198,7 +212,7 @@ func (sc *stateCollector) createTempTable() (string, int64, []string, error) {
 		`SELECT payload FROM "%s" WHERE claim_id = ? ORDER BY seq`,
 		sc.tableName), claimID)
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("query claimed rows: %w", err)
+		return "", 0, nil, resetClaim(fmt.Errorf("query claimed rows: %w", err))
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -206,16 +220,16 @@ func (sc *stateCollector) createTempTable() (string, int64, []string, error) {
 	for rows.Next() {
 		var payload []byte
 		if err := rows.Scan(&payload); err != nil {
-			return "", 0, nil, fmt.Errorf("scan payload: %w", err)
+			return "", 0, nil, resetClaim(fmt.Errorf("scan payload: %w", err))
 		}
 		var row map[string]any
 		if err := json.Unmarshal(payload, &row); err != nil {
-			return "", 0, nil, fmt.Errorf("unmarshal payload: %w", err)
+			return "", 0, nil, resetClaim(fmt.Errorf("unmarshal payload: %w", err))
 		}
 		events = append(events, row)
 	}
 	if err := rows.Err(); err != nil {
-		return "", 0, nil, fmt.Errorf("iterate claimed rows: %w", err)
+		return "", 0, nil, resetClaim(fmt.Errorf("iterate claimed rows: %w", err))
 	}
 
 	if len(events) == 0 {

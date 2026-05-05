@@ -419,7 +419,23 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				continue
 			}
 			if !libClaimsAcked && len(sr.ClaimIDs) > 0 {
-				_ = sr.NackClaims() // claim retries on next run if Nack fails
+				// Only nack claims that are NOT already committed to
+				// lake. After materialize commits, _ondatra_acks holds
+				// the ack record; nacking those resets staging
+				// claim_id but leaves the ack record orphaned, and the
+				// next run can re-process the same rows under a new
+				// claim_id (silent duplicates). IsAcked discriminates.
+				toNack := sr.ClaimIDs[:0]
+				for _, cid := range sr.ClaimIDs {
+					acked, ackErr := script.IsAcked(r.sess, cid)
+					if ackErr != nil || !acked {
+						toNack = append(toNack, cid)
+					}
+				}
+				if len(toNack) > 0 {
+					sr.ClaimIDs = toNack
+					_ = sr.NackClaims() // claim retries on next run if Nack fails
+				}
 			}
 			_ = sr.Close() // cleanup path; close error secondary
 		}

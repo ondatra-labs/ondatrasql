@@ -57,24 +57,23 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 	// Open .ondatra/state.duckdb once for the entire DAG. DuckDB takes a
 	// process-level file lock; opening per-Runner would conflict mid-DAG.
 	// Run GC before sharing the handle with model runners.
+	//
+	// State open is fatal — without state.duckdb every fetch/push model
+	// will fail anyway. GC is non-fatal: a failed cleanup pass is
+	// surfaced as a `_gc` error key in the result map but the DAG runs
+	// to completion.
 	var sharedState *state.State
+	gcErrToSurface := error(nil)
 	if projectDir != "" {
-		if st, err := state.Open(projectDir); err == nil {
-			if gcErr := state.GC(st); gcErr != nil {
-				// GC failure is non-fatal: log via the validation slot so
-				// it surfaces in JSON output without halting the DAG.
-				errors := make(map[string]error)
-				errors["_gc"] = fmt.Errorf("state GC: %w", gcErr)
-				_ = st.Close()
-				return nil, errors
-			}
-			sharedState = st
-			defer func() { _ = sharedState.Close() }()
-		} else {
+		st, err := state.Open(projectDir)
+		if err != nil {
 			errors := make(map[string]error)
 			errors["_validation"] = fmt.Errorf("open state.duckdb: %w", err)
 			return nil, errors
 		}
+		gcErrToSurface = state.GC(st)
+		sharedState = st
+		defer func() { _ = sharedState.Close() }()
 	}
 
 	cfgHash := backfill.ConfigHash(filepath.Join(projectDir, "config"))
@@ -87,6 +86,9 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 
 	results := make(map[string]*Result, len(sorted))
 	errors := make(map[string]error, len(sorted))
+	if gcErrToSurface != nil {
+		errors["_gc"] = fmt.Errorf("state GC: %w", gcErrToSurface)
+	}
 	failed := make(map[string]bool) // targets that failed or were skipped due to upstream failure
 
 	for _, model := range sorted {
