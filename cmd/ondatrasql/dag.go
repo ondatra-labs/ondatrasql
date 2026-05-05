@@ -177,6 +177,13 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 	if validationErr, ok := dagErrs["_validation"]; ok {
 		return fmt.Errorf("dag pre-flight: %w", validationErr)
 	}
+	// _gc errors are non-fatal — RunDAG ran the pipeline anyway — but
+	// they shouldn't be silent because a failed GC pass means stale
+	// orphaned inflight rows or unconsumed apply_log entries are
+	// accumulating. Print as a warning so operators see the regression.
+	if gcErr, ok := dagErrs["_gc"]; ok && !output.JSONEnabled {
+		output.Fprintf("warning: %v (pipeline ran anyway; rerun GC at next pipeline start)\n", gcErr)
+	}
 
 	// Honour ctx cancellation. RunDAG returns partial results on SIGINT
 	// without a per-target error, so without this check the run would

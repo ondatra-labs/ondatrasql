@@ -491,13 +491,13 @@ func (se *pushExecutor) readRowsByEvents(events []state.SyncEvent) ([]map[string
 func applyPushOutcomesWithRetry(store *state.SyncStore, claimID, target string, classified *perRowResult, deleteJobRef bool) error {
 	outcomes := make([]state.EventOutcome, 0, len(classified.OK)+len(classified.Failed)+len(classified.Rejected))
 	for _, ev := range classified.OK {
-		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: "ok"})
+		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: state.OutcomeOK})
 	}
 	for _, ev := range classified.Failed {
-		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: "failed"})
+		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: state.OutcomeFailed})
 	}
 	for _, ev := range classified.Rejected {
-		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: "reject"})
+		outcomes = append(outcomes, state.EventOutcome{Event: ev, Status: state.OutcomeReject})
 	}
 
 	if err := store.RecordPushOutcomes(claimID, target, outcomes, deleteJobRef); err != nil {
@@ -506,7 +506,7 @@ func applyPushOutcomesWithRetry(store *state.SyncStore, claimID, target string, 
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if err := store.ApplyLoggedOutcomes(claimID, target); err == nil {
+		if err := store.ApplyLoggedOutcomes(claimID); err == nil {
 			return nil
 		} else {
 			lastErr = err
