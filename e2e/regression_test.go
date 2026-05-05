@@ -452,10 +452,14 @@ SELECT id::BIGINT AS id, val::VARCHAR AS val FROM source_test()
 }
 
 // ---------------------------------------------------------------------------
-// Bug 7: badgerCollector defer cleanup on error
+// Bug 7: state-collector defer cleanup on error
+// (Originally a Badger-collector regression; the underlying state store
+//  was rewritten on top of state.duckdb in v0.33, but the contract that a
+//  failing lib() call must not leak resources or wedge the session is
+//  unchanged. Test kept with renamed identifiers.)
 // ---------------------------------------------------------------------------
 
-func TestRegression_BadgerCollector_CleanupOnError(t *testing.T) {
+func TestRegression_StateCollector_CleanupOnError(t *testing.T) {
 	p := testutil.NewProject(t)
 
 	// Create a lib that fails during fetch

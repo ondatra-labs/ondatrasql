@@ -1,5 +1,0 @@
-claimed_count: 3
-  customer_id=c1 operation=upsert
-  customer_id=c2 operation=upsert
-  customer_id=c3 operation=delete
-remaining_after_ack: 0
