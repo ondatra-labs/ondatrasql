@@ -19,7 +19,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.32.0"
+var version = "0.33.0"
 
 // exitCoder is implemented by errors that map to a specific process exit
 // code. Used by main() to honour the validate-style 0/1/2 contract.
