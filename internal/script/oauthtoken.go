@@ -6,6 +6,7 @@ package script
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
@@ -31,9 +32,11 @@ type tokenProvider struct {
 	// Config for Google service account flow
 	googleSAKey *ServiceAccountKey
 
-	// Config for provider flow (via oauth2.ondatra.sh)
-	provider   string
-	projectDir string
+	// Config for provider flow (via oauth2.ondatra.sh).
+	// stateDB is the state-session handle where the encrypted-at-rest
+	// tokens table lives; nil when this provider isn't OAuth-managed.
+	provider string
+	stateDB  *sql.DB
 
 	// Cached token state
 	accessToken string
@@ -111,7 +114,10 @@ func (tp *tokenProvider) fetchToken() (map[string]interface{}, error) {
 }
 
 func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
-	tokenFile, err := oauth2host.ReadToken(tp.projectDir, tp.provider)
+	if tp.stateDB == nil {
+		return nil, fmt.Errorf("oauth provider %q requested but state handle missing (auth flow requires state.duckdb)", tp.provider)
+	}
+	tokenFile, err := oauth2host.ReadToken(tp.stateDB, tp.provider)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +141,7 @@ func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
 		}
 		// Save new refresh token locally
 		if result.RefreshToken != "" {
-			if err := oauth2host.WriteLocalToken(tp.projectDir, tp.provider, result.RefreshToken, tokenFile.TokenURL); err != nil {
+			if err := oauth2host.WriteLocalToken(tp.stateDB, tp.provider, result.RefreshToken, tokenFile.TokenURL); err != nil {
 				return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
 			}
 		}
@@ -152,7 +158,7 @@ func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
 		}
 		// Save new refresh token (managed)
 		if result.RefreshToken != "" {
-			if err := oauth2host.WriteToken(tp.projectDir, tp.provider, result.RefreshToken); err != nil {
+			if err := oauth2host.WriteToken(tp.stateDB, tp.provider, result.RefreshToken); err != nil {
 				return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
 			}
 		}

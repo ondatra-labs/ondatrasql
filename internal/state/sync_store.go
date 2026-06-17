@@ -53,75 +53,10 @@ type SyncStore struct {
 }
 
 // NewSyncStore returns a SyncStore that uses the supplied State for
-// storage. The four backing tables (sync_evt, sync_inflight, sync_claim,
-// sync_jobref) are created if missing.
+// storage. The backing tables (sync_evt, sync_inflight, sync_claim,
+// sync_jobref, sync_apply_log) are created by state.Open via
+// internal/sql/state/init.sql — this constructor is now stateless.
 func NewSyncStore(st *State) (*SyncStore, error) {
-	db := st.DB()
-
-	createStmts := []string{
-		`CREATE TABLE IF NOT EXISTS sync_evt (
-			target VARCHAR NOT NULL,
-			seq BIGINT NOT NULL,
-			payload BLOB NOT NULL,
-			created_at TIMESTAMP DEFAULT now(),
-			PRIMARY KEY (target, seq)
-		)`,
-		`CREATE TABLE IF NOT EXISTS sync_inflight (
-			claim_id VARCHAR NOT NULL,
-			target VARCHAR NOT NULL,
-			seq BIGINT NOT NULL,
-			payload BLOB NOT NULL,
-			PRIMARY KEY (claim_id, target, seq)
-		)`,
-		`CREATE TABLE IF NOT EXISTS sync_claim (
-			claim_id VARCHAR PRIMARY KEY,
-			target VARCHAR NOT NULL,
-			claimed_at TIMESTAMP DEFAULT now(),
-			heartbeat TIMESTAMP DEFAULT now()
-		)`,
-		`CREATE TABLE IF NOT EXISTS sync_jobref (
-			target VARCHAR PRIMARY KEY,
-			job_ref BLOB,
-			row_hash VARCHAR,
-			updated_at TIMESTAMP DEFAULT now()
-		)`,
-		// sync_apply_log persists per-row push() classifications BEFORE
-		// AckAndRequeue mutates sync_inflight / sync_evt. This makes the
-		// classify-then-apply step idempotent: if AckAndRequeue's TX
-		// fails (transient DuckDB error, crash), the log survives and
-		// the next attempt can replay the same per-row decisions
-		// instead of falling back to a destructive nackAll that
-		// resurrects ok/rejected events.
-		//
-		// The log is self-contained — payload is duplicated from
-		// sync_inflight so apply doesn't need to JOIN back to inflight
-		// (which may already be partially gone after a crash).
-		//
-		// `ord` is a per-claim ordinal assigned at record time. It's
-		// the only thing that has to be unique within a claim — there's
-		// no semantic relation to sync_inflight.seq or to SyncEvent.RowID
-		// (a single batch can have insert + update_postimage + update_preimage
-		// for the same RowID, which would collide on rid alone).
-		//
-		// Status values: 'ok' (delivered, ack), 'failed' (retry, requeue
-		// to sync_evt), 'reject' (permanent, ack and drop).
-		`CREATE TABLE IF NOT EXISTS sync_apply_log (
-			claim_id VARCHAR NOT NULL,
-			target VARCHAR NOT NULL,
-			ord BIGINT NOT NULL,
-			payload BLOB NOT NULL,
-			status VARCHAR NOT NULL,
-			delete_jobref BOOLEAN DEFAULT false,
-			recorded_at TIMESTAMP DEFAULT now(),
-			PRIMARY KEY (claim_id, ord)
-		)`,
-	}
-	for _, stmt := range createStmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return nil, fmt.Errorf("create sync table: %w", err)
-		}
-	}
-
 	return &SyncStore{st: st}, nil
 }
 

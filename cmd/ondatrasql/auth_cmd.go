@@ -14,13 +14,22 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/browser"
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 )
+
+// openProjectState opens the state catalog using config/state.sql. Used
+// by the auth flow to read/write tokens against the encrypted state
+// database without depending on the runner setup.
+func openProjectState(cfg *config.Config) (*state.State, error) {
+	return state.Open(filepath.Join(cfg.ProjectDir, "config"))
+}
 
 func runAuthList(ctx context.Context) error {
 	if os.Getenv("ONDATRA_KEY") != "" {
@@ -158,7 +167,12 @@ func runAuthManaged(ctx context.Context, cfg *config.Config, provider string) er
 			refreshToken = decrypted
 			output.Fprintf("Token decrypted locally (end-to-end encrypted)\n")
 
-			if err := oauth2host.WriteToken(cfg.ProjectDir, provider, refreshToken); err != nil {
+			st, err := openProjectState(cfg)
+			if err != nil {
+				return fmt.Errorf("open state: %w", err)
+			}
+			defer func() { _ = st.Close() }()
+			if err := oauth2host.WriteToken(st.DB(), provider, refreshToken); err != nil {
 				return fmt.Errorf("save token: %w", err)
 			}
 
@@ -283,7 +297,12 @@ func runAuthLocal(ctx context.Context, cfg *config.Config, provider string) erro
 	}
 
 	// Save with local flag
-	if err := oauth2host.WriteLocalToken(cfg.ProjectDir, provider, result.RefreshToken, tokenURL); err != nil {
+	st, err := openProjectState(cfg)
+	if err != nil {
+		return fmt.Errorf("open state: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := oauth2host.WriteLocalToken(st.DB(), provider, result.RefreshToken, tokenURL); err != nil {
 		return fmt.Errorf("save token: %w", err)
 	}
 

@@ -13,9 +13,10 @@ func TestInitTemplates_NonEmpty(t *testing.T) {
 	t.Parallel()
 	// Every init template function should return non-empty content
 	templates := map[string]func() string{
-		"initDotEnv":     initDotEnv,
+		"initDotEnv":     func() string { return initDotEnv("TEST_KEY") },
 		"initGitignore":  initGitignore,
 		"initCatalog":    initCatalog,
+		"initState":      initState,
 		"initExtensions": initExtensions,
 		"initMacroHelpers":     func() string { return initMacroFile("macros_helpers.sql") },
 		"initMacroConstraints": func() string { return initMacroFile("macros_constraint.sql") },

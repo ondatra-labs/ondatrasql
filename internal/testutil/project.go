@@ -37,6 +37,11 @@ func NewProject(t *testing.T) *Project {
 	WriteFile(t, dir, "config/catalog.sql",
 		"ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n")
 
+	// State catalog: unencrypted local file. state.Open requires
+	// config/state.sql, so every test project must ship one.
+	WriteFile(t, dir, "config/state.sql",
+		"ATTACH '"+filepath.Join(dir, "state.duckdb")+"' AS state;\n")
+
 	// Load validation macros into config/macros/ directory
 	for _, name := range []string{"macros_helpers.sql", "macros_masking.sql", "macros_constraint.sql", "macros_audit.sql", "macros_warning.sql"} {
 		content, _ := sqlfiles.Load("init/" + name)

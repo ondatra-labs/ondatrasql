@@ -7,6 +7,8 @@ package execute
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,26 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
+
+// openTestState writes a minimal config/state.sql in a fresh temp dir
+// (attaching an unencrypted local state.duckdb) and opens the state
+// session. Used by tests that just need a working state handle.
+func openTestState(t *testing.T) *state.State {
+	t.Helper()
+	configDir := t.TempDir()
+	dbFile := filepath.Join(t.TempDir(), "state.duckdb")
+	//escapesqlcheck:trusted-input dbFile is t.TempDir() — test-controlled, no user input
+	sqlText := fmt.Sprintf("ATTACH '%s' AS state;\n", dbFile)
+	if err := os.WriteFile(filepath.Join(configDir, "state.sql"), []byte(sqlText), 0o644); err != nil {
+		t.Fatalf("write state.sql: %v", err)
+	}
+	st, err := state.Open(configDir)
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 // --- newRateLimiter: zero/negative requests ---
 
@@ -923,11 +945,7 @@ func TestCreatePushDelta_EmptyPush(t *testing.T) {
 func TestMergeBacklogWithDelta_DedupOnCompositeKey(t *testing.T) {
 	t.Parallel()
 
-	st, err := state.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("state.Open: %v", err)
-	}
-	defer func() { _ = st.Close() }()
+	st := openTestState(t)
 	store, err := state.NewSyncStore(st)
 	if err != nil {
 		t.Fatalf("OpenSyncStore: %v", err)
@@ -1082,11 +1100,7 @@ func TestQueueDelta_PathSelection(t *testing.T) {
 	// return the store. Caller closes.
 	openWithBacklog := func(t *testing.T) (*state.SyncStore, string) {
 		t.Helper()
-		st, err := state.Open(t.TempDir())
-		if err != nil {
-			t.Fatalf("state.Open: %v", err)
-		}
-		t.Cleanup(func() { _ = st.Close() })
+		st := openTestState(t)
 		store, err := state.NewSyncStore(st)
 		if err != nil {
 			t.Fatalf("OpenSyncStore: %v", err)

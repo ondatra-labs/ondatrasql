@@ -6,6 +6,7 @@ package script
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -64,14 +65,14 @@ func httpModule(ctx context.Context, apiConfig ...*apiHTTPConfig) *starlarkstruc
 
 // APIHTTPConfig holds defaults injected into every http.* call from the API dict.
 type APIHTTPConfig struct {
-	BaseURL    string
-	Headers    map[string]string
-	Timeout    int // seconds, 0 = use default
-	Retry      int
-	Backoff    int
-	Auth       map[string]any // auth config from API dict
-	ProjectDir string         // for OAuth provider flow
-	Ctx        context.Context // for OAuth provider flow
+	BaseURL string
+	Headers map[string]string
+	Timeout int // seconds, 0 = use default
+	Retry   int
+	Backoff int
+	Auth    map[string]any  // auth config from API dict
+	StateDB *sql.DB         // state-session handle, for OAuth provider flow
+	Ctx     context.Context // for OAuth provider flow
 }
 
 // apiHTTPConfig is an alias for internal use.
@@ -134,9 +135,9 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 	// provider: OAuth2 managed token (refreshes automatically)
 	if provider, ok := auth["provider"].(string); ok && provider != "" {
 		tp := &tokenProvider{
-			ctx:        cfg.Ctx,
-			provider:   provider,
-			projectDir: cfg.ProjectDir,
+			ctx:      cfg.Ctx,
+			provider: provider,
+			stateDB:  cfg.StateDB,
 		}
 		tok, err := tp.AccessToken()
 		if err != nil {

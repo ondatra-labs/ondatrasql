@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	_ "github.com/duckdb/duckdb-go/v2"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
@@ -54,9 +57,21 @@ func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
+// writeStateConfig writes a minimal config/state.sql in dir so auth
+// commands can open state without a full project init.
+func writeStateConfig(t *testing.T, dir string) {
+	t.Helper()
+	os.MkdirAll(filepath.Join(dir, "config"), 0755)
+	dbFile := filepath.Join(dir, "state.duckdb")
+	sqlText := "ATTACH '" + dbFile + "' AS state;\n"
+	if err := os.WriteFile(filepath.Join(dir, "config", "state.sql"), []byte(sqlText), 0o644); err != nil {
+		t.Fatalf("write state.sql: %v", err)
+	}
+}
+
 func TestRunAuth_Success(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "config"), 0755)
+	writeStateConfig(t, dir)
 
 	var pollCount atomic.Int32
 	var capturedEphemeralKey string
@@ -104,15 +119,18 @@ func TestRunAuth_Success(t *testing.T) {
 		t.Fatalf("runAuth: %v", err)
 	}
 
-	// Verify token was saved
-	data, err := os.ReadFile(filepath.Join(dir, ".ondatra", "tokens", "test-provider.json"))
+	// Verify token landed in state.tokens
+	db, err := sql.Open("duckdb", filepath.Join(dir, "state.duckdb"))
 	if err != nil {
-		t.Fatalf("token file not found: %v", err)
+		t.Fatalf("open state.duckdb: %v", err)
 	}
-	var tf map[string]interface{}
-	json.Unmarshal(data, &tf)
-	if tf["refresh_token"] != "RT_success" {
-		t.Errorf("refresh_token = %q, want RT_success", tf["refresh_token"])
+	defer db.Close()
+	var refresh string
+	if err := db.QueryRow(`SELECT refresh_token FROM tokens WHERE provider = 'test-provider'`).Scan(&refresh); err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	if refresh != "RT_success" {
+		t.Errorf("refresh_token = %q, want RT_success", refresh)
 	}
 }
 
@@ -336,8 +354,6 @@ func TestRunAuthLocal_MissingEnv(t *testing.T) {
 // ExchangeCode + WriteLocalToken. The full localhost callback flow with browser
 // is tested manually and in e2e.
 func TestRunAuthLocal_Success(t *testing.T) {
-	dir := t.TempDir()
-
 	// Mock token endpoint
 	tokenSrv := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
@@ -364,14 +380,28 @@ func TestRunAuthLocal_Success(t *testing.T) {
 		t.Errorf("refresh_token = %q", result.RefreshToken)
 	}
 
-	// Save as local token
-	err = oauth2host.WriteLocalToken(dir, "testlocal", result.RefreshToken, tokenSrv.URL)
+	// Save as local token. WriteLocalToken now operates against the
+	// state-session DB; build a minimal in-memory one for the test.
+	db, err := sql.Open("duckdb", "")
 	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE tokens (
+		provider VARCHAR PRIMARY KEY,
+		refresh_token VARCHAR NOT NULL,
+		local BOOLEAN DEFAULT false,
+		token_url VARCHAR,
+		updated_at TIMESTAMP DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create tokens: %v", err)
+	}
+
+	if err := oauth2host.WriteLocalToken(db, "testlocal", result.RefreshToken, tokenSrv.URL); err != nil {
 		t.Fatalf("WriteLocalToken: %v", err)
 	}
 
-	// Verify
-	tf, err := oauth2host.ReadToken(dir, "testlocal")
+	tf, err := oauth2host.ReadToken(db, "testlocal")
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}

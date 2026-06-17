@@ -628,8 +628,6 @@ SELECT 1 AS id`)
 		{"lineage_extra", []string{"lineage", "staging.x", "extra"}, "extra args"},
 		{"sql_extra_positional", []string{"sql", "SELECT 1", "extra"}, "unexpected argument"},
 		{"history_extra_model", []string{"history", "a", "b"}, "unexpected argument"},
-		{"schedule_install_extra", []string{"schedule", "*/5 * * * *", "extra"}, "extra args"},
-		{"schedule_remove_extra", []string{"schedule", "remove", "extra"}, "extra args"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

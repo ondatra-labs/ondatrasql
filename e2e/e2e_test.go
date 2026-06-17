@@ -19,9 +19,10 @@ import (
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
-	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
+	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	statepkg "github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
 
@@ -2448,13 +2449,19 @@ func TestE2E_OAuthProviderFlow(t *testing.T) {
 	}
 
 	// --- Step 4: Save token ---
-	err = oauth2host.WriteToken(p.Dir, "mock-provider", result.RefreshToken)
+	st, err := statepkg.Open(filepath.Join(p.Dir, "config"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	err = oauth2host.WriteToken(st.DB(), "mock-provider", result.RefreshToken)
 	if err != nil {
 		t.Fatalf("WriteToken: %v", err)
 	}
 
 	// --- Step 5: Verify token file ---
-	tf, err := oauth2host.ReadToken(p.Dir, "mock-provider")
+	tf, err := oauth2host.ReadToken(st.DB(), "mock-provider")
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}
@@ -2475,11 +2482,11 @@ func TestE2E_OAuthProviderFlow(t *testing.T) {
 	}
 
 	// --- Step 7: Save rotated token ---
-	err = oauth2host.WriteToken(p.Dir, "mock-provider", refreshResult.RefreshToken)
+	err = oauth2host.WriteToken(st.DB(), "mock-provider", refreshResult.RefreshToken)
 	if err != nil {
 		t.Fatalf("WriteToken rotated: %v", err)
 	}
-	tf2, _ := oauth2host.ReadToken(p.Dir, "mock-provider")
+	tf2, _ := oauth2host.ReadToken(st.DB(), "mock-provider")
 	if tf2.RefreshToken != "RT_rotated" {
 		t.Errorf("rotated refresh_token = %q, want RT_rotated", tf2.RefreshToken)
 	}

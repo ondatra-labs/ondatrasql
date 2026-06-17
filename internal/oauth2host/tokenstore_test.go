@@ -5,11 +5,32 @@
 package oauth2host
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
+	"database/sql"
 	"testing"
+
+	_ "github.com/duckdb/duckdb-go/v2"
 )
+
+// newTestStore returns an in-memory DuckDB session with the tokens
+// table created. Mirrors how state.Open prepares a real session.
+func newTestStore(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE tokens (
+		provider VARCHAR PRIMARY KEY,
+		refresh_token VARCHAR NOT NULL,
+		local BOOLEAN DEFAULT false,
+		token_url VARCHAR,
+		updated_at TIMESTAMP DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create tokens: %v", err)
+	}
+	return db
+}
 
 func TestValidateProvider(t *testing.T) {
 	t.Parallel()
@@ -21,14 +42,14 @@ func TestValidateProvider(t *testing.T) {
 		{"hub-spot", false},
 		{"my-provider-123", false},
 		{"ab", false},
-		{"a", true},           // too short
-		{"-bad", true},        // starts with hyphen
-		{"bad-", true},        // ends with hyphen
-		{"Bad", true},         // uppercase
-		{"../evil", true},     // path traversal
-		{"foo/bar", true},     // slash
-		{"foo bar", true},     // space
-		{"", true},            // empty
+		{"a", true},       // too short
+		{"-bad", true},    // starts with hyphen
+		{"bad-", true},    // ends with hyphen
+		{"Bad", true},     // uppercase
+		{"../evil", true}, // path traversal
+		{"foo/bar", true}, // slash
+		{"foo bar", true}, // space
+		{"", true},        // empty
 	}
 	for _, tt := range tests {
 		err := ValidateProvider(tt.name)
@@ -40,26 +61,13 @@ func TestValidateProvider(t *testing.T) {
 
 func TestWriteAndReadToken(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	db := newTestStore(t)
 
-	err := WriteToken(dir, "fortnox", "RT_test123")
-	if err != nil {
+	if err := WriteToken(db, "fortnox", "RT_test123"); err != nil {
 		t.Fatalf("WriteToken: %v", err)
 	}
 
-	// Check file exists with correct permissions
-	path := filepath.Join(dir, ".ondatra", "tokens", "fortnox.json")
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("token file not found: %v", err)
-	}
-	// Windows doesn't honor Unix file mode bits
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
-		t.Errorf("permissions = %o, want 0600", info.Mode().Perm())
-	}
-
-	// Read it back
-	tf, err := ReadToken(dir, "fortnox")
+	tf, err := ReadToken(db, "fortnox")
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}
@@ -69,39 +77,41 @@ func TestWriteAndReadToken(t *testing.T) {
 	if tf.RefreshToken != "RT_test123" {
 		t.Errorf("refresh_token = %q, want RT_test123", tf.RefreshToken)
 	}
-	if tf.UpdatedAt == 0 {
-		t.Error("updated_at should be set")
+	if tf.Local {
+		t.Error("expected Local = false for WriteToken")
 	}
 }
 
 func TestReadToken_NotFound(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	db := newTestStore(t)
 
-	_, err := ReadToken(dir, "nonexistent")
-	if err == nil {
+	if _, err := ReadToken(db, "nonexistent"); err == nil {
 		t.Fatal("expected error for missing token")
 	}
 }
 
 func TestWriteToken_InvalidProvider(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	db := newTestStore(t)
 
-	err := WriteToken(dir, "../evil", "token")
-	if err == nil {
+	if err := WriteToken(db, "../evil", "token"); err == nil {
 		t.Fatal("expected error for invalid provider name")
 	}
 }
 
 func TestWriteToken_Overwrite(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	db := newTestStore(t)
 
-	WriteToken(dir, "fortnox", "old_token")
-	WriteToken(dir, "fortnox", "new_token")
+	if err := WriteToken(db, "fortnox", "old_token"); err != nil {
+		t.Fatalf("first WriteToken: %v", err)
+	}
+	if err := WriteToken(db, "fortnox", "new_token"); err != nil {
+		t.Fatalf("second WriteToken: %v", err)
+	}
 
-	tf, err := ReadToken(dir, "fortnox")
+	tf, err := ReadToken(db, "fortnox")
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}
@@ -112,14 +122,13 @@ func TestWriteToken_Overwrite(t *testing.T) {
 
 func TestWriteAndReadLocalToken(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	db := newTestStore(t)
 
-	err := WriteLocalToken(dir, "fortnox", "RT_local", "https://apps.fortnox.se/oauth-v1/token")
-	if err != nil {
+	if err := WriteLocalToken(db, "fortnox", "RT_local", "https://apps.fortnox.se/oauth-v1/token"); err != nil {
 		t.Fatalf("WriteLocalToken: %v", err)
 	}
 
-	tf, err := ReadToken(dir, "fortnox")
+	tf, err := ReadToken(db, "fortnox")
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}

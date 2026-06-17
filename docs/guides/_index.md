@@ -1,5 +1,5 @@
 ---
-description: Step-by-step guides for OndatraSQL features. Learn how to preview changes, schedule pipelines, sync to APIs, and more.
+description: Step-by-step guides for OndatraSQL features. Learn how to preview changes, sync to APIs, and more.
 draft: false
 title: Guides
 weight: 30
@@ -11,6 +11,5 @@ Step-by-step guides. Each guide walks through a specific task.
 - [Set Up OAuth Authentication](/guides/set-up-oauth/): authenticate with OAuth providers for API access
 - [Sync Data to External APIs](/guides/outbound-sync/): push data with change detection
 - [Preview Changes](/guides/preview-changes/): run the full pipeline against a temporary catalog
-- [Schedule Pipeline Runs](/guides/schedule-pipeline-runs/): install OS-native cron for automated runs
 - [Maintain DuckLake Storage](/guides/maintain-ducklake-storage/): compact files, expire snapshots, clean up
 - [Mask Sensitive Columns](/guides/mask-sensitive-columns/): apply mask, hash, or redact tags

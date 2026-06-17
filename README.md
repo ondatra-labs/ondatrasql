@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>A data pipeline runtime for DuckDB and DuckLake</b><br>
-  Ingestion, transformation, validation, and scheduling in a single binary.
+  Ingestion, transformation, and validation in a single binary.
 </p>
 
 <p align="center">
@@ -144,7 +144,6 @@ All models execute in the same pipeline and share the same dependency graph.
 | Validation | 30 constraint macros, 18 audit macros, 14 warning macros |
 | Schema evolution | Automatic via ALTER TABLE (metadata-only in DuckLake) |
 | Sandbox preview | Full DAG simulation before committing |
-| Scheduling | OS-native cron via systemd (Linux) or launchd (macOS) |
 | Column lineage | Extracted from SQL AST |
 
 ## Design
@@ -156,7 +155,6 @@ OndatraSQL executes on a single machine using DuckDB. It is not a distributed sy
 ```text
 run [model]          Execute pipeline or specific model
 sandbox [model]      Preview changes before committing
-schedule [cron]      Install OS-native scheduler
 auth [provider]      Authenticate with OAuth2 providers
 new <model>          Create a model file
 edit <target>        Open file in $EDITOR

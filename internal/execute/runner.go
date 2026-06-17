@@ -7,6 +7,7 @@ package execute
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,13 +130,24 @@ func (r *Runner) getStateStore() (*state.State, error) {
 	if r.projectDir == "" {
 		return nil, nil
 	}
-	st, err := state.Open(r.projectDir)
+	st, err := state.Open(filepath.Join(r.projectDir, "config"))
 	if err != nil {
-		return nil, fmt.Errorf("open state.duckdb: %w", err)
+		return nil, fmt.Errorf("open state: %w", err)
 	}
 	r.stateStore = st
 	r.stateOwned = true
 	return st, nil
+}
+
+// stateDB returns the underlying *sql.DB handle for state, or nil if
+// no state store is configured. Used to thread the handle into OAuth
+// flows via APIHTTPConfig.StateDB without forcing every call site to
+// own state-error handling.
+func (r *Runner) stateDB() *sql.DB {
+	if r.stateStore == nil {
+		return nil
+	}
+	return r.stateStore.DB()
 }
 
 // CloseState closes the state.duckdb handle iff this Runner opened it
@@ -627,7 +639,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					var scriptResult *script.Result
 					var runErr error
 					if call.Lib.APIConfig != nil {
-						httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.projectDir)
+						httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.stateDB())
 						if call.Lib.FetchMode == "async" {
 							// Async fetch: submit() → check() → fetch_result()
 							pollInterval := 5 * time.Second

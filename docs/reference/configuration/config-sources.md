@@ -2,7 +2,7 @@
 description: Query external databases directly in OndatraSQL via DuckDB's attach mechanism. Connect PostgreSQL, MySQL, and other sources for use in SQL models.
 draft: false
 title: sources.sql
-weight: 7
+weight: 8
 ---
 **Sources: attach external databases**
 

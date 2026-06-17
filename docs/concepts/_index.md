@@ -14,4 +14,5 @@ How OndatraSQL works.
 - [Schema Evolution](/concepts/schema-evolution/): additive and destructive changes without migration
 - [Dependency Graph](/concepts/dag/): automatic execution order from SQL references
 - [Outbound Sync](/concepts/outbound-sync/): why commit-first and at-least-once delivery
+- [State](/concepts/state/): the push queue, fetch staging, and OAuth tokens — separate from DuckLake
 - [Validation](/concepts/validation/): constraints, audits, and warnings at three stages

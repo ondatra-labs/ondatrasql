@@ -5,6 +5,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +14,16 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
+
+// newStateKey returns a fresh base64-encoded 32-byte key suitable for
+// DuckDB's ENCRYPTION_KEY option (AES-GCM-256).
+func newStateKey() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
+}
 
 func runInit() error {
 	// Initialize in the current directory
@@ -48,11 +60,17 @@ func runInit() error {
 		}
 	}
 
+	stateKey, err := newStateKey()
+	if err != nil {
+		return fmt.Errorf("generate state encryption key: %w", err)
+	}
+
 	// Write all template files
 	files := map[string]string{
-		".env":                  initDotEnv(),
+		".env":                  initDotEnv(stateKey),
 		".gitignore":            initGitignore(),
 		"config/catalog.sql":    initCatalog(),
+		"config/state.sql":      initState(),
 		"config/extensions.sql": initExtensions(),
 		"config/macros/helpers.sql":     initMacroFile("macros_helpers.sql"),
 		"config/macros/masking.sql":     initMacroFile("macros_masking.sql"),
@@ -101,14 +119,41 @@ func runInit() error {
 	return nil
 }
 
-func initDotEnv() string {
-	return `# OndatraSQL Environment Variables
+func initDotEnv(stateKey string) string {
+	return fmt.Sprintf(`# OndatraSQL Environment Variables
 # ==================================
+
+# === State encryption ===
+# 32-byte base64 key for DuckDB file-level encryption of state.duckdb
+# (push queue, fetch staging, OAuth refresh tokens). Lose this key and
+# the state file becomes unreadable — keep a backup if shared state
+# matters to you.
+ONDATRA_STATE_KEY=%s
 
 # === AWS (required for S3 storage) ===
 # AWS_ACCESS_KEY_ID=
 # AWS_SECRET_ACCESS_KEY=
 # AWS_REGION=eu-north-1
+`, stateKey)
+}
+
+func initState() string {
+	return `-- state.sql - OndatraSQL operational state backend.
+--
+-- Holds the push queue, fetch staging buffers, and OAuth refresh
+-- tokens. The file is encrypted at rest using DuckDB's native
+-- AES-GCM-256 file encryption — the key lives in .env as
+-- ONDATRA_STATE_KEY.
+--
+-- Single-process by default. To share state across multiple
+-- ondatrasql processes (e.g. ephemeral pods), point this at a Quack
+-- server instead — same SQL, the Go code is backend-agnostic.
+
+ATTACH 'state.duckdb' AS state (ENCRYPTION_KEY '${ONDATRA_STATE_KEY}');
+
+-- Multi-pod via Quack (one server per project):
+-- LOAD quack;
+-- ATTACH 'quack:state.example.com:9494' AS state (TYPE quack, TOKEN '${ONDATRA_QUACK_TOKEN}');
 `
 }
 
@@ -140,9 +185,9 @@ data/
 *.log
 .sandbox/
 
-# Ondatra runtime state — but commit .ondatra/project-id (stable schedule identity)
-.ondatra/*
-!.ondatra/project-id
+# Ondatra runtime state — local file backing config/state.sql
+state.duckdb
+state.duckdb.wal
 `
 }
 

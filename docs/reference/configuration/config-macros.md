@@ -2,7 +2,7 @@
 description: OndatraSQL loads reusable SQL macros from the config/macros/ directory. Define DuckDB functions for validation, helpers, and masking in your pipeline.
 draft: false
 title: macros/
-weight: 5
+weight: 6
 ---
 **Macros: reusable SQL functions loaded from `config/macros/`**
 

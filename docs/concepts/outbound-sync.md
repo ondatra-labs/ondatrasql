@@ -8,7 +8,7 @@ When a model has `@push`, the runner pushes change events to an external system.
 
 ## Commit first, push second
 
-The runner always commits data to DuckLake before pushing to the external system. If the push fails, DuckLake already has the correct data. Failed events go back to the state-store queue (`.ondatra/state.duckdb`) and retry on the next run.
+The runner always commits data to DuckLake before pushing to the external system. If the push fails, DuckLake already has the correct data. Failed events go back to the state-store queue (the `sync_evt` table in the state catalog — see [config/state.sql](/reference/configuration/config-state/)) and retry on the next run.
 
 This means your DuckLake state is always authoritative. The external system may lag behind but never leads.
 

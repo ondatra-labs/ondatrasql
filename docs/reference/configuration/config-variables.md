@@ -2,7 +2,7 @@
 description: OndatraSQL loads runtime variables from the config/variables/ directory. Define pipeline configuration as SQL across constant, global, and per-model scopes.
 draft: false
 title: variables/
-weight: 6
+weight: 7
 ---
 **Variables: runtime configuration loaded from `config/variables/`**
 

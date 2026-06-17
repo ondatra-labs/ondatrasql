@@ -27,13 +27,11 @@ ondatrasql orphaned               # Remove stray files from failed writes
 
 ## 3. Schedule Weekly
 
-Use cron to run maintenance weekly:
+Use your system's cron (or systemd timer, k8s CronJob, Airflow, etc.) to run maintenance weekly:
 
 ```
 0 3 * * 0 cd /path/to/project && ondatrasql checkpoint
 ```
-
-Note: `ondatrasql schedule` installs a scheduled `ondatrasql run` (pipeline execution), not maintenance. Use your system's cron for `checkpoint`.
 
 ## Customizing
 

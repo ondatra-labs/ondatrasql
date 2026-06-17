@@ -8,19 +8,74 @@ package script
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	_ "github.com/duckdb/duckdb-go/v2"
+
 	"go.starlark.net/starlark"
 )
+
+// newTokenStoreDB returns an in-memory DuckDB session with the tokens
+// table created. Pass seedToken to insert a row before returning.
+type seedTokenRow struct {
+	provider     string
+	refreshToken string
+	local        bool
+	tokenURL     string
+}
+
+func newTokenStoreDB(t *testing.T, seeds ...seedTokenRow) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE tokens (
+		provider VARCHAR PRIMARY KEY,
+		refresh_token VARCHAR NOT NULL,
+		local BOOLEAN DEFAULT false,
+		token_url VARCHAR,
+		updated_at TIMESTAMP DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create tokens: %v", err)
+	}
+	for _, s := range seeds {
+		if _, err := db.Exec(
+			`INSERT INTO tokens (provider, refresh_token, local, token_url) VALUES (?, ?, ?, ?)`,
+			s.provider, s.refreshToken, s.local, s.tokenURL,
+		); err != nil {
+			t.Fatalf("seed tokens: %v", err)
+		}
+	}
+	return db
+}
+
+func tokenStoreRefresh(t *testing.T, db *sql.DB, provider string) string {
+	t.Helper()
+	var v string
+	if err := db.QueryRow(`SELECT refresh_token FROM tokens WHERE provider = ?`, provider).Scan(&v); err != nil {
+		t.Fatalf("read refresh_token: %v", err)
+	}
+	return v
+}
+
+func tokenStoreLocal(t *testing.T, db *sql.DB, provider string) bool {
+	t.Helper()
+	var v bool
+	if err := db.QueryRow(`SELECT local FROM tokens WHERE provider = ?`, provider).Scan(&v); err != nil {
+		t.Fatalf("read local: %v", err)
+	}
+	return v
+}
 
 func TestTokenProviderCachesToken(t *testing.T) {
 	var calls atomic.Int32
@@ -239,20 +294,18 @@ func TestFetchProviderToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	// Write initial token
-	tokDir := filepath.Join(dir, ".ondatra", "tokens")
-	os.MkdirAll(tokDir, 0700)
-	os.WriteFile(filepath.Join(tokDir, "test-provider.json"),
-		[]byte(`{"provider":"test-provider","refresh_token":"RT_old","updated_at":1}`), 0600)
+	db := newTokenStoreDB(t, seedTokenRow{
+		provider:     "test-provider",
+		refreshToken: "RT_old",
+	})
 
 	t.Setenv("ONDATRA_KEY", "osk_test")
 	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
 
 	tp := &tokenProvider{
-		ctx:        context.Background(),
-		provider:   "test-provider",
-		projectDir: dir,
+		ctx:      context.Background(),
+		provider: "test-provider",
+		stateDB:  db,
 	}
 
 	tok, err := tp.AccessToken()
@@ -263,43 +316,40 @@ func TestFetchProviderToken(t *testing.T) {
 		t.Errorf("access_token = %q, want AT_provider", tok)
 	}
 
-	// Verify new refresh token was saved
-	data, _ := os.ReadFile(filepath.Join(tokDir, "test-provider.json"))
-	if !strings.Contains(string(data), "RT_new") {
-		t.Errorf("expected new refresh token in file, got: %s", data)
+	if got := tokenStoreRefresh(t, db, "test-provider"); got != "RT_new" {
+		t.Errorf("expected refresh_token = RT_new, got %q", got)
 	}
 }
 
 func TestFetchProviderToken_NoTokenFile(t *testing.T) {
-	dir := t.TempDir()
+	db := newTokenStoreDB(t)
 
 	t.Setenv("ONDATRA_KEY", "osk_test")
 
 	tp := &tokenProvider{
-		ctx:        context.Background(),
-		provider:   "fortnox",
-		projectDir: dir,
+		ctx:      context.Background(),
+		provider: "fortnox",
+		stateDB:  db,
 	}
 
 	_, err := tp.AccessToken()
 	if err == nil {
-		t.Fatal("expected error for missing token file")
+		t.Fatal("expected error for missing token row")
 	}
 }
 
 func TestFetchProviderToken_NoKey(t *testing.T) {
-	dir := t.TempDir()
-	tokDir := filepath.Join(dir, ".ondatra", "tokens")
-	os.MkdirAll(tokDir, 0700)
-	os.WriteFile(filepath.Join(tokDir, "fortnox.json"),
-		[]byte(`{"provider":"fortnox","refresh_token":"RT_x","updated_at":1}`), 0600)
+	db := newTokenStoreDB(t, seedTokenRow{
+		provider:     "fortnox",
+		refreshToken: "RT_x",
+	})
 
 	t.Setenv("ONDATRA_KEY", "")
 
 	tp := &tokenProvider{
-		ctx:        context.Background(),
-		provider:   "fortnox",
-		projectDir: dir,
+		ctx:      context.Background(),
+		provider: "fortnox",
+		stateDB:  db,
 	}
 
 	_, err := tp.AccessToken()
@@ -322,19 +372,20 @@ func TestFetchProviderToken_Local(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	tokDir := filepath.Join(dir, ".ondatra", "tokens")
-	os.MkdirAll(tokDir, 0700)
-	os.WriteFile(filepath.Join(tokDir, "test-local.json"),
-		[]byte(`{"provider":"test-local","refresh_token":"RT_old","local":true,"token_url":"`+srv.URL+`","updated_at":1}`), 0600)
+	db := newTokenStoreDB(t, seedTokenRow{
+		provider:     "test-local",
+		refreshToken: "RT_old",
+		local:        true,
+		tokenURL:     srv.URL,
+	})
 
 	t.Setenv("TEST_LOCAL_CLIENT_ID", "cid")
 	t.Setenv("TEST_LOCAL_CLIENT_SECRET", "csecret")
 
 	tp := &tokenProvider{
-		ctx:        context.Background(),
-		provider:   "test-local",
-		projectDir: dir,
+		ctx:      context.Background(),
+		provider: "test-local",
+		stateDB:  db,
 	}
 
 	tok, err := tp.AccessToken()
@@ -345,30 +396,29 @@ func TestFetchProviderToken_Local(t *testing.T) {
 		t.Errorf("access_token = %q, want AT_local_refreshed", tok)
 	}
 
-	// Verify new refresh token saved with local flag
-	data, _ := os.ReadFile(filepath.Join(tokDir, "test-local.json"))
-	if !strings.Contains(string(data), "RT_local_new") {
-		t.Errorf("expected new refresh token, got: %s", data)
+	if got := tokenStoreRefresh(t, db, "test-local"); got != "RT_local_new" {
+		t.Errorf("expected refresh_token = RT_local_new, got %q", got)
 	}
-	if !strings.Contains(string(data), `"local":true`) {
-		t.Errorf("expected local:true in token file, got: %s", data)
+	if !tokenStoreLocal(t, db, "test-local") {
+		t.Errorf("expected local = true")
 	}
 }
 
 func TestFetchProviderToken_LocalMissingSecret(t *testing.T) {
-	dir := t.TempDir()
-	tokDir := filepath.Join(dir, ".ondatra", "tokens")
-	os.MkdirAll(tokDir, 0700)
-	os.WriteFile(filepath.Join(tokDir, "fortnox.json"),
-		[]byte(`{"provider":"fortnox","refresh_token":"RT_x","local":true,"token_url":"https://example.com/token","updated_at":1}`), 0600)
+	db := newTokenStoreDB(t, seedTokenRow{
+		provider:     "fortnox",
+		refreshToken: "RT_x",
+		local:        true,
+		tokenURL:     "https://example.com/token",
+	})
 
 	t.Setenv("FORTNOX_CLIENT_ID", "")
 	t.Setenv("FORTNOX_CLIENT_SECRET", "")
 
 	tp := &tokenProvider{
-		ctx:        context.Background(),
-		provider:   "fortnox",
-		projectDir: dir,
+		ctx:      context.Background(),
+		provider: "fortnox",
+		stateDB:  db,
 	}
 
 	_, err := tp.AccessToken()

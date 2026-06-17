@@ -5,27 +5,29 @@
 package oauth2host
 
 import (
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 )
 
-// TokenFile represents a stored refresh token on disk.
+// TokenFile represents a stored refresh token.
+//
+// The "File" name is legacy from the original filesystem-backed
+// implementation. Today the token lives as a row in the state catalog's
+// `tokens` table, encrypted at rest via DuckDB's file-level encryption
+// (configured in config/state.sql).
 type TokenFile struct {
-	Provider     string `json:"provider"`
-	RefreshToken string `json:"refresh_token"`
-	Local        bool   `json:"local,omitempty"`
-	TokenURL     string `json:"token_url,omitempty"`
-	UpdatedAt    int64  `json:"updated_at"`
+	Provider     string
+	RefreshToken string
+	Local        bool
+	TokenURL     string
 }
 
 var validProvider = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
-// ValidateProvider checks that a provider name is safe for use in file paths.
+// ValidateProvider checks that a provider name is safe.
 func ValidateProvider(name string) error {
 	if len(name) < 2 || len(name) > 64 {
 		return fmt.Errorf("provider name must be 2-64 characters")
@@ -36,75 +38,69 @@ func ValidateProvider(name string) error {
 	return nil
 }
 
-// TokensDir returns the tokens directory path.
-func TokensDir(projectDir string) string {
-	return filepath.Join(projectDir, ".ondatra", "tokens")
-}
-
-// ReadToken reads a stored refresh token for a provider.
-func ReadToken(projectDir, provider string) (*TokenFile, error) {
+// ReadToken loads a stored refresh token for a provider from the state
+// catalog's tokens table. The caller passes the state-session DB handle
+// (USE state already in effect, so unqualified table names resolve into
+// the state catalog).
+func ReadToken(db *sql.DB, provider string) (*TokenFile, error) {
 	if err := ValidateProvider(provider); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(TokensDir(projectDir), provider+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
+	var tf TokenFile
+	tf.Provider = provider
+	var tokenURL sql.NullString
+	err := db.QueryRow(
+		`SELECT refresh_token, local, token_url FROM tokens WHERE provider = ?`,
+		provider,
+	).Scan(&tf.RefreshToken, &tf.Local, &tokenURL)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("no auth token for %q (run: ondatrasql auth %s)", provider, provider)
 	}
-	var tf TokenFile
-	if err := json.Unmarshal(data, &tf); err != nil {
-		return nil, fmt.Errorf("invalid token file for %q: %w", provider, err)
+	if err != nil {
+		return nil, fmt.Errorf("read token for %q: %w", provider, err)
 	}
 	if tf.RefreshToken == "" {
-		return nil, fmt.Errorf("token file for %q has empty refresh_token", provider)
+		return nil, fmt.Errorf("token row for %q has empty refresh_token", provider)
+	}
+	if tokenURL.Valid {
+		tf.TokenURL = tokenURL.String
 	}
 	return &tf, nil
 }
 
-// WriteToken writes a refresh token to disk for a provider.
-func WriteToken(projectDir, provider, refreshToken string) error {
+// WriteToken stores a managed-provider refresh token (refreshed via the
+// edge script). Overwrites any existing row for the provider.
+func WriteToken(db *sql.DB, provider, refreshToken string) error {
 	if err := ValidateProvider(provider); err != nil {
 		return err
 	}
-	dir := TokensDir(projectDir)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create tokens dir: %w", err)
-	}
-	tf := TokenFile{
-		Provider:     provider,
-		RefreshToken: refreshToken,
-		UpdatedAt:    time.Now().Unix(),
-	}
-	data, err := json.Marshal(tf)
+	_, err := db.Exec(
+		`INSERT OR REPLACE INTO tokens (provider, refresh_token, local, token_url, updated_at)
+		 VALUES (?, ?, false, NULL, now())`,
+		provider, refreshToken,
+	)
 	if err != nil {
-		return fmt.Errorf("marshal token: %w", err)
+		return fmt.Errorf("write token for %q: %w", provider, err)
 	}
-	path := filepath.Join(dir, provider+".json")
-	return os.WriteFile(path, data, 0600)
+	return nil
 }
 
-// WriteLocalToken writes a refresh token for a locally-managed provider.
-func WriteLocalToken(projectDir, provider, refreshToken, tokenURL string) error {
+// WriteLocalToken stores a refresh token for a locally-managed provider
+// (refreshes directly against the provider's token endpoint, using
+// CLIENT_ID/CLIENT_SECRET from env).
+func WriteLocalToken(db *sql.DB, provider, refreshToken, tokenURL string) error {
 	if err := ValidateProvider(provider); err != nil {
 		return err
 	}
-	dir := TokensDir(projectDir)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create tokens dir: %w", err)
-	}
-	tf := TokenFile{
-		Provider:     provider,
-		RefreshToken: refreshToken,
-		Local:        true,
-		TokenURL:     tokenURL,
-		UpdatedAt:    time.Now().Unix(),
-	}
-	data, err := json.Marshal(tf)
+	_, err := db.Exec(
+		`INSERT OR REPLACE INTO tokens (provider, refresh_token, local, token_url, updated_at)
+		 VALUES (?, ?, true, ?, now())`,
+		provider, refreshToken, tokenURL,
+	)
 	if err != nil {
-		return fmt.Errorf("marshal token: %w", err)
+		return fmt.Errorf("write local token for %q: %w", provider, err)
 	}
-	path := filepath.Join(dir, provider+".json")
-	return os.WriteFile(path, data, 0600)
+	return nil
 }
 
 // ProviderEnvPrefix returns the env variable prefix for a provider name.

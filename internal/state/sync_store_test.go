@@ -5,17 +5,26 @@
 package state
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-// openTestStore returns a State + SyncStore in a temp dir, registered
-// for cleanup via t.Cleanup. Avoids the per-process lock issue by
-// scoping each test to its own dir.
+// openTestStore returns a State + SyncStore backed by a fresh
+// unencrypted state.duckdb in t.TempDir(). The state.sql is written
+// inline so tests don't depend on init_cmd templates.
 func openTestStore(t *testing.T) (*State, *SyncStore) {
 	t.Helper()
-	dir := t.TempDir()
-	st, err := Open(dir)
+	configDir := t.TempDir()
+	dbFile := filepath.Join(t.TempDir(), "state.duckdb")
+	//escapesqlcheck:trusted-input dbFile is t.TempDir() — test-controlled, no user input
+	sqlText := fmt.Sprintf("ATTACH '%s' AS state;\n", dbFile)
+	if err := os.WriteFile(filepath.Join(configDir, "state.sql"), []byte(sqlText), 0o644); err != nil {
+		t.Fatalf("write state.sql: %v", err)
+	}
+	st, err := Open(configDir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

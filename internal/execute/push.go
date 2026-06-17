@@ -7,6 +7,7 @@ package execute
 import (
 	"context"
 	"crypto/md5"
+	"database/sql"
 	"fmt"
 	"os"
 	"sort"
@@ -282,7 +283,7 @@ func (se *pushExecutor) run(ctx context.Context) error {
 // If finalize() is not defined, this is a no-op.
 func (se *pushExecutor) callFinalize(ctx context.Context, succeeded, failed int64) error {
 	rt := script.NewRuntime(se.runner.sess, nil, se.runner.projectDir)
-	return rt.RunPushFinalize(ctx, se.model.Push, succeeded, failed, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
+	return rt.RunPushFinalize(ctx, se.model.Push, succeeded, failed, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.stateDB()))
 }
 
 // perRowResult holds the outcome of per-row status validation.
@@ -802,7 +803,7 @@ func (se *pushExecutor) executeBatch(ctx context.Context, events []state.SyncEve
 	// themselves (untyped) so a transient catalog hiccup never silently
 	// nacks rows.
 	pushColumns := loadPushColumnsFromTable(se.runner.sess, se.model.Target)
-	sinkResult, err := rt.RunPush(ctx, se.model.Push, rows, batchNum, se.model.Kind, sinkKey, pushColumns, pushArgMap, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
+	sinkResult, err := rt.RunPush(ctx, se.model.Push, rows, batchNum, se.model.Kind, sinkKey, pushColumns, pushArgMap, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.stateDB()))
 
 	switch cfg.BatchMode {
 	case "sync":
@@ -915,7 +916,7 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 		}
 
 		pollRt := script.NewRuntime(se.runner.sess, nil, se.runner.projectDir)
-		done, perRow, pollErr := pollRt.RunPushPoll(ctx, se.model.Push, jobRef, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.projectDir))
+		done, perRow, pollErr := pollRt.RunPushPoll(ctx, se.model.Push, jobRef, httpConfigFromLib(se.pushLib.APIConfig, ctx, se.runner.stateDB()))
 		if pollErr != nil {
 			return nackAll(store, claimID, batchNum, events, fmt.Errorf("poll: %w", pollErr))
 		}
@@ -969,19 +970,21 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 }
 
 // httpConfigFromLib converts libregistry.APIConfig to script.APIHTTPConfig.
-func httpConfigFromLib(apiCfg *libregistry.APIConfig, ctx context.Context, projectDir string) *script.APIHTTPConfig {
+// stateDB is the state-session handle threaded through for OAuth provider
+// flow (nil when the model has no auth-managed providers).
+func httpConfigFromLib(apiCfg *libregistry.APIConfig, ctx context.Context, stateDB *sql.DB) *script.APIHTTPConfig {
 	if apiCfg == nil {
 		return nil
 	}
 	return &script.APIHTTPConfig{
-		BaseURL:    apiCfg.BaseURL,
-		Headers:    apiCfg.Headers,
-		Timeout:    apiCfg.Timeout,
-		Retry:      apiCfg.Retry,
-		Backoff:    apiCfg.Backoff,
-		Auth:       apiCfg.Auth,
-		ProjectDir: projectDir,
-		Ctx:        ctx,
+		BaseURL: apiCfg.BaseURL,
+		Headers: apiCfg.Headers,
+		Timeout: apiCfg.Timeout,
+		Retry:   apiCfg.Retry,
+		Backoff: apiCfg.Backoff,
+		Auth:    apiCfg.Auth,
+		StateDB: stateDB,
+		Ctx:     ctx,
 	}
 }
 

@@ -12,7 +12,6 @@ Single binary. All commands listed below.
 |---|---|
 | [`run`](#run) | Execute the pipeline |
 | [`sandbox`](#sandbox) | Preview changes before committing |
-| [`schedule`](#schedule) | Install OS-native scheduler |
 | [`init`](#init) | Create a new project |
 | [`new`](#new) | Create a model file |
 | [`edit`](#edit) | Open file in $EDITOR |
@@ -52,22 +51,6 @@ ondatrasql sandbox staging.orders # One model
 ```
 
 See [Preview Changes](/guides/preview-changes/).
-
-## schedule
-
-```bash
-ondatrasql schedule "*/5 * * * *"   # Install (auto-detects OS)
-ondatrasql schedule                 # Show status
-ondatrasql schedule remove          # Remove
-```
-
-| OS | Backend |
-|---|---|
-| Linux | systemd user timer |
-| macOS | launchd plist |
-| Windows | [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) |
-
-See [Schedule Pipeline Runs](/guides/schedule-pipeline-runs/).
 
 ---
 
@@ -251,7 +234,9 @@ ondatrasql auth fortnox           # Authenticate
 | Managed | `ONDATRA_KEY` in `.env` | Uses oauth2.ondatra.sh, no app registration |
 | Local | `<PREFIX>_CLIENT_ID` in `.env` | Uses your own OAuth2 credentials |
 
-Tokens are stored in `.ondatra/tokens/` and auto-refresh on every pipeline run.
+Refresh tokens are stored in the `state.tokens` table inside the state catalog (see [config/state.sql](/reference/configuration/config-state/)) and auto-refresh on every pipeline run. The state catalog is encrypted at rest via DuckDB's `ENCRYPTION_KEY` option using `ONDATRA_STATE_KEY` from `.env`.
+
+`ondatrasql auth` requires `config/state.sql` to exist — run `ondatrasql init` first in a fresh project.
 
 See [Environment Variables](/reference/pipeline/env/) for OAuth2 variable reference.
 
@@ -332,7 +317,7 @@ Exit codes follow the eslint/ruff convention and apply to **every** subcommand, 
 
 `validate.*` WARN findings always trigger exit 1 regardless of `--strict` because they signal validate's own analysis was incomplete — CI consumers can't treat a degraded run as a clean one.
 
-The exit-2 contract is enforced for the following surfaces (regression-tested in `cli_contract_test.go`): `version`, `init`, `stats`, `lineage`, `history`, `query`, `sql`, `describe`, `describe blueprint`, `edit`, `new`, `auth`, `schedule`, `validate`, plus the `unknown_command` fallthrough. CI scripts that gate on exit code can rely on `1` vs `2` to distinguish "real failure" from "you typed it wrong".
+The exit-2 contract is enforced for the following surfaces (regression-tested in `cli_contract_test.go`): `version`, `init`, `stats`, `lineage`, `history`, `query`, `sql`, `describe`, `describe blueprint`, `edit`, `new`, `auth`, `validate`, plus the `unknown_command` fallthrough. CI scripts that gate on exit code can rely on `1` vs `2` to distinguish "real failure" from "you typed it wrong".
 
 ---
 

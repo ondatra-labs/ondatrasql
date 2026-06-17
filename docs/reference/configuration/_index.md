@@ -7,6 +7,7 @@ weight: 40
 SQL config files loaded at startup, each owning a piece of the runtime.
 
 - [catalog.sql](/reference/configuration/config-catalog/) — DuckLake catalog attachment (required)
+- [state.sql](/reference/configuration/config-state/) — state catalog attachment for push queue, fetch staging, OAuth tokens (required)
 - [extensions.sql](/reference/configuration/config-extensions/) — load DuckDB extensions before execution
 - [secrets.sql](/reference/configuration/config-secrets/) — DuckDB secrets for cloud storage, databases, APIs
 - [settings.sql](/reference/configuration/config-settings/) — memory, parallelism, spill behavior

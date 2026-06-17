@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-//go:embed execute/*.sql schema/*.sql macros/*.sql queries/*.sql init/*.sql
+//go:embed execute/*.sql schema/*.sql macros/*.sql queries/*.sql init/*.sql state/*.sql
 var sqlFiles embed.FS
 
 // catalogAlias holds the current DuckLake catalog alias.

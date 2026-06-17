@@ -76,13 +76,18 @@ Then run `ondatrasql auth hubspot`. Tokens are exchanged directly with the provi
 
 ## Token storage
 
-Tokens are saved in `.ondatra/tokens/<provider>.json`. Add `.ondatra/tokens/` to your `.gitignore`.
+Refresh tokens are stored as rows in the `state.tokens` table inside the state catalog (`state.duckdb` by default, see [config/state.sql](/reference/configuration/config-state/)). The state file is encrypted at rest with DuckDB's AES-GCM file-level encryption using `ONDATRA_STATE_KEY` from `.env`. `ondatrasql init` generates the key and writes it to `.env` — keep a backup of the key separately from the state file. Losing the key makes the entire state (tokens included) unreadable.
+
+The default `.gitignore` already excludes `*.duckdb` and `.env`, so no extra rules are needed.
+
+`ondatrasql auth` requires `config/state.sql` to exist. Run `ondatrasql init` first in a fresh project.
 
 ## Troubleshooting
 
 - **"Token expired"** — run `ondatrasql auth <provider>` again.
 - **"missing .env variables for \<provider\>"** — add `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` to `.env`.
 - **"not in an ondatrasql project"** — run from inside a project directory.
+- **"config/state.sql required"** — run `ondatrasql init` to create the default `state.sql` and `ONDATRA_STATE_KEY`.
 
 ## Reference
 

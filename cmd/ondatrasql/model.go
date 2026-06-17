@@ -211,12 +211,12 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 	// Run model with Git metadata
 	gitInfo := git.GetInfo(cfg.ProjectDir)
 
-	// Open .ondatra/state.duckdb once and run GC before the model executes.
+	// Open the state catalog once and run GC before the model executes.
 	// Single-model run gets the same recovery + cleanup as RunDAG so a
 	// crashed prior `ondatrasql run <model>` doesn't leave orphaned claims.
-	st, err := state.Open(cfg.ProjectDir)
+	st, err := state.Open(filepath.Join(cfg.ProjectDir, "config"))
 	if err != nil {
-		return fmt.Errorf("open state.duckdb: %w", err)
+		return fmt.Errorf("open state: %w", err)
 	}
 	defer func() { _ = st.Close() }()
 	if err := state.GC(st); err != nil {
