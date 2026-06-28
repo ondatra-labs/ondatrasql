@@ -284,47 +284,8 @@ func TestTokenProviderFreeze(t *testing.T) {
 	tp.Freeze()
 }
 
-func TestFetchProviderToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  "AT_provider",
-			"refresh_token": "RT_new",
-			"expires_in":    3600,
-		})
-	}))
-	defer srv.Close()
-
-	db := newTokenStoreDB(t, seedTokenRow{
-		provider:     "test-provider",
-		refreshToken: "RT_old",
-	})
-
-	t.Setenv("ONDATRA_KEY", "osk_test")
-	t.Setenv("ONDATRA_OAUTH_HOST", srv.URL)
-
-	tp := &tokenProvider{
-		ctx:      context.Background(),
-		provider: "test-provider",
-		stateDB:  db,
-	}
-
-	tok, err := tp.AccessToken()
-	if err != nil {
-		t.Fatalf("AccessToken: %v", err)
-	}
-	if tok != "AT_provider" {
-		t.Errorf("access_token = %q, want AT_provider", tok)
-	}
-
-	if got := tokenStoreRefresh(t, db, "test-provider"); got != "RT_new" {
-		t.Errorf("expected refresh_token = RT_new, got %q", got)
-	}
-}
-
 func TestFetchProviderToken_NoTokenFile(t *testing.T) {
 	db := newTokenStoreDB(t)
-
-	t.Setenv("ONDATRA_KEY", "osk_test")
 
 	tp := &tokenProvider{
 		ctx:      context.Background(),
@@ -338,13 +299,14 @@ func TestFetchProviderToken_NoTokenFile(t *testing.T) {
 	}
 }
 
-func TestFetchProviderToken_NoKey(t *testing.T) {
+// A token row from the removed managed flow (local=false) must surface a clear
+// migration error instead of attempting the (gone) edge refresh.
+func TestFetchProviderToken_ManagedRowMigrationError(t *testing.T) {
 	db := newTokenStoreDB(t, seedTokenRow{
 		provider:     "fortnox",
 		refreshToken: "RT_x",
+		local:        false,
 	})
-
-	t.Setenv("ONDATRA_KEY", "")
 
 	tp := &tokenProvider{
 		ctx:      context.Background(),
@@ -354,7 +316,10 @@ func TestFetchProviderToken_NoKey(t *testing.T) {
 
 	_, err := tp.AccessToken()
 	if err == nil {
-		t.Fatal("expected error for missing ONDATRA_KEY")
+		t.Fatal("expected migration error for a managed (non-local) token row")
+	}
+	if !strings.Contains(err.Error(), "managed OAuth flow") {
+		t.Errorf("error should mention the removed managed flow, got: %v", err)
 	}
 }
 

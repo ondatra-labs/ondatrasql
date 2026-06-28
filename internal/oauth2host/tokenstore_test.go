@@ -59,64 +59,12 @@ func TestValidateProvider(t *testing.T) {
 	}
 }
 
-func TestWriteAndReadToken(t *testing.T) {
-	t.Parallel()
-	db := newTestStore(t)
-
-	if err := WriteToken(db, "fortnox", "RT_test123"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-
-	tf, err := ReadToken(db, "fortnox")
-	if err != nil {
-		t.Fatalf("ReadToken: %v", err)
-	}
-	if tf.Provider != "fortnox" {
-		t.Errorf("provider = %q, want fortnox", tf.Provider)
-	}
-	if tf.RefreshToken != "RT_test123" {
-		t.Errorf("refresh_token = %q, want RT_test123", tf.RefreshToken)
-	}
-	if tf.Local {
-		t.Error("expected Local = false for WriteToken")
-	}
-}
-
 func TestReadToken_NotFound(t *testing.T) {
 	t.Parallel()
 	db := newTestStore(t)
 
 	if _, err := ReadToken(db, "nonexistent"); err == nil {
 		t.Fatal("expected error for missing token")
-	}
-}
-
-func TestWriteToken_InvalidProvider(t *testing.T) {
-	t.Parallel()
-	db := newTestStore(t)
-
-	if err := WriteToken(db, "../evil", "token"); err == nil {
-		t.Fatal("expected error for invalid provider name")
-	}
-}
-
-func TestWriteToken_Overwrite(t *testing.T) {
-	t.Parallel()
-	db := newTestStore(t)
-
-	if err := WriteToken(db, "fortnox", "old_token"); err != nil {
-		t.Fatalf("first WriteToken: %v", err)
-	}
-	if err := WriteToken(db, "fortnox", "new_token"); err != nil {
-		t.Fatalf("second WriteToken: %v", err)
-	}
-
-	tf, err := ReadToken(db, "fortnox")
-	if err != nil {
-		t.Fatalf("ReadToken: %v", err)
-	}
-	if tf.RefreshToken != "new_token" {
-		t.Errorf("refresh_token = %q, want new_token", tf.RefreshToken)
 	}
 }
 

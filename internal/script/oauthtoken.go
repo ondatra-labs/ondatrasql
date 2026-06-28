@@ -32,9 +32,9 @@ type tokenProvider struct {
 	// Config for Google service account flow
 	googleSAKey *ServiceAccountKey
 
-	// Config for provider flow (via oauth2.ondatra.sh).
-	// stateDB is the state-session handle where the encrypted-at-rest
-	// tokens table lives; nil when this provider isn't OAuth-managed.
+	// Config for the local provider flow. stateDB is the state-session
+	// handle where the encrypted-at-rest tokens table lives; nil when this
+	// provider isn't OAuth-backed.
 	provider string
 	stateDB  *sql.DB
 
@@ -122,45 +122,32 @@ func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	var result *oauth2host.RefreshResult
-
-	if tokenFile.Local {
-		// Local: refresh directly against provider
-		if tokenFile.TokenURL == "" {
-			return nil, fmt.Errorf("invalid token file for %s: missing token_url (re-run: ondatrasql auth %s)", tp.provider, tp.provider)
-		}
+	// Managed (hosted-broker) tokens were removed in v0.36.0. A row that
+	// isn't local came from the old managed flow — point the user at re-auth.
+	if !tokenFile.Local {
 		prefix := oauth2host.ProviderEnvPrefix(tp.provider)
-		clientID := os.Getenv(prefix + "_CLIENT_ID")
-		clientSecret := os.Getenv(prefix + "_CLIENT_SECRET")
-		if clientID == "" || clientSecret == "" {
-			return nil, fmt.Errorf("%s_CLIENT_ID and %s_CLIENT_SECRET must be set in .env", prefix, prefix)
-		}
-		result, err = oauth2host.RefreshLocal(tp.ctx, tokenFile.TokenURL, clientID, clientSecret, tokenFile.RefreshToken)
-		if err != nil {
-			return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
-		}
-		// Save new refresh token locally
-		if result.RefreshToken != "" {
-			if err := oauth2host.WriteLocalToken(tp.stateDB, tp.provider, result.RefreshToken, tokenFile.TokenURL); err != nil {
-				return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
-			}
-		}
-	} else {
-		// Managed: refresh via edge script
-		licenseKey := os.Getenv("ONDATRA_KEY")
-		if licenseKey == "" {
-			return nil, fmt.Errorf("ONDATRA_KEY not set in .env")
-		}
-		host := oauth2host.Host()
-		result, err = oauth2host.Refresh(tp.ctx, host, tp.provider, tokenFile.RefreshToken, licenseKey)
-		if err != nil {
-			return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
-		}
-		// Save new refresh token (managed)
-		if result.RefreshToken != "" {
-			if err := oauth2host.WriteToken(tp.stateDB, tp.provider, result.RefreshToken); err != nil {
-				return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
-			}
+		return nil, fmt.Errorf("provider %q was authenticated via the removed managed OAuth flow — re-authenticate locally with `ondatrasql auth %s` (set %s_CLIENT_ID/%s_CLIENT_SECRET/%s_AUTH_URL/%s_TOKEN_URL/%s_SCOPE in .env)",
+			tp.provider, tp.provider, prefix, prefix, prefix, prefix, prefix)
+	}
+
+	// Local: refresh directly against the provider with the user's creds.
+	if tokenFile.TokenURL == "" {
+		return nil, fmt.Errorf("invalid token file for %s: missing token_url (re-run: ondatrasql auth %s)", tp.provider, tp.provider)
+	}
+	prefix := oauth2host.ProviderEnvPrefix(tp.provider)
+	clientID := os.Getenv(prefix + "_CLIENT_ID")
+	clientSecret := os.Getenv(prefix + "_CLIENT_SECRET")
+	if clientID == "" || clientSecret == "" {
+		return nil, fmt.Errorf("%s_CLIENT_ID and %s_CLIENT_SECRET must be set in .env", prefix, prefix)
+	}
+	result, err := oauth2host.RefreshLocal(tp.ctx, tokenFile.TokenURL, clientID, clientSecret, tokenFile.RefreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
+	}
+	// Save the rotated refresh token.
+	if result.RefreshToken != "" {
+		if err := oauth2host.WriteLocalToken(tp.stateDB, tp.provider, result.RefreshToken, tokenFile.TokenURL); err != nil {
+			return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
 		}
 	}
 

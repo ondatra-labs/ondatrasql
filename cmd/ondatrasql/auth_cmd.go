@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -31,27 +30,10 @@ func openProjectState(cfg *config.Config) (*state.State, error) {
 	return state.Open(filepath.Join(cfg.ProjectDir, "config"))
 }
 
-func runAuthList(ctx context.Context) error {
-	if os.Getenv("ONDATRA_KEY") != "" {
-		// Managed: fetch from edge script
-		host := oauth2host.Host()
-		providers, err := oauth2host.ListProviders(ctx, host)
-		if err != nil {
-			return err
-		}
-		if len(providers) == 0 {
-			output.Fprintf("No providers available yet.\n")
-			return nil
-		}
-		output.Fprintf("Available providers:\n\n")
-		for _, p := range providers {
-			output.Fprintf("  %s\n", p)
-		}
-		output.Fprintf("\nRun: ondatrasql auth <provider>\n")
-		return nil
-	}
+func runAuthList(_ context.Context) error {
+	warnIfManagedKeySet()
 
-	// Local: scan .env for *_CLIENT_ID patterns
+	// Scan .env for *_CLIENT_ID patterns (the self-contained local flow).
 	providers := oauth2host.ListLocalProviders()
 	if len(providers) == 0 {
 		output.Fprintf("No providers configured.\n\n")
@@ -61,7 +43,6 @@ func runAuthList(ctx context.Context) error {
 		output.Fprintf("  FORTNOX_AUTH_URL=https://apps.fortnox.se/oauth-v1/auth\n")
 		output.Fprintf("  FORTNOX_TOKEN_URL=https://apps.fortnox.se/oauth-v1/token\n")
 		output.Fprintf("  FORTNOX_SCOPE=companyinformation\n")
-		output.Fprintf("\nOr add ONDATRA_KEY for managed providers.\n")
 		return nil
 	}
 	output.Fprintf("Available providers (from .env):\n\n")
@@ -77,108 +58,16 @@ func runAuth(ctx context.Context, cfg *config.Config, provider string) error {
 		return fmt.Errorf("invalid provider: %w", err)
 	}
 
-	if os.Getenv("ONDATRA_KEY") != "" {
-		return runAuthManaged(ctx, cfg, provider)
-	}
+	warnIfManagedKeySet()
 	return runAuthLocal(ctx, cfg, provider)
 }
 
-func runAuthManaged(ctx context.Context, cfg *config.Config, provider string) error {
-	licenseKey := os.Getenv("ONDATRA_KEY")
-	host := oauth2host.Host()
-
-	providerCfg, err := oauth2host.FetchProviderConfig(ctx, host, provider)
-	if err != nil {
-		return err
-	}
-
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return fmt.Errorf("generate state: %w", err)
-	}
-	hash := sha256.Sum256(buf)
-	state := fmt.Sprintf("%x", hash)
-
-	// Generate ephemeral key for client-side encryption
-	ekBuf := make([]byte, 32)
-	if _, err := rand.Read(ekBuf); err != nil {
-		return fmt.Errorf("generate ephemeral key: %w", err)
-	}
-	ephemeralKey := fmt.Sprintf("%x", ekBuf)
-
-	if err := oauth2host.Register(ctx, host, provider, state, licenseKey, ephemeralKey); err != nil {
-		return err
-	}
-
-	authParams := url.Values{
-		"client_id":     {providerCfg.ClientID},
-		"redirect_uri":  {providerCfg.RedirectURI},
-		"scope":         {providerCfg.Scope},
-		"state":         {state},
-		"response_type": {"code"},
-	}
-	if providerCfg.AuthParams != "" {
-		extra, err := url.ParseQuery(providerCfg.AuthParams)
-		if err != nil {
-			return fmt.Errorf("invalid auth_params from provider config: %w", err)
-		}
-		for k, v := range extra {
-			authParams[k] = v
-		}
-	}
-	authURL := providerCfg.AuthURL + "?" + authParams.Encode()
-
-	_ = browser.Open(authURL)
-
-	output.Fprintf("Open this URL to authenticate:\n\n  %s\n\n", authURL)
-	output.Fprintf("Waiting for authentication...\n")
-
-	deadline := time.After(5 * time.Minute)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline:
-			return fmt.Errorf("authentication timed out after 5 minutes")
-		case <-ticker.C:
-			result, err := oauth2host.Poll(ctx, host, state, licenseKey)
-			if err != nil {
-				if errors.Is(err, oauth2host.ErrPending) {
-					continue
-				}
-				return err
-			}
-
-			if result.Provider != provider {
-				return fmt.Errorf("provider mismatch: expected %q, got %q", provider, result.Provider)
-			}
-
-			refreshToken := result.RefreshToken
-			if !result.Encrypted {
-				return fmt.Errorf("server did not encrypt token with ephemeral key — aborting for safety")
-			}
-			decrypted, err := oauth2host.DecryptToken(refreshToken, ephemeralKey)
-			if err != nil {
-				return fmt.Errorf("decrypt token: %w", err)
-			}
-			refreshToken = decrypted
-			output.Fprintf("Token decrypted locally (end-to-end encrypted)\n")
-
-			st, err := openProjectState(cfg)
-			if err != nil {
-				return fmt.Errorf("open state: %w", err)
-			}
-			defer func() { _ = st.Close() }()
-			if err := oauth2host.WriteToken(st.DB(), provider, refreshToken); err != nil {
-				return fmt.Errorf("save token: %w", err)
-			}
-
-			output.Fprintf("Authenticated with %s\n", provider)
-			return nil
-		}
+// warnIfManagedKeySet notes that ONDATRA_KEY no longer does anything. The
+// hosted-broker ("managed") OAuth flow via oauth2.ondatra.sh was removed in
+// v0.36.0 in favor of the self-contained local flow.
+func warnIfManagedKeySet() {
+	if os.Getenv("ONDATRA_KEY") != "" {
+		fmt.Fprintln(os.Stderr, "note: ONDATRA_KEY is set but ignored — managed OAuth (oauth2.ondatra.sh) was removed in v0.36.0; using the local flow (set <PROVIDER>_CLIENT_ID/_CLIENT_SECRET/_AUTH_URL/_TOKEN_URL/_SCOPE in .env)")
 	}
 }
 

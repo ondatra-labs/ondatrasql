@@ -68,23 +68,6 @@ func ReadToken(db *sql.DB, provider string) (*TokenFile, error) {
 	return &tf, nil
 }
 
-// WriteToken stores a managed-provider refresh token (refreshed via the
-// edge script). Overwrites any existing row for the provider.
-func WriteToken(db *sql.DB, provider, refreshToken string) error {
-	if err := ValidateProvider(provider); err != nil {
-		return err
-	}
-	_, err := db.Exec(
-		`INSERT OR REPLACE INTO tokens (provider, refresh_token, local, token_url, updated_at)
-		 VALUES (?, ?, false, NULL, now())`,
-		provider, refreshToken,
-	)
-	if err != nil {
-		return fmt.Errorf("write token for %q: %w", provider, err)
-	}
-	return nil
-}
-
 // WriteLocalToken stores a refresh token for a locally-managed provider
 // (refreshes directly against the provider's token endpoint, using
 // CLIENT_ID/CLIENT_SECRET from env).

@@ -100,7 +100,7 @@ func resolveEnvValue(v any) string {
 //	{"env": "API_KEY"}                                          — Bearer token from env
 //	{"env": "API_KEY", "header": "X-Api-Key"}                   — Custom header from env
 //	{"env": "API_KEY", "param": "api_key"}                      — Query parameter from env
-//	{"provider": "fortnox"}                                     — OAuth2 managed token
+//	{"provider": "fortnox"}                                     — OAuth2 token (local flow, auto-refresh)
 //	{"service_account": {"env": "GCP_SA_PATH"}, "scope": "..."} — Google service account
 //	{"user": {"env": "USER"}, "pass": {"env": "PASS"}}          — Basic auth
 func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *string, cfg *apiHTTPConfig) error {
@@ -132,7 +132,7 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 		return nil
 	}
 
-	// provider: OAuth2 managed token (refreshes automatically)
+	// provider: OAuth2 token via the local flow (refreshes automatically)
 	if provider, ok := auth["provider"].(string); ok && provider != "" {
 		tp := &tokenProvider{
 			ctx:      cfg.Ctx,
