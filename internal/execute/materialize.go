@@ -327,9 +327,10 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	extraInfo := string(jsonBytes)
 	r.trace(result, "meta.json_serialize", stepStart, "ok")
 
-	// Build the materialize transaction body. Order:
-	//   1. schema evolution (ALTER TABLE …)        ← inside the txn
-	//   2. extraPreSQL (e.g. Starlark ack inserts)
+	// Build the materialize transaction body. Order (extraPreSQL is prepended
+	// by commitTxnSQL, outermost):
+	//   1. extraPreSQL (e.g. Starlark ack inserts)
+	//   2. schema evolution (ALTER TABLE …)
 	//   3. registry upsert
 	//   4. mainSQL (TRUNCATE/INSERT/MERGE)
 	// Audits get inserted between (4) and set_commit_message via the
@@ -339,21 +340,16 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	if schemaEvolutionSQL != "" {
 		preParts = append(preParts, schemaEvolutionSQL)
 	}
-	for _, extra := range extraPreSQL {
-		if extra != "" {
-			preParts = append(preParts, extra)
-		}
-	}
 	registrySQL := fmt.Sprintf("DELETE FROM _ondatra_registry WHERE target = '%s';\nINSERT INTO _ondatra_registry VALUES ('%s', '%s', current_timestamp)",
 		escapeSQL(model.Target), escapeSQL(model.Target), escapeSQL(model.Kind))
 	preParts = append(preParts, registrySQL)
 	mainSQL = strings.Join(preParts, ";\n") + ";\n" + mainSQL
 
-	// Execute everything in a single transaction. The commit.sql template's
-	// pre-commit-checks slot folds in the audit error() wrapper so a failing
-	// audit aborts the whole BEGIN/COMMIT atomically.
-	// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes.
-	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(extraInfo))
+	// Execute everything in a single transaction; commitTxnSQL threads the
+	// extraPreSQL ack inserts into the same BEGIN/COMMIT. The commit.sql
+	// template's pre-commit-checks slot folds in the audit error() wrapper so
+	// a failing audit aborts the whole BEGIN/COMMIT atomically.
+	txnSQL := commitTxnSQL(mainSQL, auditSQL, model.Target, extraInfo, extraPreSQL)
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {
@@ -596,6 +592,37 @@ func prependSQL(head, tail string) string {
 	}
 }
 
+// commitTxnSQL wraps a write in the transactional commit template, threading
+// any extraPreSQL into the SAME transaction as the write so they commit
+// atomically with it. extraPreSQL chiefly carries the lib-call state-store
+// ack INSERTs (script.AckSQL → _ondatra_acks); dropping them means a claim is
+// never acked and the next run re-delivers it.
+//
+// EVERY commit.sql call site must route through this helper. Building the
+// transaction with a direct sql.MustFormat("execute/commit.sql", ...) is how
+// the SCD2 create/backfill and tracked create branches silently dropped
+// extraPreSQL — the committhreadcheck analyzer forbids the direct form so a
+// new write branch can't reintroduce the gap. writeSQL is everything to run
+// before the audit/commit (schema evolution, registry upsert, the actual
+// INSERT/CREATE — caller's responsibility to assemble); extraInfo is the raw,
+// unescaped commit metadata (escaped here).
+func commitTxnSQL(writeSQL, auditSQL, target, extraInfo string, extraPreSQL []string) string {
+	// Prepend the (non-empty) extras as one block, preserving their input
+	// order, so they run first — outermost — inside the BEGIN/COMMIT. Ack
+	// INSERTs are order-independent, but preserving order avoids a surprising
+	// reversal if order-dependent pre-SQL is ever added.
+	var extras []string
+	for _, extra := range extraPreSQL {
+		if extra != "" {
+			extras = append(extras, extra)
+		}
+	}
+	if len(extras) > 0 {
+		writeSQL = strings.Join(extras, ";\n") + ";\n" + writeSQL
+	}
+	return sql.MustFormat("execute/commit.sql", writeSQL, auditSQL, target, escapeSQL(extraInfo))
+}
+
 // materializeSCD2 creates or updates an SCD2 table with history tracking.
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
@@ -696,9 +723,8 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		}
 		extraInfo := string(jsonBytes)
 
-		// Execute in transaction
-		// Escape extraInfo to prevent SQL injection from file paths/lineage with quotes
-		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, auditSQL, model.Target, escapeSQL(extraInfo))
+		// Execute in transaction; commitTxnSQL threads any ack INSERTs into it.
+		txnSQL := commitTxnSQL(createSQL, auditSQL, model.Target, extraInfo, extraPreSQL)
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -762,7 +788,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		if schemaEvolutionSQL != "" {
 			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
 		}
-		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := commitTxnSQL(mainSQL, auditSQL, model.Target, string(jsonBytes), extraPreSQL)
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -1104,7 +1130,7 @@ FROM %s s JOIN group_hash g ON %s`,
 		jsonBytes, _ := json.Marshal(info)
 
 		createSQL := sql.MustFormat("execute/table.sql", model.Target, "tracked_hashed")
-		txnSQL := sql.MustFormat("execute/commit.sql", createSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := commitTxnSQL(createSQL, auditSQL, model.Target, string(jsonBytes), extraPreSQL)
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -1140,10 +1166,7 @@ FROM %s s JOIN group_hash g ON %s`,
 		if schemaEvolutionSQL != "" {
 			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
 		}
-		for _, extra := range extraPreSQL {
-			mainSQL = extra + ";\n" + mainSQL
-		}
-		txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := commitTxnSQL(mainSQL, auditSQL, model.Target, string(jsonBytes), extraPreSQL)
 
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
@@ -1239,10 +1262,7 @@ WHERE h.%[5]s IS NULL`,
 		if schemaEvolutionSQL != "" {
 			noChangeSQL = schemaEvolutionSQL + ";\n" + noChangeSQL
 		}
-		for _, extra := range extraPreSQL {
-			noChangeSQL = extra + ";\n" + noChangeSQL
-		}
-		txnSQL := sql.MustFormat("execute/commit.sql", noChangeSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
+		txnSQL := commitTxnSQL(noChangeSQL, auditSQL, model.Target, string(jsonBytes), extraPreSQL)
 		stepStart = time.Now()
 		if err := r.sess.Exec(txnSQL); err != nil {
 			r.trace(result, "commit", stepStart, "error")
@@ -1287,11 +1307,8 @@ INSERT INTO %[1]s BY NAME SELECT h.* FROM tracked_hashed h JOIN tracked_changes 
 	if schemaEvolutionSQL != "" {
 		mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
 	}
-	for _, extra := range extraPreSQL {
-		mainSQL = extra + ";\n" + mainSQL
-	}
 
-	txnSQL := sql.MustFormat("execute/commit.sql", mainSQL, auditSQL, model.Target, escapeSQL(string(jsonBytes)))
+	txnSQL := commitTxnSQL(mainSQL, auditSQL, model.Target, string(jsonBytes), extraPreSQL)
 
 	stepStart = time.Now()
 	if err := r.sess.Exec(txnSQL); err != nil {

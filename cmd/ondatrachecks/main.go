@@ -19,6 +19,7 @@ package main
 import (
 	"golang.org/x/tools/go/analysis/multichecker"
 
+	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/committhreadcheck"
 	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/escapesqlcheck"
 	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/listenandservecheck"
 	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/pushauthcheck"
@@ -33,6 +34,7 @@ import (
 
 func main() {
 	multichecker.Main(
+		committhreadcheck.Analyzer,
 		escapesqlcheck.Analyzer,
 		listenandservecheck.Analyzer,
 		pushauthcheck.Analyzer,
