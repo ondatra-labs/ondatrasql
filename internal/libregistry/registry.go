@@ -68,6 +68,7 @@ type LibFunc struct {
 	FetchMode        string      // "sync" (default) or "async"
 	SupportedColumns []string    // optional whitelist of valid column names (validated at startup)
 	SupportedKinds   []string    // optional whitelist of valid model kinds (validated at startup)
+	StatusWarnings   []string    // non-fatal: fetch-family funcs that call http.* without checking resp.ok (see status_check.go)
 }
 
 // Registry holds all discovered lib functions.
@@ -391,7 +392,17 @@ func parseLibFile(name, relPath, code string) (*LibFunc, error) {
 		return nil, nil // not a lib function
 	}
 
-	return parseAPIDict(name, relPath, dictExpr, f)
+	lf, err := parseAPIDict(name, relPath, dictExpr, f)
+	if err != nil {
+		return nil, err
+	}
+	if lf != nil {
+		// Heuristic warning: fetch-family funcs that call http.* without
+		// checking the response status (a 4xx would otherwise become a silent
+		// 0-row return). Non-fatal — surfaced by the runner at run time.
+		lf.StatusWarnings = checkFetchStatusHandling(name, f, code)
+	}
+	return lf, nil
 }
 
 // parseAPIDict parses an API = {...} dict and produces one or two LibFunc registrations.

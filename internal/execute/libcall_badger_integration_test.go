@@ -2787,3 +2787,38 @@ SELECT id::BIGINT AS id, val::BIGINT AS val FROM dimapi('items')
 		t.Errorf("scd2 empty no_change closed current versions: is_current=%s, want 2 (preserve like tracked)", cur)
 	}
 }
+
+// TestLibCall_StatusCheck_WarnsOnUncheckedHTTP pins that a fetch lib calling
+// http.* without checking resp.ok surfaces a status-check warning at run time.
+// The http.get sits in a non-executed branch so the test needs no network — the
+// warning is computed from the lib AST at scan time, not from execution.
+func TestLibCall_StatusCheck_WarnsOnUncheckedHTTP(t *testing.T) {
+	p := testutil.NewProject(t)
+	writeLib(t, p, "warnapi", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {"args": ["resource"], "supported_kinds": ["table"]},
+}
+
+def fetch(resource, page):
+    if False:
+        resp = http.get("/v1/" + resource)
+        print(resp)
+    return {"rows": [{"id": 1}], "next": None}
+`)
+	p.AddModel("raw/w.sql", `-- @kind: table
+-- @fetch
+SELECT id::BIGINT AS id FROM warnapi('items')
+`)
+
+	r := runModelWithLib(t, p, "raw/w.sql")
+	found := false
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "never checks resp.ok/status_code") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected status-check warning in result.Warnings, got: %v", r.Warnings)
+	}
+}

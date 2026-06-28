@@ -496,6 +496,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return nil, fmt.Errorf("%s: model contains lib call %q in FROM but lacks @fetch — add `-- @fetch` to the model header to declare it as a lib-backed fetch model", model.Target, libCalls[0].FuncName)
 	}
 
+	// Surface lib status-check warnings (fetch funcs that call http.* without
+	// checking resp.ok — a 4xx would become a silent 0-row return). Deduped so
+	// a lib used in multiple calls warns once.
+	seenLibWarn := make(map[string]bool)
+	for i := range libCalls {
+		if libCalls[i].Lib == nil {
+			continue
+		}
+		for _, w := range libCalls[i].Lib.StatusWarnings {
+			if !seenLibWarn[w] {
+				seenLibWarn[w] = true
+				result.Warnings = append(result.Warnings, w)
+			}
+		}
+	}
+
 	// Strict-schema validator activation is now @fetch-driven (was
 	// lib-call-detection-driven in v0.29 and earlier). The @fetch
 	// directive is the explicit declaration that this model produces
