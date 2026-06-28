@@ -74,6 +74,7 @@ const (
 	// blueprint.* — bound to parseLibFile.
 	RuleBlueprintInvalidAPIDict   RuleID = "blueprint.invalid_api_dict"
 	RuleBlueprintHelperWithoutAPI RuleID = "blueprint.helper_without_api" // INFO
+	RuleBlueprintUncheckedStatus  RuleID = "blueprint.unchecked_status"   // INFO: fetch calls http.* without checking resp.ok (heuristic)
 	RuleBlueprintOther            RuleID = "blueprint.other"
 
 	// push.* — bound to ValidateModelPushCompat.
@@ -119,6 +120,7 @@ var severityOverrides = map[RuleID]Severity{
 	// INFO: validator can't verify without extern state.
 	RuleDagExternalRef:            SeverityInfo,
 	RuleBlueprintHelperWithoutAPI: SeverityInfo,
+	RuleBlueprintUncheckedStatus:  SeverityInfo, // heuristic — may false-negative if status checked in a helper
 
 	// WARN: validate's own environment is degraded — findings downstream
 	// may be incomplete, but the report itself is still actionable.

@@ -287,6 +287,28 @@ func runValidatePipeline(cfg *config.Config, opts *validateOpts) (*validate.Repo
 		})
 	}
 
+	// Surface lib status-check findings: a fetch that calls http.* without
+	// checking resp.ok turns a 4xx into a silent 0-row return, which wipes a
+	// table/scd2 target. INFO (heuristic — may false-negative if the status is
+	// checked in a helper), so it shows up at validate time without blocking;
+	// the lib can opt out with a `# ondatracheck:allow-unchecked-status
+	// <reason>` comment.
+	for _, lf := range reg.TableFuncs() {
+		if len(lf.StatusWarnings) == 0 {
+			continue
+		}
+		findings := make([]validate.Finding, 0, len(lf.StatusWarnings))
+		for _, w := range lf.StatusWarnings {
+			findings = append(findings, validate.NewFinding(
+				lf.FilePath, 0, validate.RuleBlueprintUncheckedStatus, w))
+		}
+		report.AddFile(validate.FileResult{
+			Path:     lf.FilePath,
+			Status:   "ok",
+			Findings: findings,
+		})
+	}
+
 	// Surface extension load failures as a structured WARN finding on
 	// the extensions.sql path. JSON/NDJSON consumers see this in the
 	// report — exit code reflects "findings present" so machine-readable

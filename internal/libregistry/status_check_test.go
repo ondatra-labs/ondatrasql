@@ -110,6 +110,26 @@ def fetch(resource, page):
 `,
 			wantWarns: 1,
 		},
+		{
+			name: "aliased http (h = http) is still flagged",
+			code: `
+def fetch(resource, page):
+    h = http
+    resp = h.get("/v1/" + resource)
+    return {"rows": resp.json["items"], "next": None}
+`,
+			wantWarns: 1,
+		},
+		{
+			name: "marker not terminated by whitespace does NOT silence",
+			code: `
+# ondatracheck:allow-unchecked-status-typo with a reason
+def fetch(resource, page):
+    resp = http.get("/v1/" + resource)
+    return {"rows": resp.json["items"], "next": None}
+`,
+			wantWarns: 1,
+		},
 	}
 
 	for _, c := range cases {
@@ -120,7 +140,7 @@ def fetch(resource, page):
 				t.Errorf("got %d warnings, want %d: %v", len(got), c.wantWarns, got)
 			}
 			for _, w := range got {
-				if !strings.Contains(w, "resp.ok/status_code") {
+				if !strings.Contains(w, "resp.ok") {
 					t.Errorf("warning missing guidance text: %q", w)
 				}
 			}

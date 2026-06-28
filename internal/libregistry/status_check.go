@@ -44,13 +44,27 @@ func checkFetchStatusHandling(name string, f *syntax.File, code string) []string
 		if !ok || !fetchFamilyFuncs[def.Name.Name] {
 			continue
 		}
+		// Collect `x = http` aliases so a call through the alias (`x.get(...)`)
+		// is recognized as an http call too, not just direct `http.get(...)`.
+		httpNames := map[string]bool{"http": true}
+		syntax.Walk(def, func(n syntax.Node) bool {
+			if a, ok := n.(*syntax.AssignStmt); ok {
+				if rhs, ok := a.RHS.(*syntax.Ident); ok && rhs.Name == "http" {
+					if lhs, ok := a.LHS.(*syntax.Ident); ok {
+						httpNames[lhs.Name] = true
+					}
+				}
+			}
+			return true
+		})
+
 		var hasHTTP, hasGuard bool
 		syntax.Walk(def, func(n syntax.Node) bool {
 			switch e := n.(type) {
 			case *syntax.CallExpr:
-				// http.get / http.post / http.request / ...
+				// http.get / http.post / http.request / ... (incl. aliases)
 				if dot, ok := e.Fn.(*syntax.DotExpr); ok {
-					if id, ok := dot.X.(*syntax.Ident); ok && id.Name == "http" {
+					if id, ok := dot.X.(*syntax.Ident); ok && httpNames[id.Name] {
 						hasHTTP = true
 					}
 				}
@@ -69,7 +83,7 @@ func checkFetchStatusHandling(name string, f *syntax.File, code string) []string
 		})
 		if hasHTTP && !hasGuard {
 			warnings = append(warnings, fmt.Sprintf(
-				"lib %q: %s() calls http.* but never checks resp.ok/status_code — a non-2xx response (e.g. 404) is silently parsed as 0 rows, which can wipe a table/scd2 target; add `if not resp.ok: fail(...)` or opt out with a `# %s <reason>` comment",
+				"lib %q: %s() reads http.* without checking resp.ok — a 4xx becomes a silent 0-row return (wipes a table/scd2 target); add `if not resp.ok: fail(...)`, or bypass with `# %s <reason>`",
 				name, def.Name.Name, uncheckedStatusBypass))
 		}
 	}
@@ -77,18 +91,28 @@ func checkFetchStatusHandling(name string, f *syntax.File, code string) []string
 }
 
 // hasUncheckedStatusBypass reports whether the source carries a file-level
-// `# ondatracheck:allow-unchecked-status <reason>` comment (reason mandatory).
+// `# ondatracheck:allow-unchecked-status <reason>` comment. The marker must be
+// the whole token (terminated by whitespace, so `…-status-anything` does NOT
+// match) and a non-empty reason must follow. Heuristic: this is a raw-line
+// scan, so a line inside a triple-quoted string that exactly mimics the marker
+// would also count — acceptable for an opt-out (the contrived false-positive
+// only ever *suppresses* a warning the author can re-enable).
 func hasUncheckedStatusBypass(code string) bool {
 	for _, line := range strings.Split(code, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "#") {
 			continue
 		}
-		rest := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+		rest := strings.TrimSpace(line[1:]) // text after the leading '#'
 		if !strings.HasPrefix(rest, uncheckedStatusBypass) {
 			continue
 		}
-		if reason := strings.TrimSpace(strings.TrimPrefix(rest, uncheckedStatusBypass)); reason != "" {
+		after := rest[len(uncheckedStatusBypass):]
+		// The marker must be terminated by whitespace, then a non-empty reason.
+		if after == "" || (after[0] != ' ' && after[0] != '\t') {
+			continue
+		}
+		if strings.TrimSpace(after) != "" {
 			return true
 		}
 	}

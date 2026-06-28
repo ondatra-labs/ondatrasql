@@ -875,6 +875,22 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 	rowsAffected = parsed
 
+	// Smart-skip: an empty no_change run has no new/changed rows
+	// (rowsAffected == 0) and the close-deleted step is suppressed, so the only
+	// remaining effect of committing would be the registry upsert — which mints
+	// a fresh DuckLake snapshot that downstream dep-change detection reads as
+	// "the model changed", cascading rebuilds across every dependent model.
+	// Nothing actually changed: roll back the open detect transaction and
+	// return without committing. Mirrors the tracked-kind smart-skip. Only when
+	// there is genuinely nothing else to persist (no schema evolution, audits,
+	// or extraPreSQL acks).
+	if rowsAffected == 0 && opts.noDeleteOnMissingGroups && schemaEvolutionSQL == "" && auditSQL == "" && len(extraPreSQL) == 0 {
+		_ = r.sess.Exec("ROLLBACK")                          // undo the open detect txn (no DML ran)
+		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_changes") // IF EXISTS makes non-existence OK
+		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted") // IF EXISTS makes non-existence OK
+		return 0, nil
+	}
+
 	// Step 3: Build commit metadata (inside txn — temp tables visible)
 	columns, _ := backfill.CaptureSchema(r.sess, tmpTable)
 	schemaHash := backfill.ComputeSchemaHash(columns)

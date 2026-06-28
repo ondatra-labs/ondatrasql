@@ -2814,11 +2814,57 @@ SELECT id::BIGINT AS id FROM warnapi('items')
 	r := runModelWithLib(t, p, "raw/w.sql")
 	found := false
 	for _, w := range r.Warnings {
-		if strings.Contains(w, "never checks resp.ok/status_code") {
+		if strings.Contains(w, "without checking resp.ok") {
 			found = true
 		}
 	}
 	if !found {
 		t.Errorf("expected status-check warning in result.Warnings, got: %v", r.Warnings)
+	}
+}
+
+// TestLibCall_SCD2_EmptyNoChange_NoSnapshotCascade pins the scd2 smart-skip:
+// an empty no_change scd2 run must NOT mint a new DuckLake snapshot (which a
+// dependent model would read as "dep changed" and rebuild). Mirrors the
+// tracked smart-skip test. Verified by a downstream table model reporting
+// RunType=skip after the upstream scd2 smart-skips.
+func TestLibCall_SCD2_EmptyNoChange_NoSnapshotCascade(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "dimsrc", `
+API = {"base_url": "https://example.com", "fetch": {"args": ["resource"], "supported_kinds": ["scd2"]}}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if not is_backfill:
+        return {"rows": [], "next": None}
+    return {"rows": [{"id": 1, "val": 10}], "next": None}
+`)
+
+	p.AddModel("raw/dim.sql", `-- @kind: scd2
+-- @fetch
+-- @unique_key: id
+SELECT id::BIGINT AS id, val::BIGINT AS val FROM dimsrc('items')
+`)
+	p.AddModel("staging/dim_use.sql", `-- @kind: table
+SELECT id, val * 2 AS doubled FROM raw.dim WHERE is_current
+`)
+
+	// Run 1: backfill upstream + downstream.
+	if r := runModelWithLib(t, p, "raw/dim.sql"); r.RowsAffected != 1 {
+		t.Fatalf("upstream run 1: want 1 row, got %d", r.RowsAffected)
+	}
+	if r := runModelWithLib(t, p, "staging/dim_use.sql"); r.RowsAffected != 1 {
+		t.Fatalf("downstream run 1: want 1 row, got %d", r.RowsAffected)
+	}
+
+	// Run 2: upstream empty no_change → smart-skip (no new snapshot).
+	if r := runModelWithLib(t, p, "raw/dim.sql"); r.RowsAffected != 0 {
+		t.Fatalf("upstream run 2: want 0 rows, got %d", r.RowsAffected)
+	}
+	// Downstream: dep unchanged → runner marks skip. If a snapshot had been
+	// minted, it would see "dep changed" and run instead.
+	r2ds := runModelWithLib(t, p, "staging/dim_use.sql")
+	if r2ds.RunType != "skip" {
+		t.Errorf("downstream run 2: want RunType=skip (no scd2 snapshot cascade), got %q reason=%q", r2ds.RunType, r2ds.RunReason)
 	}
 }
