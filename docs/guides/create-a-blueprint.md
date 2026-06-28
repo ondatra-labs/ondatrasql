@@ -216,6 +216,8 @@ def fetch(resource, page, is_backfill=True, last_value=""):
     if not is_backfill:
         params["since"] = last_value
     resp = http.get("/v1/" + resource, params=params)
+    if not resp.ok:
+        fail("API error: " + str(resp.status_code))
     return {"rows": resp.json["items"], "next": resp.json.get("next")}
 ```
 
@@ -260,16 +262,22 @@ API = {
 
 def submit(columns=[], is_backfill=True, last_value=""):
     resp = http.post("/reports", json={"columns": [c["name"] for c in columns]})
+    if not resp.ok:
+        fail("submit failed: " + str(resp.status_code))
     return {"job_id": resp.json["id"]}
 
 def check(job_ref):
     resp = http.get("/reports/" + job_ref["job_id"])
+    if not resp.ok:
+        fail("poll failed: " + str(resp.status_code))
     if resp.json["status"] == "complete":
         return {"url": resp.json["result_url"]}
     return None  # keep polling
 
 def fetch_result(result_ref, page):
     resp = http.get(result_ref["url"] + "?page=" + str(page.cursor or 0))
+    if not resp.ok:
+        fail("result failed: " + str(resp.status_code))
     return {"rows": resp.json["data"], "next": resp.json.get("next_page")}
 ```
 

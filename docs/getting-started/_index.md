@@ -45,6 +45,8 @@ API = {
 
 def fetch(region, page):
     resp = http.get("/v3.1/region/" + region)
+    if not resp.ok:
+        fail("API error: " + str(resp.status_code))
     rows = [{"name": c["name"]["common"], "capital": c["capital"][0], "population": c["population"]} for c in resp.json]
     return {"rows": rows, "next": None}
 ```

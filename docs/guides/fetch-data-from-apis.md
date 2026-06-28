@@ -114,6 +114,8 @@ def fetch(resource, page):
         params["starting_after"] = page.cursor
 
     resp = http.get("/v1/" + resource, params=params)
+    if not resp.ok:
+        fail("API error: " + str(resp.status_code))
     data = resp.json
 
     next_cursor = None
@@ -129,6 +131,8 @@ def fetch(resource, page):
 def fetch(resource, page):
     offset = page.cursor or 0
     resp = http.get("/v1/" + resource, params={"limit": page.size, "offset": offset})
+    if not resp.ok:
+        fail("API error: " + str(resp.status_code))
     rows = resp.json["items"]
     next_offset = offset + page.size if len(rows) == page.size else None
     return {"rows": rows, "next": next_offset}
@@ -149,6 +153,8 @@ def fetch(series, page, is_backfill=True, initial_value="", last_value=""):
     end_date = min(_add_days(cursor_date, 365), yesterday)
 
     resp = http.get("/data/" + series + "/" + cursor_date + "/" + end_date)
+    if not resp.ok:
+        fail("API error: " + str(resp.status_code))
     rows = [{"date": obs["date"], "value": obs["value"]} for obs in resp.json]
 
     next_cursor = _next_day(end_date) if end_date < yesterday else None
@@ -181,16 +187,22 @@ API = {
 
 def submit(columns=[], is_backfill=True, last_value=""):
     resp = http.post("/reports", json={...})
+    if not resp.ok:
+        fail("submit failed: " + str(resp.status_code))
     return {"job_id": resp.json["id"]}
 
 def check(job_ref):
     resp = http.get("/reports/" + job_ref["job_id"])
+    if not resp.ok:
+        fail("poll failed: " + str(resp.status_code))
     if resp.json["status"] == "complete":
         return {"url": resp.json["result_url"]}
     return None  # keep polling
 
 def fetch_result(result_ref, page):
     resp = http.get(result_ref["url"] + "?pageSize=" + str(page.size))
+    if not resp.ok:
+        fail("result failed: " + str(resp.status_code))
     return {"rows": resp.json["data"], "next": resp.json.get("next_page")}
 ```
 
@@ -301,6 +313,17 @@ Configured in the API dict. Injected into every `http.*` call automatically.
 ```
 
 ## Error handling
+
+**Always check `resp.ok`.** `http.get`/`http.post`/`http.request` only raise on
+5xx, 429, and transport failures (those retry, then fail the run). A **4xx**
+(404, 400, 401, 403) does **not** raise — it returns a response with
+`resp.ok == False`. If you skip the check and read `resp.json` anyway, a client
+error is silently parsed into **0 rows**, and for a `table` or `scd2` model that
+0-row result wipes / closes the target. OndatraSQL emits a warning at run time
+for any `fetch` that calls `http.*` without checking `resp.ok` /
+`resp.status_code`; silence an intentional case (e.g. an API that returns 404
+for an empty collection) with a `# ondatracheck:allow-unchecked-status <reason>`
+comment in the lib file.
 
 **Fail** — stops the pipeline:
 

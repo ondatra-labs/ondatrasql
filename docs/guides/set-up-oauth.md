@@ -33,6 +33,8 @@ API = {
 
 def fetch(object_type, page):
     resp = http.get("/crm/v3/objects/" + object_type)
+    if not resp.ok:
+        fail("API error: " + str(resp.status_code))
     return {"rows": resp.json["results"], "next": None}
 ```
 
