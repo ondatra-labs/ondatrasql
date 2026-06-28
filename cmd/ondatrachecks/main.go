@@ -28,6 +28,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/sqlfmtcheck"
 	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/sscanfcheck"
 	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/strconvcheck"
+	"github.com/ondatra-labs/ondatrasql/internal/lintcheck/syntheticcolcheck"
 )
 
 func main() {
@@ -41,5 +42,6 @@ func main() {
 		sqlfmtcheck.Analyzer,
 		sscanfcheck.Analyzer,
 		strconvcheck.Analyzer,
+		syntheticcolcheck.Analyzer,
 	)
 }

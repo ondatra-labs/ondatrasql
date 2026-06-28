@@ -519,6 +519,83 @@ func (r *Runner) buildSchemaEvolutionSQL(target string, change backfill.SchemaCh
 	return strings.Join(stmts, ";\n")
 }
 
+// syntheticColumn is a (name, type) pair for a kind's persisted synthetic
+// column — one the materialize INSERT … BY NAME produces but the model SELECT
+// does not (SCD2's valid_from_snapshot/valid_to_snapshot/is_current; tracked's
+// _content_hash).
+type syntheticColumn struct {
+	name string
+	typ  string
+}
+
+// scd2SyntheticColumns are the history columns scd2_init.sql persists. Types
+// match the INSERT literals in materializeSCD2 (BIGINT snapshots, BOOLEAN flag).
+var scd2SyntheticColumns = []syntheticColumn{
+	{"valid_from_snapshot", "BIGINT"},
+	{"valid_to_snapshot", "BIGINT"},
+	{"is_current", "BOOLEAN"},
+}
+
+// addMissingSyntheticColumnsSQL returns ALTER TABLE ADD COLUMN statements for
+// any of the wanted synthetic columns the target table does not already have,
+// or "" if it already has them all.
+//
+// This closes the kind-conversion schema-evolution gap: when a model's @kind
+// changes (e.g. table → scd2/tracked), the kind change forces a backfill, but
+// the existing target was built under the prior kind and lacks the new kind's
+// synthetic columns. Schema-evolution detection never proposes them — the
+// synthetic columns come from the INSERT literal/join, not the SELECT — so the
+// materialize INSERT … BY NAME would otherwise bind against a target missing
+// the column. We add only the genuinely-missing columns so an unchanged-kind
+// backfill (where the columns already exist) stays a no-op and creates no
+// spurious snapshot.
+func (r *Runner) addMissingSyntheticColumnsSQL(target string, want []syntheticColumn) (string, error) {
+	existing, err := r.getTargetColumns(target)
+	if err != nil {
+		return "", fmt.Errorf("get target columns for synthetic-column evolution: %w", err)
+	}
+	have := make(map[string]bool, len(existing))
+	for _, c := range existing {
+		have[c] = true
+	}
+	var stmts []string
+	for _, c := range want {
+		if have[c.name] {
+			continue
+		}
+		stmts = append(stmts, sql.MustFormat("schema/alter_add_column.sql", target, duckdb.QuoteIdentifier(c.name), c.typ))
+	}
+	return strings.Join(stmts, ";\n"), nil
+}
+
+// getTargetColumns returns the column names of a possibly schema-qualified
+// target table. Unlike getTableColumns (which feeds the unqualified-name
+// ondatra_get_column_names macro used for temp tables), this resolves a
+// "schema.table" target via the schema-aware macro so the lookup actually
+// matches — a bare information_schema filter on table_name silently returns
+// nothing for a qualified target.
+func (r *Runner) getTargetColumns(target string) ([]string, error) {
+	if schema, table, ok := strings.Cut(target, "."); ok {
+		query := fmt.Sprintf("SELECT * FROM ondatra_get_column_names_schema('%s', '%s')",
+			escapeSQL(schema), escapeSQL(table))
+		return r.sess.QueryRows(query)
+	}
+	return r.getTableColumns(target)
+}
+
+// prependSQL joins head before tail with a statement separator, tolerating an
+// empty head or tail.
+func prependSQL(head, tail string) string {
+	switch {
+	case head == "":
+		return tail
+	case tail == "":
+		return head
+	default:
+		return head + ";\n" + tail
+	}
+}
+
 // materializeSCD2 creates or updates an SCD2 table with history tracking.
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
@@ -669,6 +746,15 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			GitCommit: r.gitInfo.Commit, GitBranch: r.gitInfo.Branch, GitRepoURL: r.gitInfo.RepoURL,
 		}
 		jsonBytes, _ := json.Marshal(info)
+
+		// Kind conversion (e.g. table → scd2): the existing target lacks the
+		// SCD2 synthetic columns the INSERT … BY NAME below references. Add any
+		// missing ones inside the same transaction before the INSERT binds.
+		synthSQL, synthErr := r.addMissingSyntheticColumnsSQL(model.Target, scd2SyntheticColumns)
+		if synthErr != nil {
+			return 0, synthErr
+		}
+		schemaEvolutionSQL = prependSQL(synthSQL, schemaEvolutionSQL)
 
 		mainSQL := fmt.Sprintf(
 			"TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT %s, %d::BIGINT AS valid_from_snapshot, CAST(NULL AS BIGINT) AS valid_to_snapshot, true AS is_current FROM %s",
@@ -935,14 +1021,19 @@ func (r *Runner) materializeTracked(model *parser.Model, tmpTable string, isBack
 	// hashCols was sorted above, so the row's column order is fixed
 	// regardless of SELECT column order.
 	var hashAggExpr string
+	// contentHashType must mirror hashAggExpr's result type so a kind-conversion
+	// ADD COLUMN for _content_hash matches what INSERT … BY NAME carries.
+	var contentHashType string
 	if len(hashCols) == 0 {
 		hashAggExpr = "0::HUGEINT"
+		contentHashType = "HUGEINT"
 	} else {
 		var rowParts []string
 		for _, col := range hashCols {
 			rowParts = append(rowParts, duckdb.QuoteIdentifier(col))
 		}
 		hashAggExpr = fmt.Sprintf("sum(hash(row(%s)))::VARCHAR", strings.Join(rowParts, ", "))
+		contentHashType = "VARCHAR"
 	}
 
 	// Build qualified column list for SELECT (s."col1", s."col2", ...)
@@ -1032,6 +1123,17 @@ FROM %s s JOIN group_hash g ON %s`,
 		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain
 		info.RowsAffected = totalRows
 		jsonBytes, _ := json.Marshal(info)
+
+		// Kind conversion (e.g. table → tracked): the existing target lacks the
+		// _content_hash column the INSERT … BY NAME below carries from
+		// tracked_hashed. Add it (matching hashAggExpr's type) inside the same
+		// transaction before the INSERT binds.
+		synthSQL, synthErr := r.addMissingSyntheticColumnsSQL(model.Target,
+			[]syntheticColumn{{"_content_hash", contentHashType}})
+		if synthErr != nil {
+			return 0, synthErr
+		}
+		schemaEvolutionSQL = prependSQL(synthSQL, schemaEvolutionSQL)
 
 		mainSQL := fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM tracked_hashed",
 			model.Target, model.Target)
