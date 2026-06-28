@@ -229,10 +229,7 @@ ondatrasql auth google-sheets     # Authenticate
 ondatrasql auth fortnox           # Authenticate
 ```
 
-| Mode | Detected by | Description |
-|---|---|---|
-| Managed | `ONDATRA_KEY` in `.env` | Uses oauth2.ondatra.sh, no app registration |
-| Local | `<PREFIX>_CLIENT_ID` in `.env` | Uses your own OAuth2 credentials |
+OAuth2 uses your own app credentials — set `<PREFIX>_CLIENT_ID`, `<PREFIX>_CLIENT_SECRET`, `<PREFIX>_AUTH_URL`, `<PREFIX>_TOKEN_URL`, and `<PREFIX>_SCOPE` in `.env`. (The hosted-broker "managed" flow via `ONDATRA_KEY` / oauth2.ondatra.sh was removed in v0.36.0.)
 
 Refresh tokens are stored in the `state.tokens` table inside the state catalog (see [config/state.sql](/reference/configuration/config-state/)) and auto-refresh on every pipeline run. The state catalog is encrypted at rest via DuckDB's `ENCRYPTION_KEY` option using `ONDATRA_STATE_KEY` from `.env`.
 

@@ -81,7 +81,7 @@ Would require a small DDL adapter in `internal/state/` (BLOB → BYTEA, `now()` 
 
 ## See also
 
-- [Environment Variables](/reference/pipeline/env/) — `ONDATRA_STATE_KEY`, `ONDATRA_KEY`
+- [Environment Variables](/reference/pipeline/env/) — `ONDATRA_STATE_KEY`
 - [catalog.sql](/reference/configuration/config-catalog/) — DuckLake catalog (separate concept)
 - [Push Contract](/reference/lib-functions/push-contract/) — how `sync_evt` is consumed during push
 - [Set Up OAuth](/guides/set-up-oauth/) — how `tokens` is populated
