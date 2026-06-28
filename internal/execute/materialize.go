@@ -113,11 +113,13 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 //
 // Optional extraPreSQL statements are prepended to the transaction
 // (e.g. ack inserts for Starlark scripts).
-// trackedNoDeleteOnEmpty is set by the runner when a tracked-kind run was
-// driven by libs that all returned 0 rows AND declared empty_result=no_change
-// (the default). materializeTracked uses this to suppress the delete-missing
-// branch of its change-detection query, so target rows are preserved while
-// schema evolution and audits still run.
+// noDeleteOnMissingGroups is set by the runner when a tracked- OR scd2-kind run
+// was driven by libs that all returned 0 rows AND declared
+// empty_result=no_change (the default). It suppresses the delete-on-missing
+// branch: materializeTracked skips deleting groups absent from the empty
+// source, and materializeSCD2 skips closing current versions absent from it —
+// so target rows are preserved (an empty no_change reply means "no new data",
+// not "everything deleted"), while schema evolution and audits still run.
 type trackedRunOpts struct {
 	noDeleteOnMissingGroups bool
 }
@@ -245,7 +247,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 			return 0, err
 		}
 		// SCD2 handles its own transaction - return early
-		return r.materializeSCD2(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime, extraPreSQL...)
+		return r.materializeSCD2(model, tmpTable, isBackfill, schemaEvolutionSQL, auditSQL, sqlHash, runType, result, startTime, opts, extraPreSQL...)
 
 	case "tracked":
 		if model.GroupKey == "" {
@@ -627,7 +629,7 @@ func commitTxnSQL(writeSQL, auditSQL, target, extraInfo string, extraPreSQL []st
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
 // On subsequent runs, closes old versions and inserts new versions for changed/new rows.
-func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, extraPreSQL ...string) (int64, error) {
+func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, opts trackedRunOpts, extraPreSQL ...string) (int64, error) {
 	uk := duckdb.QuoteIdentifier(model.UniqueKey)
 	ukRaw := model.UniqueKey
 
@@ -922,11 +924,19 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		return rollbackOnErr(err, "close changed versions")
 	}
 
-	// Close versions for deleted rows
-	closeDeletedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_deleted)",
-		model.Target, currSnapshot-1, uk, uk)
-	if err := r.sess.Exec(closeDeletedSQL); err != nil {
-		return rollbackOnErr(err, "close deleted versions")
+	// Close versions for deleted rows — UNLESS the run was a lib-call that
+	// returned 0 rows with empty_result=no_change. In that case the empty
+	// source means "no new data", not "every row was deleted"; closing them
+	// would silently empty the current view on a transient empty API reply.
+	// Mirrors the tracked-kind delete-missing suppression. (A genuine delete
+	// is opt-in via empty_result=delete_missing, or comes from a non-lib SQL
+	// source where the empty result IS authoritative.)
+	if !opts.noDeleteOnMissingGroups {
+		closeDeletedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_deleted)",
+			model.Target, currSnapshot-1, uk, uk)
+		if err := r.sess.Exec(closeDeletedSQL); err != nil {
+			return rollbackOnErr(err, "close deleted versions")
+		}
 	}
 
 	// Insert new versions

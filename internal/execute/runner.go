@@ -704,13 +704,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					stepStart = time.Now()
 				}
 
-				// Tracked + lib + all 0-row returns + every lib's empty_result
-				// is "no_change" (the default) → tell tracked materialize to
-				// suppress the delete-missing-groups branch so target rows
-				// are preserved. The rest of the pipeline (stubs, rewrite,
-				// schema evolution, audits, materialize) still runs so that
-				// SQL-only changes (new columns, audit changes) are applied.
-				trackedOpts.noDeleteOnMissingGroups = model.Kind == "tracked" && allLibsReturnedNoChange(libCalls)
+				// Tracked/scd2 + lib + all 0-row returns + every lib's
+				// empty_result is "no_change" (the default) → tell materialize
+				// to suppress the delete-on-missing branch so target rows are
+				// preserved (tracked: missing groups; scd2: missing current
+				// versions). The rest of the pipeline (stubs, rewrite, schema
+				// evolution, audits, materialize) still runs so that SQL-only
+				// changes (new columns, audit changes) are applied.
+				trackedOpts.noDeleteOnMissingGroups = (model.Kind == "tracked" || model.Kind == "scd2") && allLibsReturnedNoChange(libCalls)
 
 				// For lib calls that returned 0 rows, create empty stub
 				// temp tables using the input-shape columns the query

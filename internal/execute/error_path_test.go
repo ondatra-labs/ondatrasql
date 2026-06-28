@@ -171,7 +171,7 @@ func TestRapid_MaterializeSCD2_ClosedSession(t *testing.T) {
 		model := &parser.Model{Target: target, Kind: "scd2", UniqueKey: uk, SQL: "SELECT 1 AS id"}
 		result := &Result{Target: target}
 
-		_, err := runner.materializeSCD2(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "", "hash", "backfill", result, time.Now())
+		_, err := runner.materializeSCD2(model, "tmp_nonexistent", rapid.Bool().Draw(rt, "backfill"), "", "", "hash", "backfill", result, time.Now(), trackedRunOpts{})
 		if err == nil {
 			rt.Fatal("expected error on closed session")
 		}

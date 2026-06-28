@@ -2742,3 +2742,48 @@ SELECT id::BIGINT AS x, name::VARCHAR AS x FROM src('items')
 	}
 }
 
+
+// TestLibCall_SCD2_EmptyNoChange_PreservesCurrent pins that a lib-call SCD2
+// model does NOT close its current versions when the lib returns 0 rows with
+// the default empty_result=no_change ("source has no new data", not "everything
+// was deleted"). This mirrors the tracked-kind protection: an empty no_change
+// fetch must preserve the target. Without the guard, scd2's detect step flags
+// every current row as deleted (uk NOT IN <empty source>) and closes them all,
+// silently emptying the live (is_current) view on a transient empty API reply.
+func TestLibCall_SCD2_EmptyNoChange_PreservesCurrent(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "dimapi", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {"args": ["resource"], "supported_kinds": ["scd2"]},
+}
+
+def fetch(resource, page, is_backfill=True, last_value=""):
+    if not is_backfill:
+        return {"rows": [], "next": None}
+    return {"rows": [
+        {"id": 1, "val": 10},
+        {"id": 2, "val": 20},
+    ], "next": None}
+`)
+
+	p.AddModel("raw/dim.sql", `-- @kind: scd2
+-- @fetch
+-- @unique_key: id
+SELECT id::BIGINT AS id, val::BIGINT AS val FROM dimapi('items')
+`)
+
+	// Run 1: backfill — 2 current rows.
+	runModelWithLib(t, p, "raw/dim.sql")
+	if got, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.dim WHERE is_current"); got != "2" {
+		t.Fatalf("run 1: want 2 current rows, got %s", got)
+	}
+
+	// Run 2: empty fetch, default no_change — current versions must be preserved.
+	runModelWithLib(t, p, "raw/dim.sql")
+	cur, _ := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.dim WHERE is_current")
+	if cur != "2" {
+		t.Errorf("scd2 empty no_change closed current versions: is_current=%s, want 2 (preserve like tracked)", cur)
+	}
+}

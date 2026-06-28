@@ -65,7 +65,7 @@ func TestMaterializeSCD2_ThreadsExtraPreSQL(t *testing.T) {
 
 	// First call → SCD2 create path (target does not exist yet).
 	res1 := &Result{Target: model.Target}
-	if _, err := runner.materializeSCD2(model, "tmp_src", true, "", "", "hash", "backfill", res1, time.Now(),
+	if _, err := runner.materializeSCD2(model, "tmp_src", true, "", "", "hash", "backfill", res1, time.Now(), trackedRunOpts{},
 		"INSERT INTO staging.acks_marker VALUES ('create')"); err != nil {
 		t.Fatalf("scd2 create: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestMaterializeSCD2_ThreadsExtraPreSQL(t *testing.T) {
 
 	// Second call → SCD2 backfill path (target now exists, isBackfill=true).
 	res2 := &Result{Target: model.Target}
-	if _, err := runner.materializeSCD2(model, "tmp_src", true, "", "", "hash", "backfill", res2, time.Now(),
+	if _, err := runner.materializeSCD2(model, "tmp_src", true, "", "", "hash", "backfill", res2, time.Now(), trackedRunOpts{},
 		"INSERT INTO staging.acks_marker VALUES ('backfill')"); err != nil {
 		t.Fatalf("scd2 backfill: %v", err)
 	}
