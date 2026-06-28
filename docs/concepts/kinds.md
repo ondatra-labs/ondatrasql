@@ -54,6 +54,8 @@ SCD2 (Slowly Changing Dimension Type 2) keeps every version of a row. When a pro
 
 `@push` is not supported with scd2. To push current state to an external system, use `@kind: table` with `WHERE is_current = true` in a separate sync model.
 
+When the source is a lib, a 0-row fetch defaults to "no change" — current versions are preserved rather than closed. A lib that fully enumerates its source and treats an empty fetch as "everything is gone" must opt in to closing all current versions via `empty_result: "delete_missing"` in the fetch return; see [Fetch Contract](/reference/lib-functions/fetch-contract/#empty-fetches-and-tracked).
+
 ## How to choose
 
 Ask yourself:

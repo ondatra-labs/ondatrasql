@@ -196,7 +196,7 @@ return {
 |---|---|---|
 | `"rows"` | Yes | List of dicts. Each dict is one row. |
 | `"next"` | No | Cursor for the next page. Any type — string, int, dict. `None`, missing, or `""` stops pagination. |
-| `"empty_result"` | No | Read from the final page; takes effect only when the fetch returned 0 rows total. `"no_change"` (default) tells `tracked` materialize to preserve the existing target. `"delete_missing"` tells it the source is fully enumerated and groups absent from the empty result should be deleted from the target. |
+| `"empty_result"` | No | Read from the final page; takes effect only when the fetch returned 0 rows total. `"no_change"` (default) tells `tracked` and `scd2` materialize to preserve the existing target. `"delete_missing"` tells it the source is fully enumerated and groups/versions absent from the empty result should be deleted from the target. |
 
 The cursor is opaque — the runtime stores and returns it as-is. Dicts pass through directly:
 
@@ -204,12 +204,12 @@ The cursor is opaque — the runtime stores and returns it as-is. Dicts pass thr
 next_cursor = {"idx": series_idx, "from": next_date, "until": yesterday}
 ```
 
-## Empty fetches and `tracked` {#empty-fetches-and-tracked}
+## Empty fetches and `tracked` / `scd2` {#empty-fetches-and-tracked}
 
-For `tracked`-kind models the runtime needs to know what a 0-row fetch *means*. Two cases:
+For `tracked`- and `scd2`-kind models the runtime needs to know what a 0-row fetch *means*. Two cases:
 
 1. **Source has nothing new this run** — the lib reads a cache key, last-modified timestamp, or pre-computed digest, decides nothing changed upstream, and returns 0 rows. The target should stay as-is.
-2. **Source is fully enumerated and is genuinely empty** — every row in the target should be deleted.
+2. **Source is fully enumerated and is genuinely empty** — every row in the target should be deleted (tracked: missing groups; scd2: current versions are closed).
 
 Set `empty_result` on the final page (the one whose `next` is `None` / missing / `""`) to disambiguate. The default is `no_change`, which is safe for fetches that may return 0 rows for any reason. Use `delete_missing` only when the lib enumerates the full source on every run and an empty fetch is the authoritative "everything is gone" signal.
 
@@ -278,6 +278,16 @@ The runtime handles the poll loop — `check()` is called with the configured in
 `abort()` in `submit()` is valid — materializes with 0 rows. `fail()` in any function stops the pipeline.
 
 ## Error handling
+
+**Always check `resp.ok`.** `http.*` only raises on 5xx, 429, and transport
+failures (those retry, then fail the run). A **4xx** returns a response with
+`resp.ok == False` — it does *not* raise. Read `resp.json` without checking and
+a client error becomes a silent **0-row** return, which for a `table` or `scd2`
+model wipes / closes the target. `ondatrasql validate` reports an INFO finding
+(`blueprint.unchecked_status`) for any `fetch` that calls `http.*` without
+checking `resp.ok` / `resp.status_code`, and the runtime warns at run time;
+silence an intentional case (e.g. an API that 404s for an empty collection) with
+a `# ondatracheck:allow-unchecked-status <reason>` comment in the lib file.
 
 **Fail** — stops the pipeline with an error:
 

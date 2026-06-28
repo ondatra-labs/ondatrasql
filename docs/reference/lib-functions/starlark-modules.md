@@ -67,6 +67,8 @@ Retries on 429 and 5xx. Exponential backoff with jitter. Respects `Retry-After` 
 API = {"retry": 3, "backoff": 2}  # 3 retries, 2s/4s/8s backoff
 ```
 
+A **4xx** response (404, 400, 401, 403) is **not** retried and does **not** raise — it returns a response with `resp.ok == False`. Check `resp.ok` in your `fetch` (see [Error handling](/reference/lib-functions/fetch-contract/#error-handling)); otherwise a client error is silently read as 0 rows.
+
 ## env
 
 Access environment variables from `.env` or shell.
