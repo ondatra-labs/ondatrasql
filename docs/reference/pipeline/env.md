@@ -32,7 +32,15 @@ KEY='single quoted'
 
 ## OAuth2 Provider Variables
 
-OAuth2 uses your own app credentials (the self-contained flow). Provider name maps to an env prefix: `google-sheets` becomes `GOOGLE_SHEETS_*`. (The hosted-broker flow via `ONDATRA_KEY` / oauth2.ondatra.sh was removed in v0.36.0.)
+Provider name maps to an env prefix: `google-sheets` becomes `GOOGLE_SHEETS_*`. (The hosted-broker flow via `ONDATRA_KEY` / oauth2.ondatra.sh was removed in v0.36.0.) Two ways to authenticate, checked in this order:
+
+**1. Injected access token** — if set, used directly; ondatrasql does no consent, refresh, or token storage. For setups where an orchestrator or secrets manager (e.g. OpenBao) owns the OAuth lifecycle and hands a fresh access token per run.
+
+| Variable | Description |
+|---|---|
+| `ONDATRA_OAUTH_TOKEN_<PREFIX>` | Pre-obtained OAuth2 access token; sent as `Authorization: Bearer`. `<PREFIX>` is the provider upper-cased with `-`→`_` — so `google-sheets` → `ONDATRA_OAUTH_TOKEN_GOOGLE_SHEETS`. Takes precedence over the local flow. The caller refreshes it between runs and must inject a token whose lifetime covers the run — for runs longer than the provider's token TTL, use the local flow instead. A whitespace-only value is treated as unset. |
+
+**2. Self-contained local flow** — your own app credentials; `ondatrasql auth <provider>` does browser consent and stores the refresh token in the encrypted state catalog, refreshed in-process.
 
 | Variable | Description |
 |---|---|

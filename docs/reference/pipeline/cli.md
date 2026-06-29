@@ -231,6 +231,8 @@ ondatrasql auth fortnox           # Authenticate
 
 OAuth2 uses your own app credentials — set `<PREFIX>_CLIENT_ID`, `<PREFIX>_CLIENT_SECRET`, `<PREFIX>_AUTH_URL`, `<PREFIX>_TOKEN_URL`, and `<PREFIX>_SCOPE` in `.env`. (The hosted-broker "managed" flow via `ONDATRA_KEY` / oauth2.ondatra.sh was removed in v0.36.0.)
 
+Alternatively, skip `ondatrasql auth` and let an orchestrator inject a pre-obtained access token via `ONDATRA_OAUTH_TOKEN_<PREFIX>` — it takes precedence over the stored credentials (see [Set Up OAuth](/guides/set-up-oauth/)).
+
 Refresh tokens are stored in the `state.tokens` table inside the state catalog (see [config/state.sql](/reference/configuration/config-state/)) and auto-refresh on every pipeline run. The state catalog is encrypted at rest via DuckDB's `ENCRYPTION_KEY` option using `ONDATRA_STATE_KEY` from `.env`.
 
 `ondatrasql auth` requires `config/state.sql` to exist — run `ondatrasql init` first in a fresh project.

@@ -78,7 +78,10 @@ The runtime handles token refresh, header injection, and caching. Auth is only i
 "auth": {"provider": "hubspot"}
 ```
 
-Register with `ondatrasql auth <provider>`. Tokens refresh automatically.
+Resolved one of two ways (in order):
+
+1. **Injected token** — if `ONDATRA_OAUTH_TOKEN_HUBSPOT` is set in the environment, it is used directly as the Bearer token, taking precedence over the local flow. The var name is `ONDATRA_OAUTH_TOKEN_` + the provider upper-cased with `-`→`_` (so `google-sheets` → `ONDATRA_OAUTH_TOKEN_GOOGLE_SHEETS`). Use this when an orchestrator or secrets manager (e.g. OpenBao) owns the OAuth lifecycle; ondatrasql does no consent/refresh/storage.
+2. **Local flow** — otherwise, register once with `ondatrasql auth <provider>` (your own client credentials); the refresh token is stored in the encrypted state catalog and refreshed automatically.
 
 ### Basic auth
 

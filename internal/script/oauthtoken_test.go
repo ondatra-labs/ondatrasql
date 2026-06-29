@@ -423,3 +423,92 @@ func TestFetchGoogleToken(t *testing.T) {
 		t.Logf("fetchGoogleToken error (expected): %v", err)
 	}
 }
+
+// TestFetchProviderToken_EnvInjected pins the externally-injected access-token
+// path: when ONDATRA_OAUTH_TOKEN_<PROVIDER> is set, the provider flow uses it
+// directly as the Bearer token — no state DB, no refresh, taking precedence
+// over the local flow. This is the path for setups where an orchestrator /
+// OpenBao owns the OAuth lifecycle and ondatrasql is a pure consumer.
+func TestFetchProviderToken_EnvInjected(t *testing.T) {
+	t.Setenv("ONDATRA_OAUTH_TOKEN_FORTNOX", "AT_injected")
+
+	tp := &tokenProvider{
+		ctx:      context.Background(),
+		provider: "fortnox",
+		stateDB:  nil, // deliberately nil: the env-injected path must not need state
+	}
+
+	tok, err := tp.AccessToken()
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok != "AT_injected" {
+		t.Errorf("access_token = %q, want AT_injected (from ONDATRA_OAUTH_TOKEN_FORTNOX)", tok)
+	}
+}
+
+// TestFetchProviderToken_EnvInjected_WinsOverState pins precedence: an injected
+// env token is used even when a local token row exists in state.
+func TestFetchProviderToken_EnvInjected_WinsOverState(t *testing.T) {
+	db := newTokenStoreDB(t, seedTokenRow{
+		provider:     "fortnox",
+		refreshToken: "RT_local",
+		local:        true,
+		tokenURL:     "https://example.com/token",
+	})
+	t.Setenv("ONDATRA_OAUTH_TOKEN_FORTNOX", "AT_injected")
+
+	tp := &tokenProvider{
+		ctx:      context.Background(),
+		provider: "fortnox",
+		stateDB:  db,
+	}
+
+	tok, err := tp.AccessToken()
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok != "AT_injected" {
+		t.Errorf("access_token = %q, want AT_injected (env must win over state)", tok)
+	}
+}
+
+// TestFetchProviderToken_EnvInjected_HyphenatedProvider pins the env-var name
+// derivation for a hyphenated provider: google-sheets → ONDATRA_OAUTH_TOKEN_GOOGLE_SHEETS
+// (ProviderEnvPrefix upper-cases and maps '-' → '_'). A regression in that
+// derivation would not be caught by the non-hyphenated tests.
+func TestFetchProviderToken_EnvInjected_HyphenatedProvider(t *testing.T) {
+	t.Setenv("ONDATRA_OAUTH_TOKEN_GOOGLE_SHEETS", "AT_sheets")
+
+	tp := &tokenProvider{
+		ctx:      context.Background(),
+		provider: "google-sheets",
+		stateDB:  nil, // env path must not need state
+	}
+
+	tok, err := tp.AccessToken()
+	if err != nil {
+		t.Fatalf("AccessToken: %v", err)
+	}
+	if tok != "AT_sheets" {
+		t.Errorf("access_token = %q, want AT_sheets (from ONDATRA_OAUTH_TOKEN_GOOGLE_SHEETS)", tok)
+	}
+}
+
+// TestFetchProviderToken_EnvInjected_WhitespaceIsUnset pins that a whitespace-only
+// injected token (e.g. a trailing newline from a secrets injector) is treated as
+// unset and falls through to the local flow, rather than producing a malformed
+// "Bearer <whitespace>" header. With no state, the fall-through surfaces an error.
+func TestFetchProviderToken_EnvInjected_WhitespaceIsUnset(t *testing.T) {
+	t.Setenv("ONDATRA_OAUTH_TOKEN_FORTNOX", "  \n\t ")
+
+	tp := &tokenProvider{
+		ctx:      context.Background(),
+		provider: "fortnox",
+		stateDB:  nil,
+	}
+
+	if _, err := tp.AccessToken(); err == nil {
+		t.Fatal("expected fall-through error: a whitespace-only token must be treated as unset")
+	}
+}

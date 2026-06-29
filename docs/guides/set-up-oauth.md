@@ -76,6 +76,24 @@ HUBSPOT_SCOPE=contacts
 
 Then run `ondatrasql auth hubspot`. Tokens are exchanged directly with the provider.
 
+## Bring your own token (orchestrator-owned OAuth)
+
+If something outside ondatrasql already owns the OAuth lifecycle — an orchestrator, or a secrets manager like OpenBao that holds the refresh token — you can skip `ondatrasql auth` entirely and inject a fresh access token via the environment:
+
+```bash
+export ONDATRA_OAUTH_TOKEN_HUBSPOT="$(your-tool mint-access-token hubspot)"
+ondatrasql run
+```
+
+`<PREFIX>` is the provider name upper-cased with `-`→`_` — so `auth: {"provider": "google-sheets"}` reads `ONDATRA_OAUTH_TOKEN_GOOGLE_SHEETS`, and `hubspot` reads `ONDATRA_OAUTH_TOKEN_HUBSPOT`.
+
+When it is set, the `auth: {"provider": ...}` lib uses it directly as the Bearer token — no consent, no refresh, no token storage in ondatrasql — and it takes precedence over the local flow. Two caveats:
+
+- **Token lifetime must cover the run.** The injected token is used as-is for the whole run; for runs longer than the provider's access-token TTL, use the local flow (which refreshes in-process) instead.
+- **A stale env var silently wins.** Because the env var takes precedence over a stored token, a leftover `ONDATRA_OAUTH_TOKEN_<PREFIX>` overrides a valid local token and surfaces only as downstream 401s — unset it when you switch back to the local flow.
+
+This keeps credentials in your secrets manager and ondatrasql a pure consumer.
+
 ## Token storage
 
 Refresh tokens are stored as rows in the `state.tokens` table inside the state catalog (`state.duckdb` by default, see [config/state.sql](/reference/configuration/config-state/)). The state file is encrypted at rest with DuckDB's AES-GCM file-level encryption using `ONDATRA_STATE_KEY` from `.env`. `ondatrasql init` generates the key and writes it to `.env` — keep a backup of the key separately from the state file. Losing the key makes the entire state (tokens included) unreadable.

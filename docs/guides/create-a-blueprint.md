@@ -35,7 +35,7 @@ Auth patterns:
 "auth": {"env": "API_KEY"}                                           # API key → Bearer header
 "auth": {"env": "API_KEY", "header": "X-Api-Key"}                    # API key → custom header
 "auth": {"env": "API_KEY", "param": "api_key"}                       # API key → query parameter
-"auth": {"provider": "hubspot"}                                      # OAuth2 (run ondatrasql auth hubspot first)
+"auth": {"provider": "hubspot"}                                      # OAuth2 (ondatrasql auth hubspot, or inject ONDATRA_OAUTH_TOKEN_HUBSPOT)
 "auth": {"user": {"env": "USER"}, "pass": {"env": "PASS"}}           # Basic auth
 "auth": {"service_account": {"env": "KEY_FILE"}, "scope": "..."}     # Google service account
 ```

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,8 +115,29 @@ func (tp *tokenProvider) fetchToken() (map[string]interface{}, error) {
 }
 
 func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
+	if err := oauth2host.ValidateProvider(tp.provider); err != nil {
+		return nil, err
+	}
+
+	// Externally-injected access token: when ONDATRA_OAUTH_TOKEN_<PREFIX> is set
+	// (PREFIX = provider upper-cased with '-'→'_', via ProviderEnvPrefix), the
+	// caller (an orchestrator / OpenBao) owns the OAuth lifecycle and hands us a
+	// fresh access token. Use it directly as the Bearer credential — no consent,
+	// no refresh, no state. Preferred where a secrets manager owns the refresh
+	// token; it takes precedence over the self-contained local flow below.
+	//
+	// TrimSpace so a trailing newline from a secrets injector doesn't yield a
+	// malformed "Bearer <whitespace>" header; a whitespace-only value is treated
+	// as unset (falls through to the local flow). The token carries no
+	// expires_in, so AccessToken() caches it for the run's default window — the
+	// caller must inject a token whose lifetime covers the run (for runs longer
+	// than the provider's token TTL, use the local flow instead).
+	if envTok := strings.TrimSpace(os.Getenv("ONDATRA_OAUTH_TOKEN_" + oauth2host.ProviderEnvPrefix(tp.provider))); envTok != "" {
+		return map[string]interface{}{"access_token": envTok}, nil
+	}
+
 	if tp.stateDB == nil {
-		return nil, fmt.Errorf("oauth provider %q requested but state handle missing (auth flow requires state.duckdb)", tp.provider)
+		return nil, fmt.Errorf("oauth provider %q requested but no token available: set ONDATRA_OAUTH_TOKEN_%s (injected access token) or run `ondatrasql auth %s` for the local flow (needs state.duckdb)", tp.provider, oauth2host.ProviderEnvPrefix(tp.provider), tp.provider)
 	}
 	tokenFile, err := oauth2host.ReadToken(tp.stateDB, tp.provider)
 	if err != nil {

@@ -302,7 +302,7 @@ Configured in the API dict. Injected into every `http.*` call automatically.
 # API key
 "auth": {"env": "API_KEY"}
 
-# OAuth provider (browser-based)
+# OAuth provider (browser consent, or inject ONDATRA_OAUTH_TOKEN_<PREFIX>)
 "auth": {"provider": "hubspot"}
 
 # Basic auth
