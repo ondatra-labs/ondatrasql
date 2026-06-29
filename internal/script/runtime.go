@@ -647,14 +647,6 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 		return nil, fmt.Errorf("source %q: fetch is not a function (got %s)", source, fn.Type())
 	}
 
-	// Check for finalize_fetch
-	var finalizeFn starlark.Callable
-	if ff, ok := globals["finalize_fetch"]; ok {
-		if fc, ok := ff.(starlark.Callable); ok {
-			finalizeFn = fc
-		}
-	}
-
 	// Build keyword args from config
 	var kwargs []starlark.Tuple
 	for key, val := range config {
@@ -732,16 +724,6 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 		}
 		cursor = nextVal
 		pageNum++
-	}
-
-	// Call finalize_fetch(row_count) if defined
-	if finalizeFn != nil {
-		_, err := starlark.Call(thread, finalizeFn, starlark.Tuple{
-			starlark.MakeInt64(int64(collector.count())),
-		}, nil)
-		if err != nil {
-			return nil, fmt.Errorf("finalize_fetch: %w", err)
-		}
 	}
 
 	result = &Result{
