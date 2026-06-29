@@ -9,9 +9,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -2265,18 +2262,4 @@ SELECT id, name, email, ssn FROM raw.customers
 	snap.addQueryRows(p.Sess, "data",
 		"SELECT id, name, email, ssn FROM staging.customers ORDER BY id")
 	assertGolden(t, "column_masking", snap)
-}
-
-func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
-	t.Helper()
-	l, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("skipping: cannot bind IPv4 loopback: %v", err)
-	}
-	srv := &httptest.Server{
-		Listener: l,
-		Config:   &http.Server{Handler: handler},
-	}
-	srv.Start()
-	return srv
 }
