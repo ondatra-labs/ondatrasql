@@ -216,6 +216,7 @@ func (r *Runtime) libraryPredeclared(ctx context.Context, httpCfg ...*apiHTTPCon
 		"env":         envModule(),
 		"xml":         xmlModule(),
 		"csv":         csvModule(),
+		"yaml":        yamlModule(),
 		"lib_helpers": libHelpersModule(),
 
 		// DuckDB-backed builtins

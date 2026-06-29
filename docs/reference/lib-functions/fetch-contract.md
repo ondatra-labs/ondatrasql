@@ -377,6 +377,7 @@ The split is mechanical and worth it: each `@fetch` model has its own lib lifecy
 | `time` | Date/time operations (Starlark stdlib). |
 | `xml` | XML parsing. |
 | `csv` | CSV parsing. |
+| `yaml` | YAML parsing and encoding. |
 | `lib_helpers` | OndatraSQL helpers: `lib_helpers.to_json_schema(t)` converts a DuckDB type to a JSON Schema dict. |
 
 ### DuckDB-backed builtins

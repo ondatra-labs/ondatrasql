@@ -294,5 +294,5 @@ def finalize(succeeded, failed):
 - [API Dict](/reference/lib-functions/api-dict/) — all fields and options
 - [Fetch Contract](/reference/lib-functions/fetch-contract/) — complete function spec
 - [Push Contract](/reference/lib-functions/push-contract/) — change types, batch modes, return values
-- [Starlark Modules](/reference/lib-functions/starlark-modules/) — http, env, builtins, csv, xml, time
+- [Starlark Modules](/reference/lib-functions/starlark-modules/) — http, env, builtins, yaml, csv, xml, time
 - [Blueprints](/blueprints/) — working examples for Mistral OCR, Riksbank, Google Ad Manager

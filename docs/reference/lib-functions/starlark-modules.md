@@ -1,6 +1,6 @@
 ---
 date: "2026-05-01"
-description: Runtime modules and builtins available in Starlark blueprints — http, env, json, time, xml, csv, lib_helpers, plus DuckDB-backed and Go-native helpers.
+description: Runtime modules and builtins available in Starlark blueprints — http, env, json, yaml, time, xml, csv, lib_helpers, plus DuckDB-backed and Go-native helpers.
 draft: false
 title: Starlark Modules
 weight: 22
@@ -131,6 +131,34 @@ rows = csv.decode("name,age\nAlice,30\nBob,25")
 rows = csv.decode(data, delimiter="\t", header=False)  # returns list of lists
 
 output = csv.encode([{"name": "Alice", "age": "30"}])
+```
+
+## yaml
+
+Parse and encode YAML. Mappings become dicts, sequences become lists, and scalars become the matching Starlark type (int, float, bool, string, `None`).
+
+```python
+data = yaml.decode("title: Hello\ntags:\n  - a\n  - b\n")
+# {"title": "Hello", "tags": ["a", "b"]}
+
+output = yaml.encode({"title": "Hello", "tags": ["a", "b"]})
+```
+
+An empty, whitespace-only, or comment-only document decodes to `None` (this differs from `json.decode`/`xml.decode`, which error on empty input). For a multi-document stream (`---`-separated), only the **first** document is returned.
+
+A common use is reading YAML frontmatter from Markdown — slice the leading `---` block out of `read_text(...)` and decode it (nested maps and lists come through typed, unlike a regex). Locate the closing fence by its own line (`\n---`) rather than splitting on every `---`, so a `---` inside a frontmatter value doesn't break the boundary:
+
+```python
+for path in glob(dir + "/**/*.md"):
+    text = read_text(path)
+    if not text.startswith("---\n"):
+        continue
+    end = text.find("\n---", 3)   # closing fence (own line)
+    if end == -1:
+        continue
+    fm = yaml.decode(text[4:end])
+    body = text[end + 4:].lstrip("\n")
+    # fm["title"], fm["tags"][0], fm["metadata"]["weight"], ...
 ```
 
 ## lib_helpers

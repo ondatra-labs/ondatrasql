@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/clbanning/mxj/v2 v2.7.0
 	github.com/duckdb/duckdb-go/v2 v2.10503.0
+	github.com/goccy/go-yaml v1.17.1
 	github.com/lib/pq v1.10.9
 	github.com/rogpeppe/go-internal v1.14.1
 	github.com/testcontainers/testcontainers-go v0.41.0
