@@ -73,7 +73,7 @@ ATTACH 'quack:state.example.com:9494' AS state
     (TYPE quack, TOKEN '${ONDATRA_QUACK_TOKEN}');
 ```
 
-Allows multiple ondatrasql processes to share a single state database without filesystem locks. Currently blocked: DuckDB 1.5.3 cannot run client-side `UPDATE`/`DELETE`/upsert statements over a Quack `ATTACH`, which the state store relies on — track the [duckdb-quack issue tracker](https://github.com/duckdb/duckdb-quack/issues). When that lands, switching backend is a one-line edit in `state.sql` with no Go code change.
+Allows multiple ondatrasql processes to share a single state database without filesystem locks. Currently blocked: DuckDB 1.5.4 cannot run client-side `UPDATE`/`DELETE`/upsert statements over a Quack `ATTACH`, which the state store relies on (`UPDATE`/`DELETE` raise `Can only update/delete base table`; upsert raises `GetStorageInfo not implemented yet`) — track the [duckdb-quack issue tracker](https://github.com/duckdb/duckdb-quack/issues). When that lands, switching backend is a one-line edit in `state.sql` with no Go code change.
 
 ### Postgres (not implemented yet)
 
