@@ -36,7 +36,7 @@ ATTACH 'state.duckdb' AS state
 
 The file lives in the project root. AES-GCM-256 file-level encryption is enabled by `ONDATRA_STATE_KEY`, generated automatically during `ondatrasql init`.
 
-Switching backend is a one-line edit in `state.sql` — see [config/state.sql](/reference/configuration/config-state/) for the Quack and Postgres alternatives.
+Switching backend is an edit to `state.sql` — see [config/state.sql](/reference/configuration/config-state/) for the Postgres alternative, and for why Quack is not usable yet.
 
 ## Why the `state` alias is reserved
 
@@ -46,7 +46,9 @@ Everything in OndatraSQL that talks to state uses unqualified table names (`sync
 
 DuckDB takes a process-level file lock on `state.duckdb`. Only one ondatrasql process can have it open at a time. Inside that process, push goroutines hammer state in parallel — DuckDB's MVCC handles the contention internally.
 
-For multi-process or multi-pod deployments where several ondatrasql workers must share state, you need a backend that supports cross-process writers. Quack (a DuckDB-served state catalog) or a future Postgres backend are the supported paths. The Go code is identical for all backends — only `state.sql` changes.
+For multi-process or multi-pod deployments, you need a backend without a filesystem lock. **Postgres works today** — attach it in `state.sql` and no Go code changes. Quack (a DuckDB-served state catalog) is the other intended path but is currently blocked: `UPDATE`, `DELETE` and upsert all fail over a Quack `ATTACH`. See [config/state.sql](/reference/configuration/config-state/) for both.
+
+Note that removing the lock is not the same as supporting concurrent workers on the *same* pipeline. The fetch-staging claim is unscoped, and startup recovery resets claims it finds in flight, so two workers on one pipeline will claim each other's rows. Run one worker per pipeline, and give each pipeline its own state database or schema.
 
 ## Crash recovery
 

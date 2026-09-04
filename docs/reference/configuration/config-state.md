@@ -63,21 +63,40 @@ Running these in a project without `config/state.sql` fails with `open state: co
 
 ## Other backends
 
-The Go runtime is backend-agnostic — it only depends on `state` being an attached catalog with the schema above. Two future backends are planned:
+The Go runtime is backend-agnostic — it only depends on `state` being an attached catalog with the schema above. Switching backend is an edit to `state.sql`; no Go code changes.
+
+### Postgres (shared state, multi-process)
+
+```sql
+INSTALL postgres;
+LOAD postgres;
+ATTACH 'dbname=ondatra_state host=db.internal port=5432 user=ondatra password=${PG_STATE_PASSWORD}'
+    AS state (TYPE postgres);
+```
+
+Removes the filesystem lock, so several `ondatrasql` processes can hold state open at once. Useful when running in ephemeral containers, where a local `state.duckdb` would be wiped between runs.
+
+No DDL adapter is needed: DuckDB's postgres extension maps `BLOB` and `DEFAULT now()` itself, and the upsert the token store relies on (`INSERT OR REPLACE`) works. The state file's AES-GCM encryption does not apply here — secure the Postgres instance instead.
+
+**Removing the lock is not the same as supporting concurrent workers.** Two processes running *the same* pipeline against one state database will interfere: the fetch-staging claim is `UPDATE … SET claim_id = ? WHERE claim_id IS NULL`, which is unscoped, so one worker claims another's staged rows. Worse, startup recovery resets any claim not yet recorded in `_ondatra_acks`, so starting a second worker while the first is mid-run un-claims its live rows and both process them. Give each pipeline its own database or schema, and run one worker per pipeline at a time.
 
 ### Quack (shared DuckDB server, multi-pod)
 
 ```sql
 LOAD quack;
-ATTACH 'quack:state.example.com:9494' AS state
+ATTACH 'quack://state.example.com:9494' AS state
     (TYPE quack, TOKEN '${ONDATRA_QUACK_TOKEN}');
 ```
 
-Allows multiple ondatrasql processes to share a single state database without filesystem locks. Currently blocked: DuckDB 1.5.4 cannot run client-side `UPDATE`/`DELETE`/upsert statements over a Quack `ATTACH`, which the state store relies on (`UPDATE`/`DELETE` raise `Can only update/delete base table`; upsert raises `GetStorageInfo not implemented yet`) — track the [duckdb-quack issue tracker](https://github.com/duckdb/duckdb-quack/issues). When that lands, switching backend is a one-line edit in `state.sql` with no Go code change.
+**Currently blocked.** `ATTACH`, `CREATE TABLE` and `INSERT` work, but the write operations the state store depends on do not:
 
-### Postgres (not implemented yet)
+| Operation | Error |
+|---|---|
+| `UPDATE` | `Binder Error: Can only update base table` |
+| `DELETE` | `Binder Error: Can only delete from base table` |
+| `INSERT OR REPLACE` | `Not implemented Error: GetStorageInfo not implemented yet` |
 
-Would require a small DDL adapter in `internal/state/` (BLOB → BYTEA, `now()` → `CURRENT_TIMESTAMP`). Useful when running ondatrasql in ephemeral containers where state must survive `cleanup` between runs.
+Verified against DuckDB 1.5.4. Track the [duckdb-quack issue tracker](https://github.com/duckdb/duckdb-quack/issues); a production-ready Quack is expected alongside DuckDB 2.0. Until then, use Postgres for shared state.
 
 ## See also
 
