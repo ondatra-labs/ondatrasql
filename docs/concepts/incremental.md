@@ -28,7 +28,7 @@ The cursor resets and a full reload runs when:
 - Your target table doesn't exist (first run)
 - You changed the model SQL
 - You changed `@kind`, `@unique_key`, `@group_key`, `@partitioned_by`, `@incremental`, `@incremental_initial`, `@fetch`, or `@push`
-- You changed any file in `config/` (macros, variables, settings)
+- You changed config that this model actually uses — a macro or variable it names, a source it reads, or session-wide config like `settings.sql` or `sources.sql`. Editing a macro no other model calls, bumping `threads`, adding a schema, or touching `state.sql` rebuilds nothing. See [Run Types](/reference/pipeline/run-types/) for the exact rules.
 
 This is intentionally destructive. A changed query means the old data was produced by a different definition, so starting fresh is safer than trying to patch incrementally on top of stale data. On backfill, `is_backfill` is `True` and `last_value` falls back to `initial_value` (passed as kwargs to `fetch()`).
 

@@ -1,15 +1,18 @@
 -- Batch query for run_type decisions (dependency-aware)
 -- Computes run_type for ALL models in one query instead of N individual queries
--- Args: 1) VALUES list like ('t1','h1','k1'),('t2','h2','k2')
+-- Args: 1) VALUES list like ('t1','h1','k1',f1,'c1'),('t2','h2','k2',f2,'c2')
 -- Logic: table kind uses dependency tracking to skip when nothing changed
+-- current_config_hash is compared separately from current_hash so a config
+-- edit reports 'config changed' instead of being blamed on the model SQL.
 WITH model_input AS (
-    SELECT * FROM (VALUES %s) AS t(target, current_hash, kind, is_fetch)
+    SELECT * FROM (VALUES %s) AS t(target, current_hash, kind, is_fetch, current_config_hash)
 ),
 -- Get ALL latest commits in one scan (instead of N individual lookups)
 latest_commits AS (
     SELECT
         commit_extra_info->>'model' AS model,
         commit_extra_info->>'sql_hash' AS prev_hash,
+        commit_extra_info->>'config_hash' AS prev_config_hash,
         commit_extra_info->>'depends' AS depends_raw,
         snapshot_id,
         -- Partition on lowercased model so case-variant commits are deduped
@@ -25,7 +28,15 @@ model_status AS (
         m.current_hash,
         m.kind,
         m.is_fetch,
+        m.current_config_hash,
         COALESCE(lc.prev_hash, '') AS prev_hash,
+        COALESCE(lc.prev_config_hash, '') AS prev_config_hash,
+        -- Commits written before config_hash existed have no such key at all,
+        -- which `->>` reports as NULL (an empty value comes back as ''). That
+        -- distinguishes a pre-upgrade commit from a model that simply uses no
+        -- config, so the one-time rebuild can name itself instead of posing
+        -- as an ordinary "sql changed".
+        lc.prev_config_hash IS NULL AS prev_config_hash_missing,
         lc.depends_raw,
         TRY_CAST(lc.depends_raw AS VARCHAR[]) AS depends_array,
         CASE
@@ -80,11 +91,15 @@ SELECT
     CASE
         -- Non-table kinds: standard logic
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'backfill'
+        WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'backfill'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'backfill'
+        WHEN ms.kind != 'table' AND ms.prev_config_hash != ms.current_config_hash THEN 'backfill'
         WHEN ms.kind != 'table' THEN 'incremental'
         -- Table kind: dependency-aware skip logic
         WHEN ms.prev_hash = '' THEN 'backfill'
+        WHEN ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'backfill'
         WHEN ms.prev_hash != ms.current_hash THEN 'backfill'
+        WHEN ms.prev_config_hash != ms.current_config_hash THEN 'backfill'
         -- @kind: table @fetch pulls from external APIs whose state isn't
         -- visible to the runtime — never skip, always do a full re-fetch.
         WHEN ms.is_fetch THEN 'full'
@@ -98,14 +113,18 @@ SELECT
     CASE
         -- Non-table kinds
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'first run'
+        WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'hash format changed (upgrade)'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'sql changed'
+        WHEN ms.kind != 'table' AND ms.prev_config_hash != ms.current_config_hash THEN 'config changed'
         -- For incremental kinds (append/merge/scd2/tracked) the SQL being
         -- unchanged doesn't mean nothing happens — the model still runs
         -- to ingest new source rows. (Bug 15)
         WHEN ms.kind != 'table' THEN 'incremental run'
         -- Table kind
         WHEN ms.prev_hash = '' THEN 'first run'
+        WHEN ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'hash format changed (upgrade)'
         WHEN ms.prev_hash != ms.current_hash THEN 'sql changed'
+        WHEN ms.prev_config_hash != ms.current_config_hash THEN 'config changed'
         WHEN ms.is_fetch THEN 'fetch source'
         WHEN ms.depends_raw IS NULL THEN 'missing depends metadata'
         WHEN ms.depends_invalid THEN 'invalid depends metadata'

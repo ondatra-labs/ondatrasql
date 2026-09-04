@@ -8,6 +8,9 @@ package backfill
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,14 +38,19 @@ type ModelDirectives struct {
 	IncrementalInitial string
 	Fetch              bool   // @fetch — flips strict-fetch validator + lib-call relationship rule
 	Push               string // @push — flips strict-push validator + sink wiring
-	ConfigHash         string // SHA256 of config/*.sql files (macros, variables, etc.)
 }
 
 // ModelHash calculates a hash that includes both the code body and semantic
 // directives. Changing @kind, @unique_key, @partitioned_by, @incremental,
-// @incremental_initial, @fetch, @push, or config/*.sql file content triggers
-// a backfill because the hash changes — which forces validators to fire on
-// the next run instead of being silently bypassed by the skip path.
+// @incremental_initial, @fetch or @push triggers a backfill because the hash
+// changes — which forces validators to fire on the next run instead of being
+// silently bypassed by the skip path.
+//
+// Config content is deliberately NOT folded in here. It is tracked as its own
+// commit field (CommitInfo.ConfigHash) so the run-type query can tell
+// "sql changed" apart from "config changed" instead of blaming the model,
+// and so a model is only rebuilt for the config it actually uses.
+// See BuildConfigIndex.
 func ModelHash(sql string, d ModelDirectives) string {
 	normalized := normalize(sql)
 
@@ -68,103 +76,203 @@ func ModelHash(sql string, d ModelDirectives) string {
 	}
 	b.WriteString("\x00push=")
 	b.WriteString(d.Push)
-	if d.ConfigHash != "" {
-		b.WriteString("\x00config=")
-		b.WriteString(d.ConfigHash)
-	}
 
 	h := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(h[:])
 }
 
 // normalize removes comments and normalizes whitespace for consistent hashing.
+// SQL bodies are lowercased so identifier casing doesn't bust the hash.
 func normalize(sql string) string {
-	// Replace tabs with spaces
-	sql = strings.ReplaceAll(sql, "\t", " ")
+	return normalizeText(sql, true)
+}
 
-	var result strings.Builder
-	lines := strings.Split(sql, "\n")
+// normalizeText strips `--` line comments and `/* ... */` block comments, and
+// collapses whitespace runs to a single space. When lower is true, text is
+// lowercased as well.
+//
+// All three transformations apply ONLY outside 'string literals' and "quoted
+// identifiers"; quoted regions are copied through byte for byte. That matters
+// in both directions:
+//
+//   - Inside a literal, whitespace and line breaks are data. Collapsing them
+//     would make 'a\nb' and 'a b' hash equal.
+//   - Inside a literal, case is data. Lowercasing would make 'Active' and
+//     'active' hash equal — so a model whose only change is a filter value
+//     would not rebuild.
+//
+// Both are the missed-rebuild direction, which is the failure this package
+// exists to prevent.
+//
+// Config files are normalized with lower=false. Unlike a SQL body, config
+// carries case-significant text outside literals too (endpoints, paths,
+// environment names), and folding that case would let two genuinely different
+// configs hash equal.
+func normalizeText(sql string, lower bool) string {
+	var out strings.Builder
+	out.Grow(len(sql))
 
-	for _, line := range lines {
-		// Remove single-line SQL comments (--)
-		// Respect string literals: don't strip -- inside '...'
-		if idx := indexCommentOutsideString(line); idx != -1 {
-			line = line[:idx]
-		}
+	var q quoteState
+	pendingSpace := false
 
-		// Trim and add if non-empty
-		line = strings.TrimSpace(line)
-		if line != "" {
-			if result.Len() > 0 {
-				result.WriteString(" ")
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+
+		if q.quoted() {
+			out.WriteByte(c)
+			switch {
+			case c == '\'' && !q.inIdent:
+				q.inString = !q.inString
+			case c == '"' && !q.inString:
+				q.inIdent = !q.inIdent
 			}
-			result.WriteString(line)
+			continue
 		}
+
+		// Outside quotes: a `--` runs to end of line.
+		if c == '-' && i+1 < len(sql) && sql[i+1] == '-' {
+			for i < len(sql) && sql[i] != '\n' {
+				i++
+			}
+			pendingSpace = true
+			continue
+		}
+
+		// Outside quotes: a `/* ... */` block runs to its terminator. Leaving
+		// these in would do more than keep a comment in the hash — a block
+		// comment ahead of a CREATE MACRO stops the statement being recognized
+		// at all, demoting it to the global bucket so one comment edit rebuilds
+		// every model.
+		if c == '/' && i+1 < len(sql) && sql[i+1] == '*' {
+			i += 2
+			for i+1 < len(sql) && !(sql[i] == '*' && sql[i+1] == '/') {
+				i++
+			}
+			i++ // land on the '/'; the loop's i++ steps past it
+			pendingSpace = true
+			continue
+		}
+
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			pendingSpace = true
+			continue
+		}
+
+		if pendingSpace {
+			if out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			pendingSpace = false
+		}
+
+		switch {
+		case c == '\'':
+			q.inString = true
+		case c == '"':
+			q.inIdent = true
+		case lower && c >= 'A' && c <= 'Z':
+			c += 'a' - 'A'
+		}
+		out.WriteByte(c)
 	}
 
-	// Normalize multiple spaces to single space
-	normalized := result.String()
-	for strings.Contains(normalized, "  ") {
-		normalized = strings.ReplaceAll(normalized, "  ", " ")
-	}
-
-	return strings.ToLower(normalized)
+	return out.String()
 }
 
-// indexCommentOutsideString finds the first "--" that is not inside a
-// single-quoted SQL string literal. Returns -1 if none found.
-func indexCommentOutsideString(line string) int {
-	inString := false
-	for i := 0; i < len(line); i++ {
-		if line[i] == '\'' {
-			inString = !inString
-		} else if !inString && i+1 < len(line) && line[i] == '-' && line[i+1] == '-' {
-			return i
-		}
-	}
-	return -1
+// quoteState tracks whether a scan is inside a 'string literal' or a
+// "quoted identifier". Both can contain `--`, and both can span lines.
+type quoteState struct {
+	inString bool // inside '...'
+	inIdent  bool // inside "..."
 }
 
-// ConfigHash computes a SHA256 hash over all .sql files in the config
-// directory and its subdirectories (config/macros/, config/variables/).
-// Changes to any config SQL file will change the hash and trigger re-runs
-// for every model (Bug S21 fix). Files are sorted by path for determinism.
-// Returns "" if the directory doesn't exist or contains no .sql files.
-func ConfigHash(configDir string) string {
+func (q quoteState) quoted() bool { return q.inString || q.inIdent }
+
+// hashExcludedConfigFiles lists config files whose content is deliberately
+// kept out of the config hash.
+//
+// Only state.sql qualifies. It configures the operational-state backend (push
+// queue, fetch staging, OAuth tokens) and is not part of the model execution
+// session at all — state.Open runs it against its own :memory: DuckDB session.
+// Nothing in it can change what a model computes.
+//
+// Everything else stays in. In particular, secrets.sql and catalog.sql are
+// NOT excluded, despite sounding like pure plumbing:
+//
+//   - Credentials do not live in these files. cmd/ondatrasql loads .env into
+//     the process environment and loadConfigSQL runs os.ExpandEnv over every
+//     config file, so secret *values* are ${VAR} references. Rotating a
+//     credential edits .env, which is not hashed either way.
+//   - What these files do hold is topology — a secret's ENDPOINT, REGION,
+//     SCOPE, HOST, DATABASE, PROVIDER; a catalog's DATA_PATH. Editing any of
+//     those changes which bytes a model reads while its SQL stays identical.
+//     Skipping the rebuild there would serve stale data silently.
+var hashExcludedConfigFiles = map[string]bool{
+	"state.sql": true,
+}
+
+// configFile is one hashable config file: its path relative to the config
+// directory, and its normalized content.
+type configFile struct {
+	rel  string
+	body string
+}
+
+// readConfigFiles returns the hashable .sql files under configDir and its
+// subdirectories (config/macros/, config/variables/), sorted by path for
+// determinism. Files on hashExcludedConfigFiles are skipped.
+//
+// Contents are normalized (comments and whitespace stripped, case kept) so
+// that reformatting or re-commenting config does not rebuild the lake.
+//
+// Returns (nil, nil) when configDir does not exist or holds no hashable .sql
+// files — that is a project with no config, not a failure.
+//
+// Any other problem is returned as an error rather than degraded into an empty
+// file list. A partial read would hash as "no config", which silently turns
+// config-change tracking off for every model in the project: exactly the
+// failure this package exists to prevent, and invisible when it happens.
+func readConfigFiles(configDir string) ([]configFile, error) {
 	var paths []string
-	// WalkDir's top-level error fires only when configDir itself cannot
-	// be opened (missing dir, permission denied at the root). Both of
-	// those produce an empty file list; the early return below converts
-	// that to the documented `""` sentinel. Per-entry walk errors are
-	// swallowed inside the callback so a single broken symlink doesn't
-	// invalidate the whole hash.
 	if err := filepath.WalkDir(configDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			// A directory we cannot descend into may hide .sql files; a file
+			// we cannot stat may be one. Config directories are small and
+			// hand-maintained, so failing loudly beats hashing a subset.
+			return fmt.Errorf("walk %s: %w", path, err)
 		}
 		if !d.IsDir() && strings.HasSuffix(d.Name(), ".sql") {
-			rel, _ := filepath.Rel(configDir, path)
+			rel, relErr := filepath.Rel(configDir, path)
+			if relErr != nil {
+				return fmt.Errorf("relative path for %s: %w", path, relErr)
+			}
+			if hashExcludedConfigFiles[rel] {
+				return nil
+			}
 			paths = append(paths, rel)
 		}
 		return nil
 	}); err != nil {
-		return ""
+		// A missing config directory is a project without config, not an
+		// error. errors.Is, not os.IsNotExist: the walk error is wrapped, and
+		// os.IsNotExist does not unwrap.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	if len(paths) == 0 {
-		return ""
+		return nil, nil
 	}
 	sort.Strings(paths)
 
-	h := sha256.New()
+	files := make([]configFile, 0, len(paths))
 	for _, rel := range paths {
 		content, err := os.ReadFile(filepath.Join(configDir, rel))
 		if err != nil {
-			return ""
+			return nil, fmt.Errorf("read config/%s: %w", rel, err)
 		}
-		h.Write([]byte(rel))
-		h.Write([]byte{0})
-		h.Write(content)
-		h.Write([]byte{0})
+		files = append(files, configFile{rel: rel, body: normalizeText(string(content), false)})
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return files, nil
 }

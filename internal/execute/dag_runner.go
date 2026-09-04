@@ -77,8 +77,30 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		defer func() { _ = sharedState.Close() }()
 	}
 
-	cfgHash := backfill.ConfigHash(filepath.Join(projectDir, "config"))
-	decisions, decisionErr := ComputeRunTypeDecisions(sess, sorted, cfgHash)
+	// Guard on projectDir: filepath.Join("", "config") yields the relative
+	// path "config", which would index whatever happens to sit in the process
+	// CWD. The per-model Runner only gets a config index when SetProjectDir is
+	// called below, so an unguarded index here would make the decision and the
+	// stored commit disagree — a permanent "config changed" backfill loop.
+	//
+	// Same index and same reference text as Runner.modelConfigHash, so the
+	// batch decision and the value written into the commit always agree.
+	var configIndex *backfill.ConfigIndex
+	if projectDir != "" {
+		ix, cfgErr := backfill.BuildConfigIndex(filepath.Join(projectDir, "config"))
+		if cfgErr != nil {
+			// Every model's run-type decision depends on this. Running with a
+			// partial or absent index would silently disable config-change
+			// detection across the whole DAG.
+			errors := make(map[string]error)
+			errors["_validation"] = fmt.Errorf("read config: %w", cfgErr)
+			return nil, errors
+		}
+		configIndex = ix
+	}
+	decisions, decisionErr := ComputeRunTypeDecisions(sess, sorted, func(m *parser.Model) string {
+		return configIndex.HashFor(configRefText(m))
+	})
 	if decisionErr != nil {
 		errors := make(map[string]error)
 		errors["_validation"] = decisionErr
@@ -124,7 +146,10 @@ func RunDAG(ctx context.Context, sess *duckdb.Session, sorted []*parser.Model,
 		}
 		runner.SetRunTypeDecisions(decisions)
 		if projectDir != "" {
-			runner.SetProjectDir(projectDir)
+			// Share the index built above rather than re-walking config/ per
+			// model. Also guarantees the value written into each commit is
+			// the one the batch decision was made from.
+			runner.SetProjectDirWithConfigIndex(projectDir, configIndex)
 		}
 		if sharedState != nil {
 			runner.SetStateStore(sharedState)

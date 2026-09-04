@@ -40,10 +40,12 @@ type CommitInfo struct {
 	// Core identification
 	Model         string                  `json:"model"`
 	SQLHash       string                  `json:"sql_hash"`
+	ConfigHash    string                  `json:"config_hash"`
 	SchemaHash    string                  `json:"schema_hash,omitempty"`
 	Columns       []Column                `json:"columns,omitempty"`
 	ColumnLineage []lineage.ColumnLineage `json:"column_lineage,omitempty"`
 	RunType       string                  `json:"run_type"`
+	RunReason     string                  `json:"run_reason"`
 	RowsAffected  int64                   `json:"rows_affected"`
 	DagRunID      string                  `json:"dag_run_id,omitempty"`
 	Depends       []string                `json:"depends"`

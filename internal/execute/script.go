@@ -123,13 +123,12 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 		IncrementalInitial: model.IncrementalInitial,
 		Fetch:              model.Fetch,
 		Push:               model.Push,
-		ConfigHash:         r.configHash,
 	})
 	r.trace(result, "hash_script", stepStart, "ok")
 
 	// Determine run_type using SQL-based logic (same as SQL models)
 	stepStart = time.Now()
-	decision, err := ComputeSingleRunType(r.sess, model, r.configHash)
+	decision, err := ComputeSingleRunType(r.sess, model, r.modelConfigHash(model))
 	r.trace(result, "run_type.compute", stepStart, "ok")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("run_type check: %v", err))

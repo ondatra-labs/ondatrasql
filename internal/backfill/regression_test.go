@@ -128,55 +128,112 @@ func TestCaptureSchema_ThreePartName(t *testing.T) {
 // --- GetPreviousSnapshot: error propagation ---
 // Requires DuckLake session — covered in e2e/regression_test.go.
 
-// --- ConfigHash: unreadable files ---
+// --- readConfigFiles: unreadable files ---
 
-func TestConfigHash_UnreadableFile(t *testing.T) {
+func TestConfigFiles_UnreadableFile(t *testing.T) {
 	t.Parallel()
 	// Before fix: unreadable files were silently skipped.
-	// After fix: returns "" (same as empty dir) because the
+	// After fix: returns nil (same as empty dir) because the
 	// file content can't be read.
 	// Note: we can't easily test permission errors in unit tests
 	// on all platforms, so this is a documentation test.
 }
 
-// TestConfigHash_NonexistentDir regression-tests the fix that makes
-// ConfigHash check WalkDir's top-level error explicitly. Pre-fix the
+// TestConfigIndex_NonexistentDir regression-tests the fix that makes the
+// config walk check WalkDir's top-level error explicitly. Pre-fix the
 // `_` discard meant a non-existent or permission-denied configDir
-// silently returned a hash over zero files (i.e. ""). The function
-// docstring promises that contract; the test pins it so a future
-// caller adds-a-checking-but-different-path doesn't break it.
-func TestConfigHash_NonexistentDir(t *testing.T) {
+// silently returned a hash over zero files (i.e. ""). The contract is that
+// no config means config never forces a rebuild; the test pins it so a
+// future caller adding a different path doesn't break it.
+func TestConfigIndex_NonexistentDir(t *testing.T) {
 	t.Parallel()
 	// A path that's guaranteed not to exist on any sane filesystem.
-	got := ConfigHash("/this/path/definitely/does/not/exist")
-	if got != "" {
-		t.Errorf("ConfigHash(nonexistent) = %q, want empty string", got)
+	ix, err := BuildConfigIndex("/this/path/definitely/does/not/exist")
+	if err != nil {
+		t.Errorf("a missing config dir is a project without config, not an error: %v", err)
+	}
+	if ix != nil {
+		t.Error("BuildConfigIndex(nonexistent) should return a nil index")
+	}
+	if got := ix.HashFor("SELECT 1"); got != "" {
+		t.Errorf("nil index HashFor = %q, want empty string", got)
 	}
 }
 
-// --- indexCommentOutsideString ---
+// --- normalizeText ---
 
-func TestIndexCommentOutsideString(t *testing.T) {
+// TestNormalizeText covers the hashing primitive every model and config hash
+// is built on. Every case here is a pair of inputs that must NOT collapse to
+// the same normalized form, or a pair that must — getting either wrong means
+// a model silently keeps stale data or rebuilds for nothing.
+func TestNormalizeText(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		line string
-		want int
+		name  string
+		in    string
+		lower bool
+		want  string
 	}{
-		{"SELECT 1 -- comment", 9},
-		{"-- full line comment", 0},
-		{"SELECT 'foo--bar'", -1},
-		{"SELECT 'a' -- comment", 11},
-		{"no comment here", -1},
-		{"'str''s--val' -- end", 14},
-		{"", -1},
-		{"--", 0},
+		{name: "trailing comment stripped", in: "SELECT 1 -- comment", lower: true, want: "select 1"},
+		{name: "full line comment stripped", in: "-- all of it", lower: true, want: ""},
+		{name: "whitespace collapsed", in: "SELECT\n\t1   +  2", lower: true, want: "select 1 + 2"},
+		{name: "dashes inside literal kept", in: "SELECT 'foo--bar'", lower: true, want: "select 'foo--bar'"},
+		{name: "escaped quote handled", in: "SELECT 'it''s' -- note", lower: true, want: "select 'it''s'"},
+		{name: "apostrophe in comment ignored", in: "SELECT 1 -- don't", lower: true, want: "select 1"},
+
+		// Case is data inside a literal: lowercasing it would make a model
+		// whose only change is a filter value hash equal to the old one.
+		{name: "literal case preserved", in: "WHERE s = 'Active'", lower: true, want: "where s = 'Active'"},
+		{name: "identifier case folded", in: "SELECT Foo FROM Bar", lower: true, want: "select foo from bar"},
+
+		// Whitespace is data inside a literal too.
+		{name: "newline inside literal preserved", in: "SET x = 'a\nb'", want: "SET x = 'a\nb'"},
+		{name: "spaces inside literal preserved", in: "SET x = 'a   b'", want: "SET x = 'a   b'"},
+
+		// Quoted identifiers behave like literals for comments and case.
+		{name: "dashes inside identifier kept", in: `CREATE VIEW "ev--v1" AS SELECT 1`, lower: true, want: `create view "ev--v1" as select 1`},
+		{name: "identifier quoting case preserved", in: `SELECT "MixedCase"`, lower: true, want: `select "MixedCase"`},
+
+		// A quote of one kind inside the other is data, not a delimiter.
+		{name: "double quote inside literal", in: `SELECT 'a "b' -- note`, lower: true, want: `select 'a "b'`},
+		{name: "apostrophe inside identifier", in: `SELECT "a'b" -- note`, lower: true, want: `select "a'b"`},
+
+		{name: "empty", in: "", want: ""},
+		{name: "comment only", in: "--", want: ""},
+
+		// Block comments are stripped too. Leaving one in would also stop the
+		// statement behind it being recognized as a macro definition.
+		{name: "block comment stripped", in: "/* note */ CREATE MACRO m() AS 1", lower: true, want: "create macro m() as 1"},
+		{name: "block comment mid-statement", in: "SELECT 1 /* why */ + 2", lower: true, want: "select 1 + 2"},
+		{name: "block comment spanning lines", in: "/* a\nb */ SELECT 1", lower: true, want: "select 1"},
+		{name: "block comment unterminated", in: "SELECT 1 /* never closed", lower: true, want: "select 1"},
+		{name: "block markers inside literal kept", in: "SELECT '/* not a comment */'", lower: true, want: "select '/* not a comment */'"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.line, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := indexCommentOutsideString(tt.line)
-			if got != tt.want {
-				t.Errorf("indexCommentOutsideString(%q) = %d, want %d", tt.line, got, tt.want)
+			if got := normalizeText(tt.in, tt.lower); got != tt.want {
+				t.Errorf("normalizeText(%q, %v) = %q, want %q", tt.in, tt.lower, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeText_DistinctInputsStayDistinct pins the pairs that previously
+// collapsed. Each is a missed-rebuild bug if it regresses.
+func TestNormalizeText_DistinctInputsStayDistinct(t *testing.T) {
+	t.Parallel()
+	pairs := []struct{ name, a, b string }{
+		{"literal case", "WHERE s = 'Active'", "WHERE s = 'active'"},
+		{"newline vs space in literal", "SET x = 'a\nb'", "SET x = 'a b'"},
+		{"content after dashes in a multi-line literal", "SET x = 'a\n-- k\nb'", "SET x = 'a\n-- k\nc'"},
+		{"content after dashes in an identifier", `CREATE VIEW "e--1" AS SELECT 1`, `CREATE VIEW "e--1" AS SELECT 2`},
+	}
+	for _, p := range pairs {
+		t.Run(p.name, func(t *testing.T) {
+			t.Parallel()
+			if normalizeText(p.a, true) == normalizeText(p.b, true) {
+				t.Errorf("%q and %q must not normalize alike (got %q)", p.a, p.b, normalizeText(p.a, true))
 			}
 		})
 	}

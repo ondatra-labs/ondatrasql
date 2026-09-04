@@ -5,8 +5,6 @@
 package backfill
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -278,171 +276,21 @@ func TestHash_OnlyComments(t *testing.T) {
 	}
 }
 
-func TestModelHash_ConfigHash(t *testing.T) {
+func TestModelHash_ExcludesConfig(t *testing.T) {
 	t.Parallel()
+	// Config content is tracked as its own commit field (CommitInfo.ConfigHash)
+	// and compared separately by execute/batch_run_type.sql, so the run-type
+	// query can say "config changed" instead of blaming the model SQL.
+	// ModelHash must therefore depend only on the body and its directives.
 	sql := "SELECT mask_ssn(ssn) FROM users"
-	d := ModelDirectives{Kind: "table"}
-
-	t.Run("empty config hash preserves backward compat", func(t *testing.T) {
-		t.Parallel()
-		h1 := ModelHash(sql, d)
-		d2 := d
-		d2.ConfigHash = ""
-		h2 := ModelHash(sql, d2)
-		if h1 != h2 {
-			t.Error("empty ConfigHash should produce same hash as no ConfigHash")
-		}
-	})
-
-	t.Run("config change busts hash", func(t *testing.T) {
-		t.Parallel()
-		d1 := d
-		d1.ConfigHash = "aaa"
-		d2 := d
-		d2.ConfigHash = "bbb"
-		h1 := ModelHash(sql, d1)
-		h2 := ModelHash(sql, d2)
-		if h1 == h2 {
-			t.Error("different ConfigHash should produce different model hash")
-		}
-	})
-}
-
-func TestConfigHash(t *testing.T) {
-	t.Parallel()
-
-	t.Run("missing dir returns empty", func(t *testing.T) {
-		t.Parallel()
-		h := ConfigHash("/nonexistent/path")
-		if h != "" {
-			t.Errorf("missing dir should return empty, got %q", h)
-		}
-	})
-
-	t.Run("empty dir returns empty", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		h := ConfigHash(dir)
-		if h != "" {
-			t.Errorf("empty dir should return empty, got %q", h)
-		}
-	})
-
-	t.Run("same content same hash", func(t *testing.T) {
-		t.Parallel()
-		dir1 := t.TempDir()
-		dir2 := t.TempDir()
-		os.WriteFile(filepath.Join(dir1, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
-		os.WriteFile(filepath.Join(dir2, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
-		if ConfigHash(dir1) != ConfigHash(dir2) {
-			t.Error("same content should produce same hash")
-		}
-	})
-
-	t.Run("different content different hash", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
-		h1 := ConfigHash(dir)
-		os.WriteFile(filepath.Join(dir, "macros.sql"), []byte("CREATE MACRO m() AS 2;"), 0o644)
-		h2 := ConfigHash(dir)
-		if h1 == h2 {
-			t.Error("different content should produce different hash")
-		}
-	})
-
-	t.Run("ignores non-sql files", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "macros.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
-		h1 := ConfigHash(dir)
-		os.WriteFile(filepath.Join(dir, "README.md"), []byte("ignore me"), 0o644)
-		h2 := ConfigHash(dir)
-		if h1 != h2 {
-			t.Error("non-sql files should not affect hash")
-		}
-	})
-}
-
-func TestConfigHash_Subdirectories(t *testing.T) {
-	t.Parallel()
-
-	t.Run("includes macros subdirectory", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "catalog.sql"), []byte("ATTACH 'lake';"), 0o644)
-		h1 := ConfigHash(dir)
-
-		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
-		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("CREATE MACRO m() AS 1;"), 0o644)
-		h2 := ConfigHash(dir)
-
-		if h1 == h2 {
-			t.Error("adding macros/audits.sql must change config hash")
-		}
-	})
-
-	t.Run("includes variables subdirectory", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "catalog.sql"), []byte("ATTACH 'lake';"), 0o644)
-		h1 := ConfigHash(dir)
-
-		os.MkdirAll(filepath.Join(dir, "variables"), 0o755)
-		os.WriteFile(filepath.Join(dir, "variables", "local.sql"), []byte("SET VARIABLE x = 1;"), 0o644)
-		h2 := ConfigHash(dir)
-
-		if h1 == h2 {
-			t.Error("adding variables/local.sql must change config hash")
-		}
-	})
-
-	t.Run("change in subdirectory file changes hash", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
-		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("v1"), 0o644)
-		h1 := ConfigHash(dir)
-
-		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("v2"), 0o644)
-		h2 := ConfigHash(dir)
-
-		if h1 == h2 {
-			t.Error("changing macros/audits.sql must change config hash")
-		}
-	})
-
-	t.Run("subdirectory deterministic across runs", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
-		os.MkdirAll(filepath.Join(dir, "variables"), 0o755)
-		os.WriteFile(filepath.Join(dir, "catalog.sql"), []byte("ATTACH 'lake';"), 0o644)
-		os.WriteFile(filepath.Join(dir, "macros", "a.sql"), []byte("a"), 0o644)
-		os.WriteFile(filepath.Join(dir, "macros", "b.sql"), []byte("b"), 0o644)
-		os.WriteFile(filepath.Join(dir, "variables", "local.sql"), []byte("x"), 0o644)
-
-		h1 := ConfigHash(dir)
-		h2 := ConfigHash(dir)
-		if h1 != h2 {
-			t.Error("same content must produce same hash across calls")
-		}
-	})
-
-	t.Run("ignores non-sql in subdirectories", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		os.MkdirAll(filepath.Join(dir, "macros"), 0o755)
-		os.WriteFile(filepath.Join(dir, "macros", "audits.sql"), []byte("m"), 0o644)
-		h1 := ConfigHash(dir)
-
-		os.WriteFile(filepath.Join(dir, "macros", "README.md"), []byte("ignore"), 0o644)
-		h2 := ConfigHash(dir)
-
-		if h1 != h2 {
-			t.Error("non-sql files in subdirectories should not affect hash")
-		}
-	})
+	h1 := ModelHash(sql, ModelDirectives{Kind: "table"})
+	h2 := ModelHash(sql, ModelDirectives{Kind: "table"})
+	if h1 != h2 {
+		t.Error("ModelHash must be deterministic for identical input")
+	}
+	if h3 := ModelHash(sql, ModelDirectives{Kind: "append"}); h1 == h3 {
+		t.Error("directive change must still bust the model hash")
+	}
 }
 
 func TestNormalize_EdgeCases(t *testing.T) {

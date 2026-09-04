@@ -24,61 +24,58 @@ type RunTypeDecision struct {
 // RunTypeDecisions maps target names to their run type decisions.
 type RunTypeDecisions map[string]*RunTypeDecision
 
+// runTypeValueRow renders one model as a VALUES tuple for
+// execute/batch_run_type.sql: (target, current_hash, kind, is_fetch,
+// current_config_hash). Shared by the batch and single-model paths so both
+// compare exactly the same inputs.
+func runTypeValueRow(m *parser.Model, cfgHash string) string {
+	hash := backfill.ModelHash(m.SQL, backfill.ModelDirectives{
+		Kind:               m.Kind,
+		UniqueKey:          m.UniqueKey,
+		GroupKey:           m.GroupKey,
+		PartitionedBy:      m.PartitionedBy,
+		Incremental:        m.Incremental,
+		IncrementalInitial: m.IncrementalInitial,
+		Fetch:              m.Fetch,
+		Push:               m.Push,
+	})
+	q := func(v string) string { return strings.ReplaceAll(v, "'", "''") }
+	return fmt.Sprintf("('%s','%s','%s',%t,'%s')",
+		q(m.Target), q(hash), q(m.Kind), m.Fetch, q(cfgHash))
+}
+
 // ComputeRunTypeDecisions executes a single batch query to determine run_type
 // for all models, reducing N database round-trips to 1.
 //
 // The query builds a CTE with model info (target, current_hash, kind) and joins
 // with DuckDB macros to compute decisions in one pass.
-func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, configHash ...string) (RunTypeDecisions, error) {
+//
+// hashFor optionally supplies the config hash that applies to each individual
+// model — see Runner.modelConfigHash. It is compared against that model's
+// stored `config_hash`, NOT folded into its model hash, which is what the
+// config argument meant before config indexing. Models in one project
+// legitimately have different config hashes, so a caller with config must
+// resolve per model; supplying one value for all of them would yield a
+// permanent "config changed" backfill loop. Omit it for callers with no
+// config at all (tests, in-memory sessions), where every hash is "".
+func ComputeRunTypeDecisions(sess *duckdb.Session, models []*parser.Model, hashFor ...func(*parser.Model) string) (RunTypeDecisions, error) {
 	if len(models) == 0 {
 		return make(RunTypeDecisions), nil
 	}
 
-	// Build model info: compute SQL hash for each model
-	type modelInfo struct {
-		target      string
-		currentHash string
-		kind        string
-		fetch       bool
+	resolve := func(*parser.Model) string { return "" }
+	if len(hashFor) > 0 && hashFor[0] != nil {
+		resolve = hashFor[0]
 	}
 
-	cfgHash := ""
-	if len(configHash) > 0 {
-		cfgHash = configHash[0]
-	}
-
-	var infos []modelInfo
-	for _, m := range models {
-		infos = append(infos, modelInfo{
-			target:      m.Target,
-			currentHash: backfill.ModelHash(m.SQL, backfill.ModelDirectives{
-				Kind:               m.Kind,
-				UniqueKey:          m.UniqueKey,
-				GroupKey:           m.GroupKey,
-				PartitionedBy:      m.PartitionedBy,
-				Incremental:        m.Incremental,
-				IncrementalInitial: m.IncrementalInitial,
-				Fetch:              m.Fetch,
-				Push:               m.Push,
-				ConfigHash:         cfgHash,
-			}),
-			kind:  m.Kind,
-			fetch: m.Fetch,
-		})
-	}
-
-	if len(infos) == 0 {
-		return make(RunTypeDecisions), nil
-	}
-
-	// Build VALUES list for model input: ('t1','h1','k1',f1),('t2','h2','k2',f2)
+	// Build VALUES list for model input:
+	//   ('t1','h1','k1',f1,'c1'),('t2','h2','k2',f2,'c2')
+	// The config hash travels as its own column rather than being folded
+	// into the model hash, so the query can report "config changed"
+	// separately from "sql changed".
 	var valueRows []string
-	for _, info := range infos {
-		// Escape values for SQL safety
-		target := strings.ReplaceAll(info.target, "'", "''")
-		hash := strings.ReplaceAll(info.currentHash, "'", "''")
-		kind := strings.ReplaceAll(info.kind, "'", "''")
-		valueRows = append(valueRows, fmt.Sprintf("('%s','%s','%s',%t)", target, hash, kind, info.fetch))
+	for _, m := range models {
+		valueRows = append(valueRows, runTypeValueRow(m, resolve(m)))
 	}
 
 	// v0.12.0+: snapshots() resolves via USE to the active catalog. In sandbox
@@ -117,28 +114,17 @@ func (d RunTypeDecisions) GetDecision(target string) *RunTypeDecision {
 
 // ComputeSingleRunType computes run_type for a single model using the same SQL logic as batch.
 // This provides consistency between single model runs and run_all.
+//
+// configHash must be the hash that applies to THIS model — see
+// Runner.modelConfigHash. It is compared against the model's stored
+// `config_hash`, not folded into its model hash.
 func ComputeSingleRunType(sess *duckdb.Session, model *parser.Model, configHash ...string) (*RunTypeDecision, error) {
 	cfgHash := ""
 	if len(configHash) > 0 {
 		cfgHash = configHash[0]
 	}
 	// Use the same SQL template with a single VALUE row
-	target := strings.ReplaceAll(model.Target, "'", "''")
-	hash := strings.ReplaceAll(backfill.ModelHash(model.SQL, backfill.ModelDirectives{
-		Kind:               model.Kind,
-		UniqueKey:          model.UniqueKey,
-		GroupKey:           model.GroupKey,
-		PartitionedBy:      model.PartitionedBy,
-		Incremental:        model.Incremental,
-		IncrementalInitial: model.IncrementalInitial,
-		Fetch:              model.Fetch,
-		Push:               model.Push,
-		ConfigHash:         cfgHash,
-	}), "'", "''")
-	kind := strings.ReplaceAll(model.Kind, "'", "''")
-	valueRow := fmt.Sprintf("('%s','%s','%s',%t)", target, hash, kind, model.Fetch)
-
-	query := sql.MustFormat("execute/batch_run_type.sql", valueRow)
+	query := sql.MustFormat("execute/batch_run_type.sql", runTypeValueRow(model, cfgHash))
 
 	rows, err := sess.QueryRowsMap(query)
 	if err != nil {

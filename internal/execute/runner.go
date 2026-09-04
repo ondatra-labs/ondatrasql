@@ -59,7 +59,8 @@ type Runner struct {
 	mode             Mode
 	dagRunID         string
 	projectDir       string                // Project root directory (for Starlark load())
-	configHash       string                // SHA256 of config/*.sql files (Bug S21: macros/variables bust hash)
+	configIndex      *backfill.ConfigIndex // config/ decomposed into per-statement buckets
+	configIndexErr   error                 // config/ exists but could not be read (fatal for the run)
 	gitInfo          gitInfo               // Cached Git metadata
 	runTypeDecisions RunTypeDecisions      // Pre-computed run_type decisions (batch optimization)
 	astCache         map[string]string     // Cached AST JSON by SQL hash (reduces duplicate lineage queries)
@@ -102,10 +103,37 @@ func (r *Runner) SetLibRegistry(reg *libregistry.Registry) {
 }
 
 // SetProjectDir sets the project root directory for Starlark load() support.
-// Also computes the config hash for Bug S21 (macros/variables change detection).
+// Also indexes config/ so macro and variable changes are detected per model
+// (Bug S21).
 func (r *Runner) SetProjectDir(dir string) {
 	r.projectDir = dir
-	r.configHash = backfill.ConfigHash(filepath.Join(dir, "config"))
+	// A read failure is held, not swallowed: Run surfaces it. Treating an
+	// unreadable config/ as "no config" would silently disable config-change
+	// detection for every model in the project.
+	r.configIndex, r.configIndexErr = backfill.BuildConfigIndex(filepath.Join(dir, "config"))
+}
+
+// SetProjectDirWithConfigIndex sets the project root and the config index
+// together, skipping the config read SetProjectDir would perform.
+//
+// RunDAG builds the index once and shares it, so a DAG of N models walks and
+// parses config/ once instead of N times. Setting the two in one call is what
+// makes that true: calling SetProjectDir first and overwriting the index
+// afterwards would still do the per-model read, and would additionally
+// discard a read error from it — hiding a broken config behind an index that
+// happened to be built a moment earlier.
+func (r *Runner) SetProjectDirWithConfigIndex(dir string, ix *backfill.ConfigIndex) {
+	r.projectDir = dir
+	r.configIndex = ix
+	r.configIndexErr = nil
+}
+
+// modelConfigHash returns the config hash that applies to this model — the
+// value compared against `config_hash` in the model's last DuckLake commit.
+// It covers only the config fragments this model actually uses, plus the
+// session-wide config that applies to everything.
+func (r *Runner) modelConfigHash(model *parser.Model) string {
+	return r.configIndex.HashFor(configRefText(model))
 }
 
 // SetStateStore lets the caller inject an externally-owned state.duckdb
@@ -215,6 +243,15 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		lastTraceEnd: start, // Initialize for gap tracking
 	}
 
+	// config/ exists but could not be read. Aborting is the point: proceeding
+	// would hash every model as "no config" and quietly stop detecting config
+	// changes for the rest of the project's life.
+	if r.configIndexErr != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("read config: %v", r.configIndexErr))
+		result.Duration = time.Since(start)
+		return result, fmt.Errorf("read config for %s: %w", model.Target, r.configIndexErr)
+	}
+
 	// Load required DuckDB extensions
 	if len(model.Extensions) > 0 {
 		stepStart := time.Now()
@@ -246,7 +283,6 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		IncrementalInitial: model.IncrementalInitial,
 		Fetch:              model.Fetch,
 		Push:               model.Push,
-		ConfigHash:         r.configHash,
 	})
 	r.trace(result, "hash_sql", stepStart, "ok")
 
@@ -262,7 +298,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// SINGLE: Compute using same SQL logic as batch
 		stepStart = time.Now()
 		var err error
-		decision, err = ComputeSingleRunType(r.sess, model, r.configHash)
+		decision, err = ComputeSingleRunType(r.sess, model, r.modelConfigHash(model))
 		r.trace(result, "run_type.compute", stepStart, "ok")
 		if err != nil {
 			// Abort rather than fall back to backfill — a transient DB error

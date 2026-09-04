@@ -300,10 +300,12 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	info := backfill.CommitInfo{
 		Model:         model.Target,
 		SQLHash:       sqlHash,
+		ConfigHash:    r.modelConfigHash(model),
 		SchemaHash:    schemaHash,
 		Columns:       columns,
 		ColumnLineage: colLineage,
 		RunType:       runType,
+		RunReason:     result.RunReason,
 		RowsAffected:  count,
 		DagRunID:      r.dagRunID,
 		Depends:       tableDeps,
@@ -315,7 +317,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		DurationMs:    endTime.Sub(startTime).Milliseconds(),
 		DuckDBVersion: r.sess.GetVersion(),
 		// Execution trace
-		Steps:      steps,
+		Steps: steps,
 
 		// Git fields
 		GitCommit:  r.gitInfo.Commit,
@@ -697,10 +699,12 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		info := backfill.CommitInfo{
 			Model:         model.Target,
 			SQLHash:       sqlHash,
+			ConfigHash:    r.modelConfigHash(model),
 			SchemaHash:    schemaHash,
 			Columns:       columns,
 			ColumnLineage: colLineage,
 			RunType:       runType,
+			RunReason:     result.RunReason,
 			RowsAffected:  rowsAffected,
 			DagRunID:      r.dagRunID,
 			Depends:       tableDeps,
@@ -712,8 +716,8 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			DurationMs:    endTime.Sub(startTime).Milliseconds(),
 			DuckDBVersion: r.sess.GetVersion(),
 			// Execution trace
-			Steps:      steps,
-	
+			Steps: steps,
+
 			// Git fields
 			GitCommit:  r.gitInfo.Commit,
 			GitBranch:  r.gitInfo.Branch,
@@ -763,13 +767,13 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		endTime := time.Now()
 		steps := ConvertTraceToSteps(result.Trace)
 		info := backfill.CommitInfo{
-			Model: model.Target, SQLHash: sqlHash, SchemaHash: schemaHash,
-			Columns: columns, ColumnLineage: colLineage, RunType: runType,
+			Model: model.Target, SQLHash: sqlHash, ConfigHash: r.modelConfigHash(model), SchemaHash: schemaHash,
+			Columns: columns, ColumnLineage: colLineage, RunType: runType, RunReason: result.RunReason,
 			RowsAffected: rowsAffected, DagRunID: r.dagRunID, Depends: tableDeps,
 			Kind: model.Kind, SourceFile: model.FilePath,
-			StartTime: startTime.UTC().Format(time.RFC3339),
-			EndTime: endTime.UTC().Format(time.RFC3339),
-			DurationMs: endTime.Sub(startTime).Milliseconds(),
+			StartTime:     startTime.UTC().Format(time.RFC3339),
+			EndTime:       endTime.UTC().Format(time.RFC3339),
+			DurationMs:    endTime.Sub(startTime).Milliseconds(),
 			DuckDBVersion: r.sess.GetVersion(), Steps: steps,
 			GitCommit: r.gitInfo.Commit, GitBranch: r.gitInfo.Branch, GitRepoURL: r.gitInfo.RepoURL,
 		}
@@ -837,7 +841,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 	rollbackOnErr := func(err error, msg string) (int64, error) {
 		r.trace(result, "commit", stepStart, "error")
-		_ = r.sess.Exec("ROLLBACK") // session is in error state from upstream Exec; next Exec surfaces a clearer error
+		_ = r.sess.Exec("ROLLBACK")                          // session is in error state from upstream Exec; next Exec surfaces a clearer error
 		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_changes") // IF EXISTS makes non-existence OK
 		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted") // IF EXISTS makes non-existence OK
 		return 0, fmt.Errorf("%s: %w", msg, err)
@@ -902,10 +906,12 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	info := backfill.CommitInfo{
 		Model:         model.Target,
 		SQLHash:       sqlHash,
+		ConfigHash:    r.modelConfigHash(model),
 		SchemaHash:    schemaHash,
 		Columns:       columns,
 		ColumnLineage: colLineage,
 		RunType:       runType,
+		RunReason:     result.RunReason,
 		RowsAffected:  rowsAffected,
 		DagRunID:      r.dagRunID,
 		Depends:       tableDeps,
@@ -985,7 +991,6 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 
 	return rowsAffected, nil
 }
-
 
 // materializeTracked creates or updates a tracked table with content-hash change detection.
 // Groups rows by group_key and computes an md5 hash of all non-key columns per group.
@@ -1132,10 +1137,12 @@ FROM %s s JOIN group_hash g ON %s`,
 	info := backfill.CommitInfo{
 		Model:         model.Target,
 		SQLHash:       sqlHash,
+		ConfigHash:    r.modelConfigHash(model),
 		SchemaHash:    schemaHash,
 		Columns:       columns,
 		ColumnLineage: colLineage,
 		RunType:       runType,
+		RunReason:     result.RunReason,
 		DagRunID:      r.dagRunID,
 		Depends:       tableDeps,
 		Kind:          model.Kind,
