@@ -73,7 +73,15 @@ install-tools:
 #   - push-call-missing-auth → internal/lintcheck/pushauthcheck
 #   - removed-lib-dicts      → internal/lintcheck/removedlibdictscheck
 bugcheck-static:
-	@echo "bugcheck-static: clean (all rules migrated to internal/lintcheck/* — see ondatrachecks)"
+	@# ast-fixture-class-is-type: a hand-written AST fixture whose `class` is
+	@# set to a `type` value. DuckDB reports these as separate fields — a cast
+	@# is class "CAST", type "OPERATOR_CAST" — so a fixture using the type as
+	@# the class can match a buggy extractor and keep a real bug green. This
+	@# hid the lineage CAST branch never firing: every col::TYPE projection
+	@# returned zero column lineage while the test passed.
+	@! grep -rn '"class":"OPERATOR_' --include=*.go . \
+		|| (echo "bugcheck-static: AST fixture sets class to a type value (see ast-fixture-class-is-type)"; exit 1)
+	@echo "bugcheck-static: clean"
 
 build:
 	go build ./cmd/ondatrasql/

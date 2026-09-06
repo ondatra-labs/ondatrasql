@@ -308,7 +308,13 @@ func TestExtractFromAST_CaseExpression(t *testing.T) {
 func TestExtractFromAST_CastExpression(t *testing.T) {
 	t.Parallel()
 	// AST for: SELECT CAST(amount AS DECIMAL) AS amount_dec FROM orders
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"OPERATOR_CAST","type":"OPERATOR_CAST","alias":"amount_dec","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["amount"]}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
+	//
+	// Shape verified against json_serialize_sql: a cast's class is "CAST"
+	// (its *type* is "OPERATOR_CAST") and its operand sits under "child", not
+	// "children". This fixture previously used the type as the class and a
+	// children array — a shape DuckDB never emits — which matched the
+	// extractor's own mistake and kept a real bug green.
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CAST","type":"OPERATOR_CAST","alias":"amount_dec","child":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["amount"]},"cast_type":{"id":"DECIMAL"},"try_cast":false}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {

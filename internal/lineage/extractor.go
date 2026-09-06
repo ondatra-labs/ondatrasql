@@ -51,15 +51,17 @@ type ColumnLineage struct {
 
 // Extractor holds state for recursive CTE resolution.
 type Extractor struct {
-	cteNodes map[string]*duckast.Node             // CTE name -> body node
-	resolved map[string]map[string][]SourceColumn // CTE name -> col -> final sources
+	cteNodes  map[string]*duckast.Node             // CTE name -> body node
+	resolved  map[string]map[string][]SourceColumn // CTE name -> col -> final sources
+	resolving map[uintptr]bool                     // CTE body nodes currently being resolved
 }
 
 // newExtractor creates an extractor seeded with the AST's CTE definitions.
 func newExtractor(a *duckast.AST) *Extractor {
 	e := &Extractor{
-		cteNodes: make(map[string]*duckast.Node),
-		resolved: make(map[string]map[string][]SourceColumn),
+		cteNodes:  make(map[string]*duckast.Node),
+		resolved:  make(map[string]map[string][]SourceColumn),
+		resolving: make(map[uintptr]bool),
 	}
 	stmts := a.Statements()
 	if len(stmts) == 0 {
@@ -82,27 +84,44 @@ func (e *Extractor) resolveCTE(cteName string) map[string][]SourceColumn {
 		return nil
 	}
 
-	// Mark as being resolved (prevent infinite recursion via self-references)
-	e.resolved[cteName] = make(map[string][]SourceColumn)
+	// Recursion guard, kept separate from the cache. It used to be the cache
+	// entry itself, which made the two jobs collide: pushCTEScope has to clear
+	// the cache to shadow a name, and doing that to an in-flight entry left
+	// the writes below landing in a map that was no longer there. Results are
+	// built locally and published once, so nothing depends on the entry
+	// staying put mid-resolution.
+	// Keyed on the body node, not the name. Two different CTEs can share a
+	// name — an inner `WITH x` shadowing an outer one — and a name-keyed guard
+	// would mistake the inner for a self-reference and drop its sources.
+	ptr := reflect.ValueOf(n.Raw()).Pointer()
+	if e.resolving[ptr] {
+		// A genuine self-reference, as in a RECURSIVE CTE's own body. Stop
+		// here; the non-recursive arm supplies the real sources.
+		return nil
+	}
+	e.resolving[ptr] = true
+	defer delete(e.resolving, ptr)
+
+	cols := make(map[string][]SourceColumn)
 
 	// Set operation CTE (UNION / UNION ALL / INTERSECT / EXCEPT — also how
 	// RECURSIVE CTEs are represented). The SET_OPERATION node has empty
 	// SelectList; column names come from LEFT, sources are the positional
 	// merge of LEFT + RIGHT.
 	if n.IsSetOpNode() {
-		merged := e.resolveSetOpCols(n)
-		for k, v := range merged {
-			e.resolved[cteName][k] = v
+		for k, v := range e.resolveSetOpCols(n) {
+			cols[k] = v
 		}
-		return e.resolved[cteName]
+		e.resolved[cteName] = cols
+		return cols
 	}
 
 	aliases := collectAliases(n.FromTable())
 	for _, expr := range n.SelectList() {
-		outName := getOutputName(expr)
-		e.resolved[cteName][outName] = e.traceExprWithType(expr, aliases)
+		cols[getOutputName(expr)] = e.traceExprWithType(expr, aliases)
 	}
-	return e.resolved[cteName]
+	e.resolved[cteName] = cols
+	return cols
 }
 
 // resolveSetOpCols resolves the column lineage for a SET_OPERATION node.
@@ -247,12 +266,29 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 
 	case "FUNCTION":
 		transType := classifyFunction(expr.FunctionName(), expr.IsOperator())
+		appendFunc := func(cs SourceColumn) {
+			sources = append(sources, SourceColumn{
+				Table: cs.Table, Column: cs.Column,
+				Transformation: transType, FunctionName: expr.FunctionName(),
+			})
+		}
 		for _, child := range expr.Children() {
 			for _, cs := range e.traceExprWithType(child, info) {
-				sources = append(sources, SourceColumn{
-					Table: cs.Table, Column: cs.Column,
-					Transformation: transType, FunctionName: expr.FunctionName(),
-				})
+				appendFunc(cs)
+			}
+		}
+		// A plain aggregate carries FILTER and its own ORDER BY outside
+		// children, under different field names from a WINDOW node: `filter`
+		// rather than `filter_expr`, and `order_bys.orders` rather than
+		// `orders`. `COUNT(*) FILTER (WHERE flag)` reads a column that decides
+		// which rows count at all, so leaving it out understates the model's
+		// dependencies. Shapes verified against json_serialize_sql.
+		for _, cs := range e.traceExprWithType(expr.Field("filter"), info) {
+			appendFunc(cs)
+		}
+		for _, ord := range expr.Field("order_bys").FieldList("orders") {
+			for _, cs := range e.traceExprWithType(ord.Field("expression"), info) {
+				appendFunc(cs)
 			}
 		}
 
@@ -261,45 +297,141 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		// name is on the WINDOW node itself; the aggregated expression is
 		// in children. (Bug 23)
 		transType := classifyFunction(expr.FunctionName(), expr.IsOperator())
+		appendWindow := func(cs SourceColumn) {
+			sources = append(sources, SourceColumn{
+				Table: cs.Table, Column: cs.Column,
+				Transformation: transType, FunctionName: expr.FunctionName(),
+			})
+		}
 		for _, child := range expr.Children() {
 			for _, cs := range e.traceExprWithType(child, info) {
-				sources = append(sources, SourceColumn{
-					Table: cs.Table, Column: cs.Column,
-					Transformation: transType, FunctionName: expr.FunctionName(),
-				})
+				appendWindow(cs)
+			}
+		}
+		// PARTITION BY and ORDER BY are not children: DuckDB keeps them in
+		// `partitions` and `orders`, and for a rank-style function like
+		// row_number() `children` is empty altogether. Walking only children
+		// left the columns that decide the result out of the lineage, so a
+		// change to them never reached CDC. Shape verified against
+		// json_serialize_sql.
+		for _, part := range expr.FieldList("partitions") {
+			for _, cs := range e.traceExprWithType(part, info) {
+				appendWindow(cs)
+			}
+		}
+		for _, ord := range expr.FieldList("orders") {
+			for _, cs := range e.traceExprWithType(ord.Field("expression"), info) {
+				appendWindow(cs)
+			}
+		}
+		// The remaining single-expression fields also carry real column
+		// references: FILTER (WHERE ...) decides which rows contribute at all,
+		// and lag/lead take their offset and default as expressions. Frame
+		// bounds are usually constants but need not be.
+		for _, field := range []string{"filter_expr", "offset_expr", "default_expr", "start_expr", "end_expr"} {
+			for _, cs := range e.traceExprWithType(expr.Field(field), info) {
+				appendWindow(cs)
+			}
+		}
+		// arg_orders is the aggregate's own ORDER BY inside OVER, as in
+		// string_agg(v, ',' ORDER BY ts) — it changes the result, so the
+		// columns it names are dependencies too.
+		for _, ord := range expr.FieldList("arg_orders") {
+			for _, cs := range e.traceExprWithType(ord.Field("expression"), info) {
+				appendWindow(cs)
 			}
 		}
 
 	case "CASE":
+		appendConditional := func(inner SourceColumn) {
+			transform, fn := keepInner(inner, TransformConditional)
+			sources = append(sources, SourceColumn{
+				Table: inner.Table, Column: inner.Column,
+				Transformation: transform, FunctionName: fn,
+			})
+		}
 		for _, check := range expr.CaseChecks() {
 			for _, ts := range e.traceExprWithType(check.Then, info) {
-				sources = append(sources, SourceColumn{
-					Table: ts.Table, Column: ts.Column, Transformation: TransformConditional,
-				})
+				appendConditional(ts)
 			}
 			for _, ws := range e.traceExprWithType(check.When, info) {
-				sources = append(sources, SourceColumn{
-					Table: ws.Table, Column: ws.Column, Transformation: TransformConditional,
-				})
+				appendConditional(ws)
 			}
 		}
-		// ELSE clause
-		for _, child := range expr.Children() {
-			for _, cs := range e.traceExprWithType(child, info) {
-				sources = append(sources, SourceColumn{
-					Table: cs.Table, Column: cs.Column, Transformation: TransformConditional,
-				})
-			}
+		// ELSE clause. DuckDB puts it under `else_expr`; a CASE node has no
+		// `children` field at all, so the previous loop over Children() was a
+		// silent no-op and an aggregate reachable only through ELSE never
+		// appeared in the lineage — the same wrong-field mistake as the CAST
+		// branch. Shape verified against json_serialize_sql.
+		for _, cs := range e.traceExprWithType(expr.Field("else_expr"), info) {
+			appendConditional(cs)
 		}
 
-	case "OPERATOR_CAST":
-		for _, child := range expr.Children() {
-			for _, cs := range e.traceExprWithType(child, info) {
-				sources = append(sources, SourceColumn{
-					Table: cs.Table, Column: cs.Column, Transformation: TransformCast,
-				})
+	case "CAST":
+		// The switch is on class, which DuckDB reports as "CAST"; the node's
+		// `type` is "OPERATOR_CAST". Matching the type here silently disabled
+		// the branch, so every `col::TYPE` and `CAST(col AS TYPE)` projection
+		// produced a column with no sources at all.
+		//
+		// The operand also lives under `child` (singular), not `children`, so
+		// the old body would have found nothing even had the case matched.
+		for _, cs := range e.traceExprWithType(expr.Child(), info) {
+			// A cast changes the type, not the derivation, so a more
+			// informative inner classification survives it: SUM(x)::BIGINT
+			// stays an aggregation of x. GetCDCTables depends on that to give
+			// aggregated JOIN sources CDC, and the lineage view depends on
+			// FunctionName to render [SUM] rather than a bare [CAST].
+			transform, fn := keepInner(cs, TransformCast)
+			sources = append(sources, SourceColumn{
+				Table: cs.Table, Column: cs.Column,
+				Transformation: transform, FunctionName: fn,
+			})
+		}
+
+	case "SUBQUERY":
+		// A subquery resolves names against its own FROM clause, so its
+		// expressions must be traced with the subquery's aliases rather than
+		// the outer query's. Without this case a scalar aggregate such as
+		// `(SELECT SUM(x) FROM raw.events)` contributed no lineage at all, so
+		// the runtime never learned that raw.events is aggregated here and
+		// served a stale total after that source changed.
+		if sub := expr.Field("subquery"); !sub.IsNil() {
+			for _, inner := range subqueryBodies(sub.Field("node")) {
+				restore := e.pushCTEScope(inner)
+				innerInfo := collectAliases(inner.FromTable())
+				// A correlated subquery may name an outer alias, so the outer
+				// scope is a fallback for anything its own FROM does not
+				// define — inner shadows outer, as SQL resolves it. Without
+				// this, `(SELECT MIN(b.label) FROM raw.events e ...)` recorded
+				// a source table literally called "b", the alias, because the
+				// COLUMN_REF lookup falls back to the bare name it was given.
+				for alias, table := range info.aliases {
+					if _, shadowed := innerInfo.aliases[alias]; !shadowed {
+						innerInfo.aliases[alias] = table
+					}
+				}
+				for alias, node := range info.subqueries {
+					if _, shadowed := innerInfo.subqueries[alias]; !shadowed {
+						innerInfo.subqueries[alias] = node
+					}
+				}
+				// A subquery with no FROM of its own — `(SELECT amount)` —
+				// resolves an unqualified column entirely against the outer
+				// query, so it inherits the outer primary too. Copying only
+				// the alias map left such a column with an empty source table.
+				if innerInfo.primaryTable == "" && innerInfo.primarySubquery == nil {
+					innerInfo.primaryTable = info.primaryTable
+					innerInfo.primarySubquery = info.primarySubquery
+				}
+				for _, sel := range inner.SelectList() {
+					sources = append(sources, e.traceExprWithType(sel, innerInfo)...)
+				}
+				restore()
 			}
 		}
+		// IN-style subqueries also test an outer expression, held in `child`,
+		// which belongs to the enclosing scope.
+		sources = append(sources, e.traceExprWithType(expr.Child(), info)...)
 
 	case "COMPARISON":
 		// Binary comparison operators (used in CASE WHEN, JOIN ON, etc.).
@@ -312,6 +444,77 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 	}
 
 	return sources
+}
+
+// pushCTEScope registers the CTEs a subquery declares for itself and returns a
+// function that undoes it.
+//
+// Only the top-level statement's CTEs are collected when the Extractor is
+// built, so a `WITH` inside a scalar subquery was unknown: its name resolved
+// to nothing and the COLUMN_REF fallback recorded the CTE alias as the source
+// table. `(WITH x AS (SELECT SUM(f.amount) ... ) SELECT x.t FROM x)` came back
+// as a source called "x", the aggregation was never seen, and a change to the
+// real table was silently served stale.
+//
+// Names are shadowed rather than merged, so an inner CTE reusing an outer
+// name resolves to its own body while it is in scope and the outer one is put
+// back afterwards. Cached resolutions are dropped on both edges, since the
+// same name now means a different query.
+func (e *Extractor) pushCTEScope(n *duckast.Node) func() {
+	ctes := n.CTEs()
+	if len(ctes) == 0 {
+		return func() {}
+	}
+	type saved struct {
+		node *duckast.Node
+		had  bool
+	}
+	prev := make(map[string]saved, len(ctes))
+	for _, cte := range ctes {
+		old, had := e.cteNodes[cte.Name]
+		prev[cte.Name] = saved{node: old, had: had}
+		e.cteNodes[cte.Name] = cte.Node
+		delete(e.resolved, cte.Name)
+	}
+	return func() {
+		for name, s := range prev {
+			delete(e.resolved, name)
+			if s.had {
+				e.cteNodes[name] = s.node
+			} else {
+				delete(e.cteNodes, name)
+			}
+		}
+	}
+}
+
+// subqueryBodies flattens a subquery body into the SELECT nodes that actually
+// carry a select list. A body may be a set operation, whose own SelectList()
+// is empty — without descending into both sides, an aggregate inside a
+// `UNION` arm contributes no lineage and the runtime never learns the source
+// is aggregated.
+func subqueryBodies(n *duckast.Node) []*duckast.Node {
+	if n.IsNil() {
+		return nil
+	}
+	if n.IsSetOpNode() {
+		return append(subqueryBodies(n.SetOpLeft()), subqueryBodies(n.SetOpRight())...)
+	}
+	return []*duckast.Node{n}
+}
+
+// keepInner decides the transformation recorded for a source reached through a
+// wrapper expression (a cast, a CASE arm). A wrapper changes the type or the
+// selection, not the derivation, so a more specific inner classification is
+// what callers need: GetCDCTables reads AGGREGATION to decide that delta CDC
+// is unsound for a model, and the lineage view reads FunctionName to render
+// [SUM] rather than a bare label. Only an unclassified or identity source
+// takes the wrapper's own label.
+func keepInner(inner SourceColumn, wrapper TransformationType) (TransformationType, string) {
+	if inner.Transformation == "" || inner.Transformation == TransformIdentity {
+		return wrapper, ""
+	}
+	return inner.Transformation, inner.FunctionName
 }
 
 // classifyFunction determines the transformation type based on function name.
@@ -371,10 +574,10 @@ func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 
 // aliasInfo contains table alias mapping and the primary table.
 type aliasInfo struct {
-	aliases         map[string]string         // alias -> table name
-	subqueries      map[string]*duckast.Node  // alias -> subquery body node
-	primaryTable    string                    // first table in FROM (for unqualified columns)
-	primarySubquery *duckast.Node             // first FROM source if it's a subquery
+	aliases         map[string]string        // alias -> table name
+	subqueries      map[string]*duckast.Node // alias -> subquery body node
+	primaryTable    string                   // first table in FROM (for unqualified columns)
+	primarySubquery *duckast.Node            // first FROM source if it's a subquery
 }
 
 // collectAliases builds a map of table aliases to fully qualified table
@@ -436,6 +639,13 @@ func (e *Extractor) resolveSubqueryColumn(sub *duckast.Node, col string) []Sourc
 	if sub.IsNil() {
 		return nil
 	}
+	// A derived table may declare its own CTEs — `FROM (WITH x AS (...)
+	// SELECT ...) d`. Only the top-level statement's CTEs are collected when
+	// the Extractor is built, so without this the name resolves to nothing and
+	// the CTE alias is recorded as the source table, hiding whatever it wraps.
+	restore := e.pushCTEScope(sub)
+	defer restore()
+
 	if sub.IsSetOpNode() {
 		cols := e.resolveSelectNodeCols(sub)
 		return cols[col]

@@ -256,7 +256,7 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 	// ran on backfill, lacked the kind-column filter (so SCD2 scripts always
 	// saw "destructive" because of is_current/valid_* columns), and didn't
 	// preserve the snapshot chain on destructive changes.
-	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, result)
+	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, decision.RunType == "backfill", result)
 
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()

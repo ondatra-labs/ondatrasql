@@ -56,4 +56,23 @@ You don't have to think about it — it just happens.
 
 Not every model kind uses this mechanism. SCD2 needs the complete source data to detect which specific columns changed, so it does full-state comparison. Tracked uses content hashing per group. Table kind either rebuilds entirely or skips — there's no incremental middle ground.
 
+Nor does every *source*. CDC is built on DuckLake's `table_changes()`, which reads a table's snapshot history — so it only works for tables in the lake. A source in another attached catalog, for example:
+
+```sql
+-- config/sources.sql
+ATTACH 'postgresql://…' AS crm (TYPE postgres, READ_ONLY);
+```
+
+has no snapshot history to compare against. A model reading `crm.decision` runs a full query on every run. This is not an error and is not reported as one. In an `append` or `merge` model — the kinds that would otherwise have used CDC — it is recorded as a `cdc.skip_foreign_catalog:<table>` step in the snapshot's `commit_extra_info`. The other kinds never consult CDC, so there is nothing to record.
+
+The whole model falls back, not just that one source. A model joining `crm.decision` to a lake table cannot keep CDC on the lake half: the gate would then see an unchanged lake source, report no work, and the model would read an empty delta on a run where only the Postgres side moved — losing the change with no error. One source the runtime cannot observe means the model has to read everything.
+
+Nor does an aggregate over a source that changed. CDC substitutes each source with the rows added since the last snapshot, and an aggregate computed over that delta is only correct when the whole group is new. For a group that already exists, the delta holds part of the total — merging it would replace a correct figure with a partial one. So when a source the model aggregates over has changed, the model recomputes with a full query instead, recorded as a `cdc.skip_changed_aggregate` step. A model whose aggregated sources are unchanged keeps the delta path. This applies wherever the aggregate is written, including inside a scalar subquery.
+
+One thing CDC deliberately does not do is propagate changes from a source that is only read, never aggregated. A joined dimension table, or a table behind `EXISTS`/`IN`, is not watched: new rows on the fact side see the current state of it, but rows already in the target are not revisited when that source changes later — and a row that would now start qualifying does not appear until the model runs in full. This matches how incremental models behave elsewhere; it is a cost/correctness trade, not an oversight. There is no flag that forces a rebuild — one is triggered by the changes listed in [Run types](/reference/pipeline/run-types/), so a dimension edit that has to reach existing rows needs the model itself to change.
+
+Writing the catalog explicitly does not change this — what matters is which catalog the table lives in, not how the name was written. A lake table read as `lake.raw.orders` gets CDC exactly as `raw.orders` does.
+
+If you want incremental loading from such a source, use `@incremental` on a monotonic column in the foreign table rather than relying on CDC — and filter on it in the model, since the directive supplies the cursor but does not apply it: `WHERE id > getvariable('incr_last_value')`. Declaring `@incremental` without the predicate leaves the query unbounded, and an `append` model then re-reads and re-appends the whole foreign table.
+
 If you're curious about how each kind handles changes differently, that's covered in [Model Kinds](/concepts/kinds/).

@@ -89,9 +89,9 @@ func TestPadCenter(t *testing.T) {
 		width int
 		want  string
 	}{
-		{"hi", 6, "  hi  "},     // even padding
-		{"hi", 7, "  hi   "},    // odd: leftPad=2, rightPad=3
-		{"hello", 5, "hello"},   // exact fit
+		{"hi", 6, "  hi  "},       // even padding
+		{"hi", 7, "  hi   "},      // odd: leftPad=2, rightPad=3
+		{"hello", 5, "hello"},     // exact fit
 		{"toolong", 3, "toolong"}, // wider than target
 	}
 	for _, tt := range tests {
@@ -172,10 +172,10 @@ func TestTransformShortWithFunc(t *testing.T) {
 		{TransformAggregation, "AVG", "[AVG]"},
 		{TransformAggregation, "MIN", "[MIN]"},
 		{TransformAggregation, "MAX", "[MAX]"},
-		{TransformAggregation, "sum", "[SUM]"},     // lowercase
-		{TransformAggregation, "MEDIAN", "[MED]"},  // fallback to first 3
-		{TransformAggregation, "", "[AGG]"},         // no func name
-		{TransformArithmetic, "anything", "[×]"},    // non-aggregation
+		{TransformAggregation, "sum", "[SUM]"},    // lowercase
+		{TransformAggregation, "MEDIAN", "[MED]"}, // fallback to first 3
+		{TransformAggregation, "", "[AGG]"},       // no func name
+		{TransformArithmetic, "anything", "[×]"},  // non-aggregation
 		{TransformIdentity, "", ""},
 	}
 	for _, tt := range tests {
@@ -1114,5 +1114,43 @@ func TestLayerOrder_AlphabeticalTiebreak(t *testing.T) {
 	}
 	if order[1] != "zulu" {
 		t.Errorf("second = %q, want zulu", order[1])
+	}
+}
+
+// A column with several sources lists all their names on one line, so a
+// transformation label lifted from the first source would be read as
+// describing every one of them: `SUM(amount)` beside a plain `flag` rendered
+// as `[SUM] ● amount, flag`.
+func TestFormatColumnLineAligned_MixedSourcesAreNotLabelledAsOne(t *testing.T) {
+	t.Parallel()
+	v := &LineageView{}
+
+	mixed := []ColumnSource{
+		{Table: "events", Column: "amount", Transformation: TransformAggregation, FunctionName: "sum"},
+		{Table: "events", Column: "flag", Transformation: TransformConditional},
+	}
+	got := v.formatColumnLineAligned("total", mixed, 0)
+	if strings.Contains(got, "[SUM]") {
+		t.Errorf("a mixed-source column must not be labelled with one source's transform: %q", got)
+	}
+	if !strings.Contains(got, "[MIX]") {
+		t.Errorf("expected a mixed marker, got %q", got)
+	}
+
+	// Agreeing sources keep the specific label.
+	same := []ColumnSource{
+		{Table: "events", Column: "a", Transformation: TransformAggregation, FunctionName: "sum"},
+		{Table: "events", Column: "b", Transformation: TransformAggregation, FunctionName: "sum"},
+	}
+	got = v.formatColumnLineAligned("total", same, 0)
+	if !strings.Contains(got, "[SUM]") {
+		t.Errorf("sources that agree should keep their label, got %q", got)
+	}
+
+	// The column- and model-focus views render through a second function that
+	// had the same flaw, so the promise in the docs has to hold there too.
+	got = v.formatColumnLineWithMarkerAligned("total", mixed, true, false, 0)
+	if strings.Contains(got, "[SUM]") || !strings.Contains(got, "[MIX]") {
+		t.Errorf("the marker view must also refuse one source's label: %q", got)
 	}
 }

@@ -19,7 +19,7 @@ If you're wondering "do I need `@incremental` when CDC already filters to change
 - **CDC** answers: "what rows in this DuckLake table changed since the last snapshot?"
 - **Incremental** answers: "what was the latest cursor value after the last run?"
 
-For SQL models, they're complementary. CDC handles the row-level filtering automatically, and `@incremental` adds cursor tracking on top. For lib functions fetching from APIs, there is no CDC — your function reads from an external system, not from DuckLake. The cursor is how it knows where to start.
+For SQL models, they're complementary. CDC handles the row-level filtering automatically, and `@incremental` adds cursor tracking on top. The exception is a model reading a source outside the lake — an ATTACHed Postgres, say. `table_changes()` cannot see that source's history, so CDC does not apply and `@incremental` is what bounds the read. The directive only supplies the cursor as a session variable — the model has to use it, as in `WHERE updated_at > getvariable('incr_last_value')`. With that predicate the cursor is carried across runs exactly as it is for a lib fetch; without `@incremental` the model queries the whole source every run. See [Change data capture](/concepts/cdc/). For lib functions fetching from APIs, there is no CDC — your function reads from an external system, not from DuckLake. The cursor is how it knows where to start.
 
 ## When everything resets
 

@@ -29,7 +29,24 @@ Each column is classified by how it was derived:
 | `CAST` | Type conversion | `CAST(id AS VARCHAR)` |
 | `FUNCTION` | Function call | `UPPER(name)` |
 
-Lineage is extracted from the SQL AST, across CTEs, joins, and subqueries.
+Lineage is extracted from the SQL AST, across CTEs, joins, and subqueries. A wrapper does not hide what it wraps: `SUM(amount)::BIGINT` is recorded as an `AGGREGATION` of `amount`, not as a `CAST`, and the same holds for an aggregate inside a `CASE` arm. `CAST` and `CONDITIONAL` are recorded when there is nothing more specific underneath.
+
+### Markers in the rendered output
+
+The ASCII view abbreviates the transformation next to each column:
+
+| Marker | Meaning |
+|---|---|
+| `[SUM]` `[CNT]` `[AVG]` `[MIN]` `[MAX]` | The named aggregate |
+| `[AGG]` | An aggregate with no function name recorded |
+| `[MED]`, `[STD]`, … | Any other aggregate, abbreviated to its first three letters |
+| `[×]` | Arithmetic |
+| `[IF]` | Conditional |
+| `[CAST]` | Type conversion |
+| `[FN]` | Function call |
+| `[MIX]` | Several sources that do not agree on a transformation, or on which aggregate produced them |
+
+A column can draw on more than one source — `CASE WHEN flag THEN SUM(amount) ELSE 0 END` reads both `flag` and `amount`. The line lists every source column, so when they disagree on how they were transformed the view shows `[MIX]` rather than borrowing one source's label for all of them. Two aggregates of different functions count as disagreeing. `IDENTITY` has no marker.
 
 ## Commit Metadata
 

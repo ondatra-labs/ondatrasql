@@ -93,7 +93,7 @@ Name matching is lexical and deliberately over-inclusive: a macro named `total` 
 
 | Step | skip | backfill | incremental | full |
 |---|---|---|---|---|
-| SQL execution | no | full query | CDC-filtered (append/merge) or full query (other kinds) | full query |
+| SQL execution | no | full query | CDC-filtered (append/merge) or full query (other kinds, any model with a source outside the lake, and any model whose aggregated source changed) | full query |
 | Schema evolution | no | yes | yes | yes |
 | Constraints | no | yes | yes | yes |
 | Audits | no | yes (transactional) | yes (transactional) | yes (transactional) |

@@ -57,7 +57,7 @@ func (r *Runner) applySmartCDC(astJSON, kind string, cdcTables []string, snapsho
 
 	ast.ReplaceBaseTables(
 		func(n *duckast.Node) bool {
-			return cdcSet[strings.ToLower(n.FullTableName())]
+			return cdcSet[strings.ToLower(cdcMatchName(n))]
 		},
 		func(n *duckast.Node) map[string]any {
 			cat := catalog
@@ -100,7 +100,7 @@ func (r *Runner) applyEmptySmartCDC(astJSON string, cdcTables []string) (string,
 
 	ast.ReplaceBaseTables(
 		func(n *duckast.Node) bool {
-			return cdcSet[strings.ToLower(n.FullTableName())]
+			return cdcSet[strings.ToLower(cdcMatchName(n))]
 		},
 		func(n *duckast.Node) map[string]any {
 			cat := catalog
@@ -124,6 +124,13 @@ func qualifyTablesInAST(root map[string]any, tablesToQualify map[string]bool, ca
 	walkAST(root, func(node map[string]any) map[string]any {
 		nodeType, _ := node["type"].(string)
 		if nodeType != "BASE_TABLE" {
+			return nil
+		}
+		// A name that already names its catalog is authoritative — the SQL
+		// said where the table lives. Overwriting it would move a foreign
+		// `crm.raw.src` into prod just because the lake also has a `raw.src`,
+		// since the lookup key below carries no catalog.
+		if existing, _ := node["catalog_name"].(string); existing != "" {
 			return nil
 		}
 		schema, _ := node["schema_name"].(string)
@@ -319,6 +326,23 @@ func whereFalseExpr() map[string]any {
 			},
 		},
 	}
+}
+
+// cdcMatchName renders an AST base-table node the way internal/lineage names
+// it, so cdcTables entries and AST nodes compare on equal terms.
+//
+// duckast's FullTableName() is schema.table — it drops catalog_name. That makes
+// `raw.src` and `lake.raw.src` indistinguishable, so matching on it alone would
+// let a CDC entry for one rewrite the other: in a query joining a lake
+// `lake.raw.src` with a foreign `raw.src` (catalog `raw`), the foreign table
+// would be rewritten into a lake time-travel subquery. Including the catalog
+// when the SQL wrote one keeps them apart.
+func cdcMatchName(n *duckast.Node) string {
+	full := n.FullTableName()
+	if cat := n.CatalogName(); cat != "" {
+		return cat + "." + full
+	}
+	return full
 }
 
 // quoteTableName quotes a table name for safe use in SQL.

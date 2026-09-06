@@ -25,7 +25,7 @@ The runtime handles:
 - **Change detection** — via DuckLake snapshots and `table_changes()`
 - **Schema evolution** — columns added, renamed, or type-promoted automatically
 - **Validation** — constraints, audits, and warnings as part of execution
-- **Incremental processing** — Smart CDC rewrites queries to process only changed data
+- **Incremental processing** — Smart CDC rewrites queries to process only changed data, falling back to a full query where it cannot be applied
 
 ## Install
 

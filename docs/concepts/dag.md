@@ -22,7 +22,7 @@ Each model gets a run type before execution:
 
 - **skip** — nothing changed, don't run
 - **backfill** — first run or definition changed, rebuild from scratch
-- **incremental** — new or changed data, process only the delta
+- **incremental** — new or changed data; usually only the delta, but a full query when CDC cannot apply (see [Run types](/reference/pipeline/run-types/))
 - **full** — upstream model changed, re-evaluate
 
 These decisions propagate through the graph. If `raw.events` runs (new data arrived), downstream models like `staging.events` are re-evaluated — they might run incrementally or do a full rebuild depending on what changed. If nothing changed anywhere in the pipeline, models skip based on their own batch-computed run types.

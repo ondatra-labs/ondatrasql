@@ -60,6 +60,7 @@ type Runner struct {
 	dagRunID         string
 	projectDir       string                // Project root directory (for Starlark load())
 	configIndex      *backfill.ConfigIndex // config/ decomposed into per-statement buckets
+	foreignCatalogs  map[string]bool       // ATTACHed catalogs that are not the lake; nil until first lookup
 	configIndexErr   error                 // config/ exists but could not be read (fatal for the run)
 	gitInfo          gitInfo               // Cached Git metadata
 	runTypeDecisions RunTypeDecisions      // Pre-computed run_type decisions (batch optimization)
@@ -389,6 +390,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			}
 		}
 		r.trace(result, "incremental.set_vars", stepStart, "ok")
+	}
+
+	// escalateToRebuild records that the model has to materialize as a rebuild
+	// rather than an append, which every path that abandons CDC needs: an
+	// unbounded query appended to the target grows it without bound.
+	//
+	// `@incremental` is the exception. Its cursor bounds the read on its own,
+	// so the query is not full, appending is correct, and forcing a rebuild
+	// would reset the cursor and re-read the whole source every run. Kept in
+	// one place because three separate call sites got this wrong before.
+	escalateToRebuild := func(isIncremental bool) error {
+		if !isIncremental || model.Incremental != "" {
+			return nil
+		}
+		needsBackfill = true
+		return r.resetIncrementalForBackfill(model)
 	}
 
 	// Track the SQL transformation pipeline through this Run().
@@ -908,7 +925,13 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// 3. JOIN tables with only IDENTITY are dimension lookups (full scan)
 	var cdcTables []string
 	var allTableNames []string
+	hasForeignSource := false
 	aggregationTables := lineage.GetCDCTables(colLineage)
+
+	// Smart CDC: auto-detect tables, apply CDC to fact tables and aggregated joins
+	// Note: SCD2 is excluded because it needs full source data for proper change detection
+	// tracked excluded: it does its own hash-based change detection and needs full source data
+	isIncremental := model.Kind == "append" || model.Kind == "merge"
 
 	// Collect lib-call temp table names so CDC can skip them.
 	libTempTables := make(map[string]bool)
@@ -927,21 +950,78 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		if libTempTables[t.Table] {
 			continue
 		}
+		// Note a source living in another attached catalog (e.g. a Postgres
+		// source ATTACHed alongside the lake). table_changes() is a DuckLake
+		// function, so it cannot work on them: the gate would qualify the
+		// name as <lakeAlias>.<schema>.<table>, fail to resolve it, and fall
+		// back to a full query anyway — after emitting two warnings per model
+		// per run.
+		//
+		// Unlike libTempTables this cannot be a per-table skip. Dropping just
+		// the foreign table would leave CDC running on the model's remaining
+		// lake sources, and the gate would then answer "nothing changed"
+		// whenever only the foreign source moved — the model would read
+		// nothing and silently lose the change. Not knowing whether a source
+		// changed means the whole model has to run a full query, which is
+		// what the failing gate used to achieve by accident.
+		//
+		// Only incremental kinds consult CDC, so only they pay for the lookup.
+		// The skip is traced rather than silent: it removes the warnings that
+		// used to signal the fallback, so something has to take their place.
+		if isIncremental {
+			inLake, lakeErr := r.tableInLakeCatalog(t.Table)
+			if lakeErr != nil {
+				// Unclassifiable is the same answer as foreign: the question
+				// CDC asks is "can I observe this source's changes?", and an
+				// unanswered question must not be read as yes. Letting the
+				// table into cdcTables would put it under the gate, which on
+				// an unchanged-snapshot run rewrites it to an empty delta.
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("cdc catalog check for %s, running a full query: %v", t.Table, lakeErr))
+				hasForeignSource = true
+			} else if !inLake {
+				r.trace(result, "cdc.skip_foreign_catalog:"+t.Table, time.Now(), "skip")
+				hasForeignSource = true
+			}
+		}
 		if t.IsFirstFrom {
 			// Primary table always gets CDC
 			cdcTables = append(cdcTables, t.Table)
-		} else if aggregationTables[t.Table] {
-			// JOIN table with aggregations gets CDC
+		} else if aggregationTables[t.Table] || aggregationTables[stripLakeAlias(t.Table, r.sess.CatalogAlias(), r.sess.ProdAlias())] {
+			// JOIN table with aggregations gets CDC.
+			//
+			// Two lookups because the extractors disagree on name shape:
+			// ExtractTablesFromAST keeps catalog_name, the column lineage
+			// behind aggregationTables drops it. Measured: a join written
+			// `lake.raw.events` yields cdcTables=[raw.base] where the same
+			// join written `raw.events` yields [raw.base raw.events], so the
+			// aggregated source silently loses its change detection.
 			cdcTables = append(cdcTables, t.Table)
 		}
 		// JOIN tables without aggregations get full scan (dimension lookups)
 	}
+	if hasForeignSource {
+		// One unobservable source disables CDC for the model, not just for
+		// itself. See the reasoning at the skip above.
+		cdcTables = nil
+		// Abandoning CDC on an incremental kind means the model runs its query
+		// without a delta, and an unbounded query has to materialize as a
+		// rebuild rather than an append — otherwise every run appends the
+		// whole source again and the target grows without bound.
+		//
+		// `@incremental` is the exception, and the one case that matters here:
+		// its cursor bounds the read on its own, so the query is not full,
+		// appending is correct, and forcing a rebuild would reset the cursor
+		// and re-read the entire foreign source on every run — defeating the
+		// mechanism the docs recommend for exactly these sources.
+		if err := escalateToRebuild(isIncremental); err != nil {
+			result.Errors = append(result.Errors, err.Error())
+			result.Duration = time.Since(start)
+			return result, err
+		}
+	}
 	tableExtractTime := time.Since(stepStart)
 
-	// Smart CDC: auto-detect tables, apply CDC to fact tables and aggregated joins
-	// Note: SCD2 is excluded because it needs full source data for proper change detection
-	// tracked excluded: it does its own hash-based change detection and needs full source data
-	isIncremental := model.Kind == "append" || model.Kind == "merge"
 	if !needsBackfill && isIncremental && len(cdcTables) > 0 {
 		// NOTE: Smart rebuild detection (skipping when source hasn't changed) is disabled
 		// because DuckLake's tables_inserted_into contains table IDs that can't be reliably
@@ -972,6 +1052,20 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		stepStart = time.Now()
 		hasChanges := false
 		insertOnly := true
+		// An aggregate is only correct over a delta when the affected group is
+		// entirely new, which cannot be known cheaply — so a changed aggregated
+		// source disqualifies delta CDC for the model. The two facts needed for
+		// that decision are both already computed: which sources are aggregated
+		// (AST column lineage) and which ones changed (this gate).
+		changedAggregated := false
+		// True only when the per-table loop below ran to completion. Every
+		// bail-out sets hasChanges without classifying anything, and an
+		// unclassified aggregate must not be assumed unchanged.
+		gateClassified := false
+		isAggregatedSource := func(name string) bool {
+			return aggregationTables[name] ||
+				aggregationTables[stripLakeAlias(name, r.sess.CatalogAlias(), r.sess.ProdAlias())]
+		}
 		snapshotID, snapshotErr := r.sess.GetDagStartSnapshot()
 		if snapshotErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("get snapshot warning: %v", snapshotErr))
@@ -991,25 +1085,32 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		} else if snapshotErr != nil {
 			// Already handled above — skip table-level checks
 		} else if snapshotID < currSnap {
+			gateClassified = true
 			for _, t := range cdcTables {
-				parts := strings.SplitN(t, ".", 2)
-				if len(parts) != 2 {
+				catalog, schema, table, ok := splitCDCTableName(t, r.sess.CatalogAlias())
+				if !ok {
 					hasChanges = true
 					insertOnly = false
+					gateClassified = false
 					break
 				}
-				schema, table := parts[0], parts[1]
 				// Set search_path to include the source schema for table_changes()
 				// (which takes bare table name). Restore default search_path after.
 				// A failure on either set or restore means subsequent
 				// table_changes() calls or model SQL would run against
 				// the wrong scope — propagate so the iteration aborts
 				// rather than silently corrupting the gate.
+				//
+				// The catalog comes from the name when the SQL wrote one, so a
+				// source read as lake.raw.src is gated against the same catalog
+				// applySmartCDC will rewrite it to. Hardcoding the active alias
+				// here would gate the sandbox fork while the rewrite read prod.
 				if err := r.sess.Exec(fmt.Sprintf("SET search_path = '%s.%s,%s'",
-					escapeSQL(r.sess.CatalogAlias()), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath()))); err != nil {
+					escapeSQL(catalog), escapeSQL(schema), escapeSQL(r.sess.DefaultSearchPath()))); err != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("set search_path for table_changes gate (%s): %v", t, err))
 					hasChanges = true
 					insertOnly = false
+					gateClassified = false
 					break
 				}
 				cnt, err := r.sess.TableHasChanges(table, snapshotID+1, currSnap)
@@ -1017,6 +1118,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					result.Warnings = append(result.Warnings, fmt.Sprintf("table_changes gate failed for %s: %v", t, err))
 					hasChanges = true
 					insertOnly = false
+					gateClassified = false
 					if restoreErr := r.sess.Exec(fmt.Sprintf("SET search_path = '%s'", escapeSQL(r.sess.DefaultSearchPath()))); restoreErr != nil {
 						result.Warnings = append(result.Warnings, fmt.Sprintf("restore search_path after gate failure: %v", restoreErr))
 					}
@@ -1024,6 +1126,9 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				}
 				if cnt > 0 {
 					hasChanges = true
+					if isAggregatedSource(t) {
+						changedAggregated = true
+					}
 					isInsertOnly, ioErr := r.sess.TableChangesInsertOnly(table, snapshotID+1, currSnap)
 					if ioErr != nil || !isInsertOnly {
 						insertOnly = false
@@ -1039,7 +1144,45 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		}
 		r.trace(result, "cdc.table_changes_gate", stepStart, "ok")
 
-		if hasChanges {
+		// When the gate could not classify each source — an unreadable
+		// snapshot, a name it cannot split, a failed table_changes() — it
+		// falls back to "assume changes exist". For an aggregated source that
+		// assumption has to carry through to the delta decision as well:
+		// substituting a delta for an aggregate whose change status is unknown
+		// is the same corruption the classified path avoids.
+		if hasChanges && !gateClassified {
+			for _, t := range cdcTables {
+				if isAggregatedSource(t) {
+					changedAggregated = true
+					break
+				}
+			}
+		}
+
+		// Every path that abandons CDC falls back to the full query, and a full
+		// query on an incremental kind has to materialize as a rebuild — an
+		// append would put the whole source on top of the rows already there.
+		// Shared so a new fallback cannot quietly skip the escalation.
+		revertToFullQuery := func() error {
+			state.RevertToRewritten()
+			return escalateToRebuild(isIncremental)
+		}
+
+		if changedAggregated && model.Kind == "merge" {
+			// Leave state.Current() as the full query. Substituting a delta
+			// here would aggregate only the new rows and then merge that
+			// partial total over a correct one — corrupting the target rather
+			// than merely leaving it stale.
+			//
+			// Only `merge` is affected. It replaces a row by unique_key, so a
+			// partial total lands on top of a correct one. An `append` model
+			// overwrites nothing: accumulating one aggregated row per run is
+			// what that kind is for, and forcing a full query there would
+			// re-append every unchanged group as well. No rebuild either —
+			// a merge converges on its own, and escalating would reset the
+			// incremental cursor for no gain.
+			r.trace(result, "cdc.skip_changed_aggregate", stepStart, "skip")
+		} else if hasChanges {
 			// Check if upstream schema changed — CDC EXCEPT requires matching column counts.
 			stepStart = time.Now()
 			schemaChanged := r.cdcSchemaChanged(cdcTables, snapshotID)
@@ -1047,15 +1190,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 			if schemaChanged {
 				result.Warnings = append(result.Warnings, "upstream schema changed, skipping CDC")
-				state.RevertToRewritten()
-				needsBackfill = true
+				if err := revertToFullQuery(); err != nil {
+					result.Errors = append(result.Errors, err.Error())
+					result.Duration = time.Since(start)
+					return result, err
+				}
 			} else if insertOnly {
 				// Phase 2: all source changes are inserts — apply CDC with
 				// the same EXCEPT approach but log the optimization.
 				cdcSQL, cdcErr := r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					state.RevertToRewritten()
+					if err := revertToFullQuery(); err != nil {
+						result.Errors = append(result.Errors, err.Error())
+						result.Duration = time.Since(start)
+						return result, err
+					}
 				} else {
 					state.SetCurrent(cdcSQL)
 					r.trace(result, "cdc.applied_insert_only:"+strings.Join(cdcTables, ","), stepStart, "ok")
@@ -1065,7 +1215,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				cdcSQL, cdcErr := r.applySmartCDC(astJSON, model.Kind, cdcTables, snapshotID)
 				if cdcErr != nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf("CDC failed, using full query: %v", cdcErr))
-					state.RevertToRewritten()
+					if err := revertToFullQuery(); err != nil {
+						result.Errors = append(result.Errors, err.Error())
+						result.Duration = time.Since(start)
+						return result, err
+					}
 				} else {
 					state.SetCurrent(cdcSQL)
 					r.trace(result, "cdc.applied:"+strings.Join(cdcTables, ","), stepStart, "ok")
@@ -1076,7 +1230,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			emptySQL, emptyErr := r.applyEmptySmartCDC(astJSON, cdcTables)
 			if emptyErr != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("CDC empty failed, using full query: %v", emptyErr))
-				state.RevertToRewritten()
+				if err := revertToFullQuery(); err != nil {
+					result.Errors = append(result.Errors, err.Error())
+					result.Duration = time.Since(start)
+					return result, err
+				}
 			} else {
 				state.SetCurrent(emptySQL)
 			}
@@ -1107,6 +1265,37 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			}
 			// Unqualified names (no schema prefix) resolve via search_path — skip
 			if !strings.Contains(t, ".") {
+				continue
+			}
+			// A table in another ATTACHed catalog is not in sandbox and not in
+			// prod either. Qualifying it would rewrite it to <prodAlias>.<name>,
+			// which does not exist, and the CREATE TEMP would fail into the
+			// revert path. Leave it alone; DuckDB resolves it via its own
+			// catalog.
+			//
+			// This is a behaviour change, not a no-op. cdcHandled shielded such
+			// tables only under `!needsBackfill && isIncremental &&
+			// len(cdcTables) > 0`, so table, scd2 and tracked kinds — and every
+			// backfill run — did reach the qualifier and were rewritten to a
+			// catalog that does not hold them.
+			//
+			// A lookup failure is treated as "in the lake" here, which is the
+			// opposite of the CDC loop above, because the two ask different
+			// questions. CDC asks "can I observe this source's changes?" and
+			// an unanswered question must mean no, so it degrades to a full
+			// query. Qualification asks "should this name be pointed at
+			// prod?", and for everything except a foreign catalog the answer
+			// is yes — declining on an unanswered question would strip the
+			// qualification every sandbox read of a prod table depends on.
+			// Aborting instead would let one transient duckdb_databases()
+			// error kill the run outright.
+			inLake, lakeErr := r.tableInLakeCatalog(t)
+			if lakeErr != nil {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("catalog check for %s during sandbox qualification: %v", t, lakeErr))
+				inLake = true
+			}
+			if !inLake {
 				continue
 			}
 			exists, existsErr := r.tableExistsInCatalog(t, r.sess.CatalogAlias())
@@ -1152,7 +1341,17 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			r.trace(result, "create_temp", stepStart, "retry")
 			result.Warnings = append(result.Warnings, fmt.Sprintf("CDC query failed (%v), retrying with full query", err))
 			state.RevertToRewritten()
-			needsBackfill = true
+			// Rewritten predates applyColumnMasking, so reverting to it drops
+			// the masking. Without re-applying it the retry materializes raw
+			// values for every @column-masked column. The mismatch this branch
+			// tests for is also satisfied by masking alone, so a masked model
+			// reaches here on any create_temp failure, not only a CDC one.
+			state.SetCurrent(applyColumnMasking(state.Current(), model))
+			if resetErr := escalateToRebuild(isIncremental); resetErr != nil {
+				result.Errors = append(result.Errors, resetErr.Error())
+				result.Duration = time.Since(start)
+				return result, resetErr
+			}
 			createSQL = fmt.Sprintf("CREATE TEMP TABLE %s AS %s", tmpTable, state.Current())
 			stepStart = time.Now()
 			if retryErr := r.sess.Exec(createSQL); retryErr != nil {
@@ -1203,7 +1402,41 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Schema evolution check — shared with script.go's runScript so the
 	// two execution paths can't drift on this critical correctness logic.
-	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, result)
+	// A run whose libs all smart-skipped has no data to rebuild from, so a
+	// rebuild would empty the target instead of refreshing it. materialize
+	// already preserves target rows for that case; the rebuild decision has to
+	// agree, or it truncates before materialize gets the chance.
+	//
+	// Applied once here rather than at each escalation. needsBackfill can be
+	// set by the run-type decision itself and by three separate mid-run
+	// escalations — a foreign source, an upstream schema change, a failed CDC
+	// query — and guarding only one of them leaves the others able to empty
+	// the target. This sits after all of them and before the only two
+	// consumers, detectSchemaEvolution and materialize.
+	if len(libCalls) > 0 && allLibsReturnedNoChange(libCalls) && needsBackfill {
+		// The signal alone is not enough. A model can smart-skip its lib and
+		// still have real rows from its other sources, and cancelling the
+		// rebuild there would append a full result on top of the target. Only
+		// an empty result has nothing to rebuild from, which is the case that
+		// would otherwise wipe the target.
+		//
+		// An unreadable count is treated as empty: preserving rows costs a
+		// missed refresh, while rebuilding from an unknown result risks
+		// emptying the target outright.
+		empty := true
+		if cnt, err := r.sess.QueryValue(fmt.Sprintf("SELECT count(*) FROM %s", tmpTable)); err != nil {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("count temp rows for smart-skip check: %v", err))
+		} else {
+			empty = cnt == "0"
+		}
+		if empty {
+			result.Warnings = append(result.Warnings,
+				"all libs reported no change and the result is empty, keeping existing rows instead of rebuilding")
+			needsBackfill = false
+		}
+	}
+	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, decision.RunType == "backfill", result)
 
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()
@@ -1504,6 +1737,168 @@ func (r *Runner) tableExistsInCatalog(table, catalog string) (bool, error) {
 		return false, fmt.Errorf("check table %s in catalog %s: %w", table, catalog, err)
 	}
 	return val != "0", nil
+}
+
+// splitCDCTableName breaks a cdcTables entry into the catalog, schema and table
+// the CDC gate needs. Names carry a catalog only when the SQL wrote one, so the
+// active catalog is the default.
+//
+// ok is false for an unqualified name: table_changes() needs a schema to scope
+// against, and guessing one would gate the wrong table.
+func splitCDCTableName(name, activeCatalog string) (catalog, schema, table string, ok bool) {
+	parts := strings.Split(name, ".")
+	switch len(parts) {
+	case 2:
+		return activeCatalog, parts[0], parts[1], true
+	case 3:
+		return parts[0], parts[1], parts[2], true
+	default:
+		return "", "", "", false
+	}
+}
+
+// tableInLakeCatalog reports whether a source table lives in the lake catalog
+// — or, in sandbox, in the prod catalog the fork inherits from.
+//
+// Used to keep tables in another ATTACHed catalog (e.g. `ATTACH 'postgresql://…'
+// AS crm`) out of two lake-specific code paths: the CDC gate, whose
+// table_changes() cannot read them, and the sandbox qualifier, which would
+// rewrite them to <prodAlias>.<name> and break the query.
+//
+// Name shapes, per internal/lineage/extractor.go which builds TableRef.Table
+// from whatever the SQL wrote:
+//
+//	orders                 unqualified — resolves via search_path
+//	raw.orders             schema.table, or catalog.table for an attached database
+//	lake.raw.orders        catalog.schema.table
+//
+// The three-part case is answered from the name alone. The two-part case is
+// genuinely ambiguous: DuckDB's parser records `crm.decision` as schema `crm`
+// (catalog_name is empty) and only the binder resolves `crm` against attached
+// catalogs. So we ask the question the binder would — is the leading segment an
+// attached catalog? — rather than probing for the table, which would also
+// answer "foreign" for a lake table that simply does not exist yet.
+//
+// Unqualified names answer true: not classifiable, and answering false would
+// silently strip CDC from every model that writes a bare table name.
+// stripLakeAlias removes a leading lake (or prod) catalog segment, giving the
+// schema.table shape the column-lineage extractor keys on.
+//
+// Only a lake alias is stripped. A foreign catalog's leading segment stays in
+// place so that `crm.raw.events` cannot be folded onto the lake's own
+// `raw.events` — the collision that makes general name-flattening unsafe.
+func stripLakeAlias(name, catalogAlias, prodAlias string) string {
+	first, rest, found := strings.Cut(name, ".")
+	if !found || !isLakeAlias(first, catalogAlias, prodAlias) {
+		return name
+	}
+	return rest
+}
+
+// resetIncrementalForBackfill re-points the incremental cursor at its initial
+// value after a mid-run decision to rebuild instead of append.
+//
+// applyIncrementalVars runs early, off the run-type decision. Every later
+// escalation to backfill leaves the model's SQL still filtered by
+// `getvariable('incr_last_value')` while materialize switches to
+// TRUNCATE + INSERT, so the rebuild sees only the rows after the cursor and
+// destroys every row before it. Measured on an @incremental append over an
+// ATTACHed source: a target holding 1 and 2 came back holding only 3.
+//
+// The variable is read when the query executes, not when it was rendered, so
+// re-applying it before create_temp is enough. A failure to reset is returned
+// rather than warned about: continuing would run the destructive rebuild.
+func (r *Runner) resetIncrementalForBackfill(model *parser.Model) error {
+	if model.Incremental == "" {
+		return nil
+	}
+	incrState, err := backfill.GetIncrementalState(
+		r.sess, model.Target, model.Incremental, model.IncrementalInitial)
+	if err != nil {
+		return fmt.Errorf("reset incremental cursor for backfill of %s: %w", model.Target, err)
+	}
+	if incrState == nil {
+		return nil
+	}
+	incrState.IsBackfill = true
+	incrState.LastValue = incrState.InitialValue
+	if err := applyIncrementalVars(r.sess, incrState); err != nil {
+		return fmt.Errorf("apply reset incremental cursor for %s: %w", model.Target, err)
+	}
+	return nil
+}
+
+// isLakeAlias reports whether name is the lake catalog alias or, in a sandbox
+// run, the prod alias the fork reads through. Empty aliases never match, so a
+// session without a prod alias cannot mistake an unqualified "" for one.
+func isLakeAlias(name, catalogAlias, prodAlias string) bool {
+	if catalogAlias != "" && strings.EqualFold(name, catalogAlias) {
+		return true
+	}
+	if prodAlias != "" && strings.EqualFold(name, prodAlias) {
+		return true
+	}
+	return false
+}
+
+func (r *Runner) tableInLakeCatalog(table string) (bool, error) {
+	parts := strings.Split(table, ".")
+	if len(parts) == 1 {
+		return true, nil
+	}
+
+	if isLakeAlias(parts[0], r.sess.CatalogAlias(), r.sess.ProdAlias()) {
+		return true, nil
+	}
+
+	// Only a name whose leading segment is a catalog we can see ATTACHed is
+	// treated as foreign. Absence of a lake alias is not evidence: a two-part
+	// name is usually schema.table in the lake, and a name with three or more
+	// segments can also be a quoted identifier containing dots
+	// (`raw."odd.name"` splits into three). Guessing "foreign" there would
+	// strip the prod qualification a sandbox run needs and break the query.
+	foreign, err := r.isAttachedCatalog(parts[0])
+	if err != nil {
+		return false, err
+	}
+	return !foreign, nil
+}
+
+// isAttachedCatalog reports whether name is an ATTACHed catalog other than the
+// lake (or, in sandbox, prod).
+//
+// Resolved once and cached on the Runner. A Runner executes a single model —
+// RunDAG constructs one per model — and catalogs are ATTACHed by config/ during
+// session init, before any model runs, so the set cannot change within a
+// Runner's lifetime. A caller that reused one Runner across ATTACH/DETACH would
+// read stale state.
+//
+// Splitting on "." is not identifier-aware, so a table whose quoted name
+// contains a dot (`"odd.name"`) is misread as qualified and may be classified
+// foreign. That costs a full query instead of CDC — the safe direction — and is
+// not worth an SQL identifier parser here.
+func (r *Runner) isAttachedCatalog(name string) (bool, error) {
+	if r.foreignCatalogs == nil {
+		rows, err := r.sess.QueryRows("SELECT database_name FROM duckdb_databases()")
+		if err != nil {
+			return false, fmt.Errorf("list attached catalogs: %w", err)
+		}
+		found := make(map[string]bool, len(rows))
+		for _, db := range rows {
+			db = strings.ToLower(strings.TrimSpace(db))
+			switch db {
+			case "", "system", "temp", "memory":
+				// DuckDB's own catalogs, never a user source.
+				continue
+			}
+			if strings.EqualFold(db, r.sess.CatalogAlias()) || strings.EqualFold(db, r.sess.ProdAlias()) {
+				continue
+			}
+			found[db] = true
+		}
+		r.foreignCatalogs = found
+	}
+	return r.foreignCatalogs[strings.ToLower(name)], nil
 }
 
 // cleanup removes the temp table.
@@ -1809,6 +2204,7 @@ func (r *Runner) detectSchemaEvolution(
 	model *parser.Model,
 	tmpTable string,
 	needsBackfill bool,
+	decidedBackfill bool,
 	result *Result,
 ) (*backfill.SchemaChange, bool) {
 	stepStart := time.Now()
@@ -1899,6 +2295,22 @@ func (r *Runner) detectSchemaEvolution(
 		}
 	}
 
+	// Neither branch below demands a rebuild of its own, and both used to
+	// return a bare false — which cancelled one the caller had already decided
+	// on. Adding a column to an `append` model changes its hash, so the run is
+	// a backfill, and the downgrade made it append the full source over the
+	// rows already there: two rows became four.
+	//
+	// Only the up-front decision is preserved, not a mid-run escalation. When
+	// CDC abandons a delta because an upstream schema changed, an incremental
+	// append is still meant to append its new rows — the e2e goldens pin a
+	// target accumulating across six runs — so escalating there would rebuild
+	// a target that is supposed to grow.
+	//
+	// result.RunType is deliberately left reporting "incremental": no late
+	// escalation relabels the run anywhere else either.
+	keepBackfill := needsBackfill && decidedBackfill
+
 	switch change.Type {
 	case backfill.SchemaChangeDestructive:
 		// Apply destructive changes via ALTER (preserves DuckLake snapshot chain).
@@ -1908,11 +2320,11 @@ func (r *Runner) detectSchemaEvolution(
 			result.RunType = "incremental"
 		}
 		result.Warnings = append(result.Warnings, formatSchemaEvolution(change))
-		return &change, false
+		return &change, keepBackfill
 	case backfill.SchemaChangeAdditive, backfill.SchemaChangeTypeChange:
 		result.RunType = "incremental"
 		result.Warnings = append(result.Warnings, formatSchemaEvolution(change))
-		return &change, false
+		return &change, keepBackfill
 	}
 	// SchemaChangeNone — keep the backfill decision from NeedsBackfill.
 	return nil, needsBackfill

@@ -245,8 +245,8 @@ func (v *LineageView) renderOverview() string {
 	// Collect all arrows first, then draw with offset to avoid overlaps
 	type arrow struct {
 		startX, startY, endX, endY int
-		offset                      int  // vertical offset in the connector area
-		sameLayer                   bool // true if same-layer dependency
+		offset                     int  // vertical offset in the connector area
+		sameLayer                  bool // true if same-layer dependency
 	}
 	var arrows []arrow
 	var sameLayerArrows []arrow
@@ -721,7 +721,7 @@ func (v *LineageView) renderModelFocus() string {
 	// Collect arrows based on actual dependencies
 	type arrow struct {
 		startX, startY, endX, endY int
-		offset                      int
+		offset                     int
 	}
 	var arrows []arrow
 	arrowOffset := 0
@@ -1054,7 +1054,7 @@ func (v *LineageView) renderColumnFocus() string {
 	// Collect arrows based on actual dependencies (only for traced models)
 	type arrow struct {
 		startX, startY, endX, endY int
-		offset                      int
+		offset                     int
 	}
 	var arrows []arrow
 	arrowOffset := 0
@@ -1143,7 +1143,17 @@ func (v *LineageView) renderColumnFocus() string {
 	return sb.String()
 }
 
-
+// sourcesShareTransform reports whether every source carries the same
+// transformation and function name, so a single label can honestly stand for
+// all of them.
+func sourcesShareTransform(sources []ColumnSource) bool {
+	for _, s := range sources[1:] {
+		if s.Transformation != sources[0].Transformation || s.FunctionName != sources[0].FunctionName {
+			return false
+		}
+	}
+	return true
+}
 
 // formatColumnLineAligned formats a column with aligned source column
 func (v *LineageView) formatColumnLineAligned(col string, sources []ColumnSource, colWidth int) string {
@@ -1153,6 +1163,13 @@ func (v *LineageView) formatColumnLineAligned(col string, sources []ColumnSource
 
 	src := sources[0]
 	transform := v.transformShortWithFunc(src.Transformation, src.FunctionName)
+	// With several sources the line lists all their column names, so a label
+	// taken from the first one would be read as describing all of them —
+	// `SUM(amount)` beside a plain `flag` rendered as `[SUM] ● amount, flag`.
+	// Only keep the label when every source agrees on it.
+	if !sourcesShareTransform(sources) {
+		transform = "[MIX]"
+	}
 
 	// Calculate padding to align sources
 	colPart := col
@@ -1204,6 +1221,11 @@ func (v *LineageView) formatColumnLineWithMarkerAligned(col string, sources []Co
 
 	src := sources[0]
 	transform := v.transformShortWithFunc(src.Transformation, src.FunctionName)
+	// Same reason as formatColumnLineAligned: the line lists every source
+	// column, so one source's label must not stand for all of them.
+	if !sourcesShareTransform(sources) {
+		transform = "[MIX]"
+	}
 
 	sourceStr := fmt.Sprintf("%s.%s", src.Table, src.Column)
 	if len(sources) > 1 {
@@ -1429,5 +1451,5 @@ func (v *LineageView) sortByLayer() []*ModelLineage {
 
 // renderLegend renders the symbol legend
 func (v *LineageView) renderLegend() string {
-	return "    ◆ target  ● source  [SUM][CNT][AVG] aggregate  [×] arithmetic\n"
+	return "    ◆ target  ● source  [SUM][CNT][AVG] aggregate  [×] arithmetic  [MIX] sources differ\n"
 }
