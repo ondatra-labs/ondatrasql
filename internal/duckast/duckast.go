@@ -288,10 +288,12 @@ func (n *Node) SetOpType() string { return n.String("setop_type") }
 
 // ----- CTE accessors -----
 
-// CTE binds a name to its body node.
+// CTE binds a name to its body node. Aliases holds the column names of
+// `WITH c(a, b) AS ...`, which rename the body's leading output columns.
 type CTE struct {
-	Name string
-	Node *Node
+	Name    string
+	Node    *Node
+	Aliases []string
 }
 
 // CTEs returns the named WITH-clauses on this SELECT_NODE.
@@ -308,7 +310,15 @@ func (n *Node) CTEs() []CTE {
 		query, _ := value["query"].(map[string]any)
 		body, _ := query["node"].(map[string]any)
 		if body != nil {
-			out = append(out, CTE{Name: name, Node: &Node{raw: body}})
+			var aliases []string
+			if list, ok := value["aliases"].([]any); ok {
+				for _, a := range list {
+					if str, ok := a.(string); ok {
+						aliases = append(aliases, str)
+					}
+				}
+			}
+			out = append(out, CTE{Name: name, Node: &Node{raw: body}, Aliases: aliases})
 		}
 	}
 	return out

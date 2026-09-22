@@ -47,149 +47,151 @@ type SourceColumn struct {
 type ColumnLineage struct {
 	Column  string         `json:"column"`  // Output column name
 	Sources []SourceColumn `json:"sources"` // Source columns with table/column/transformation
+
+	// unexpanded marks the `?` entry standing in for a star that could not be
+	// expanded. It is not serialised: the name alone cannot tell it apart from
+	// an unaliased expression without column references, such as `SELECT 1`,
+	// which is also named `?` and has no sources.
+	unexpanded bool
 }
+
+// unexpandedStar is the single entry recorded for a star whose columns are
+// unknown.
+func unexpandedStar() []ColumnLineage {
+	return []ColumnLineage{{Column: "?", unexpanded: true}}
+}
+
+// ColumnResolver returns a table's column names in declaration order, or
+// false when they cannot be determined. It is how `SELECT *` over a physical
+// table is expanded: the AST names the table but not its columns. The name
+// arrives in its parts, as written; catalog and schema may be empty.
+type ColumnResolver func(catalog, schema, table string) ([]string, bool)
 
 // Extractor holds state for recursive CTE resolution.
 type Extractor struct {
-	cteNodes  map[string]*duckast.Node             // CTE name -> body node
-	resolved  map[string]map[string][]SourceColumn // CTE name -> col -> final sources
-	resolving map[uintptr]bool                     // CTE body nodes currently being resolved
+	scope     *cteFrame                   // innermost WITH in scope; nil when none
+	resolved  map[uintptr][]ColumnLineage // CTE body node -> ordered output columns
+	resolving map[uintptr]bool            // CTE body nodes currently being resolved
+	columns   ColumnResolver              // physical table columns for star expansion; may be nil
+}
+
+// cteFrame is one WITH clause: the CTEs it declares and the scope it sits in.
+type cteFrame struct {
+	defs   map[string]*cteDef // lower-cased name -> definition
+	parent *cteFrame
+}
+
+// cteDef is one CTE together with the frame that declared it. A CTE body is
+// always resolved in that frame, not in whatever scope happens to reference
+// it: an outer CTE named from inside a subquery that shadows one of its
+// dependencies must still see the outer definition.
+type cteDef struct {
+	node    *duckast.Node
+	aliases []string // `WITH c(a, b)` column names
+	frame   *cteFrame
 }
 
 // newExtractor creates an extractor seeded with the AST's CTE definitions.
-func newExtractor(a *duckast.AST) *Extractor {
+func newExtractor(a *duckast.AST, columns ColumnResolver) *Extractor {
 	e := &Extractor{
-		cteNodes:  make(map[string]*duckast.Node),
-		resolved:  make(map[string]map[string][]SourceColumn),
+		resolved:  make(map[uintptr][]ColumnLineage),
 		resolving: make(map[uintptr]bool),
+		columns:   columns,
 	}
-	stmts := a.Statements()
-	if len(stmts) == 0 {
-		return e
-	}
-	for _, cte := range stmts[0].CTEs() {
-		e.cteNodes[cte.Name] = cte.Node
+	if stmts := a.Statements(); len(stmts) > 0 {
+		e.pushCTEScope(stmts[0])
 	}
 	return e
 }
 
-// resolveCTE recursively resolves a CTE's columns to their ultimate source tables.
-func (e *Extractor) resolveCTE(cteName string) map[string][]SourceColumn {
-	if cols, ok := e.resolved[cteName]; ok {
-		return cols
+// lookupCTE finds the CTE a name refers to from the current scope, innermost
+// first. Identifiers are case-insensitive in DuckDB, quoted or not, so
+// `WITH C AS (...) SELECT * FROM c` names the same CTE.
+func (e *Extractor) lookupCTE(name string) *cteDef {
+	key := strings.ToLower(name)
+	for f := e.scope; f != nil; f = f.parent {
+		if def, ok := f.defs[key]; ok {
+			return def
+		}
+	}
+	return nil
+}
+
+// resolveCTEOrdered resolves a CTE's output columns, recursively down to their
+// source tables, in select-list order. The order is what lets `SELECT *` over
+// a CTE be expanded; byName gives the by-name view. It reports false for an
+// unknown name and for a CTE reached again while it is still being resolved.
+func (e *Extractor) resolveCTEOrdered(cteName string) ([]ColumnLineage, bool) {
+	def := e.lookupCTE(cteName)
+	if def == nil {
+		return nil, false
 	}
 
-	n, ok := e.cteNodes[cteName]
-	if !ok {
-		return nil
+	// Cache and recursion guard are both keyed on the body node, not the
+	// name. Two different CTEs can share a name — an inner `WITH x` shadowing
+	// an outer one — and since a body always resolves in its own defining
+	// scope, the same body always has the same answer wherever it is named.
+	ptr := reflect.ValueOf(def.node.Raw()).Pointer()
+	if cols, ok := e.resolved[ptr]; ok {
+		return cols, true
 	}
-
-	// Recursion guard, kept separate from the cache. It used to be the cache
-	// entry itself, which made the two jobs collide: pushCTEScope has to clear
-	// the cache to shadow a name, and doing that to an in-flight entry left
-	// the writes below landing in a map that was no longer there. Results are
-	// built locally and published once, so nothing depends on the entry
-	// staying put mid-resolution.
-	// Keyed on the body node, not the name. Two different CTEs can share a
-	// name — an inner `WITH x` shadowing an outer one — and a name-keyed guard
-	// would mistake the inner for a self-reference and drop its sources.
-	ptr := reflect.ValueOf(n.Raw()).Pointer()
 	if e.resolving[ptr] {
 		// A genuine self-reference, as in a RECURSIVE CTE's own body. Stop
 		// here; the non-recursive arm supplies the real sources.
-		return nil
+		return nil, false
 	}
 	e.resolving[ptr] = true
 	defer delete(e.resolving, ptr)
 
-	cols := make(map[string][]SourceColumn)
+	saved := e.scope
+	e.scope = def.frame
+	// Set operation CTEs (UNION / INTERSECT / EXCEPT, and every RECURSIVE
+	// CTE) are handled by extractMainQuery like any other query body: names
+	// from the left arm, sources merged positionally from both. A body may
+	// also declare its own WITH.
+	restore := e.pushCTEScope(def.node)
+	cols := e.extractMainQuery(def.node)
+	restore()
+	e.scope = saved
 
-	// Set operation CTE (UNION / UNION ALL / INTERSECT / EXCEPT — also how
-	// RECURSIVE CTEs are represented). The SET_OPERATION node has empty
-	// SelectList; column names come from LEFT, sources are the positional
-	// merge of LEFT + RIGHT.
-	if n.IsSetOpNode() {
-		for k, v := range e.resolveSetOpCols(n) {
-			cols[k] = v
-		}
-		e.resolved[cteName] = cols
-		return cols
-	}
-
-	aliases := collectAliases(n.FromTable())
-	for _, expr := range n.SelectList() {
-		cols[getOutputName(expr)] = e.traceExprWithType(expr, aliases)
-	}
-	e.resolved[cteName] = cols
-	return cols
-}
-
-// resolveSetOpCols resolves the column lineage for a SET_OPERATION node.
-// The result map mirrors the LEFT side's output names, with sources merged
-// positionally from both sides.
-func (e *Extractor) resolveSetOpCols(n *duckast.Node) map[string][]SourceColumn {
-	leftCols := e.resolveSelectNodeCols(n.SetOpLeft())
-	rightCols := e.resolveSelectNodeCols(n.SetOpRight())
-
-	type orderedCol struct {
-		name    string
-		sources []SourceColumn
-	}
-	var ordered []orderedCol
-	if left := n.SetOpLeft(); !left.IsNil() {
-		for _, expr := range nestedSelectList(left) {
-			outName := getOutputName(expr)
-			ordered = append(ordered, orderedCol{name: outName, sources: leftCols[outName]})
-		}
-	}
-	if right := n.SetOpRight(); !right.IsNil() {
-		rightExprs := nestedSelectList(right)
-		for i, expr := range rightExprs {
-			if i >= len(ordered) {
+	// `WITH c(a, b) AS ...` renames the body's leading columns; both a star
+	// over c and a reference to c.a see the new names.
+	if len(def.aliases) > 0 {
+		renamed := make([]ColumnLineage, len(cols))
+		copy(renamed, cols)
+		for i := range renamed {
+			// Past an unexpanded star the positions are unknown, so no later
+			// column can be matched to its alias.
+			if i >= len(def.aliases) || isPlaceholder(renamed[i]) {
 				break
 			}
-			rightOut := getOutputName(expr)
-			ordered[i].sources = append(ordered[i].sources, rightCols[rightOut]...)
+			renamed[i].Column = def.aliases[i]
 		}
+		cols = renamed
 	}
-
-	result := make(map[string][]SourceColumn, len(ordered))
-	for _, oc := range ordered {
-		result[oc.name] = oc.sources
-	}
-	return result
+	e.resolved[ptr] = cols
+	return cols, true
 }
 
-// resolveSelectNodeCols traces every output column of a SELECT-shaped node
-// (or recurses for nested set-op nodes) and returns name → sources.
-func (e *Extractor) resolveSelectNodeCols(n *duckast.Node) map[string][]SourceColumn {
-	if n.IsNil() {
-		return nil
-	}
-	if n.IsSetOpNode() {
-		return e.resolveSetOpCols(n)
-	}
-	result := make(map[string][]SourceColumn)
-	aliases := collectAliases(n.FromTable())
-	for _, expr := range n.SelectList() {
-		outName := getOutputName(expr)
-		result[outName] = e.traceExprWithType(expr, aliases)
-	}
-	return result
+// isSetOp reports whether n combines a left and a right query. A RECURSIVE
+// CTE body is its own node type in DuckDB's AST, but it has the same shape as
+// a UNION: the anchor on the left, the recursive step on the right.
+func isSetOp(n *duckast.Node) bool {
+	return n.IsSetOpNode() || n.NodeType() == "RECURSIVE_CTE_NODE"
 }
 
-// nestedSelectList returns the LEFT-most SELECT_NODE's select list for a
-// possibly-nested set-op node. Used to derive positional column order from
-// arbitrarily nested UNIONs.
-func nestedSelectList(n *duckast.Node) []*duckast.Node {
-	for n.IsSetOpNode() {
-		left := n.SetOpLeft()
-		if left.IsNil() {
-			break
+// byName indexes output columns by lower-cased name, since DuckDB resolves
+// identifiers case-insensitively; look names up with strings.ToLower. On a
+// duplicate name the first column wins.
+func byName(cols []ColumnLineage) map[string][]SourceColumn {
+	m := make(map[string][]SourceColumn, len(cols))
+	for _, c := range cols {
+		key := strings.ToLower(c.Column)
+		if _, dup := m[key]; !dup {
+			m[key] = c.Sources
 		}
-		n = left
 	}
-	return n.SelectList()
+	return m
 }
 
 // traceExprWithType traces an expression and returns detailed source info with transformation types.
@@ -221,7 +223,7 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		case len(colNames) >= 2:
 			col = colNames[len(colNames)-1]
 			tableAlias = colNames[len(colNames)-2]
-			table = info.aliases[tableAlias]
+			table = info.aliases[strings.ToLower(tableAlias)]
 			if table == "" {
 				// 3-/4-part reference where the alias map didn't resolve:
 				// fall back to the literal table name. The schema/catalog
@@ -234,23 +236,36 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		// Has to be checked BEFORE the table-name path because subqueries
 		// don't have a table name.
 		if tableAlias != "" {
-			if sub, isSubquery := info.subqueries[tableAlias]; isSubquery {
-				sources = append(sources, e.resolveSubqueryColumn(sub, col)...)
+			if sub, isSubquery := info.subqueries[strings.ToLower(tableAlias)]; isSubquery {
+				sources = append(sources, e.resolveSubqueryColumn(sub, col, info.subqueryCols[sub])...)
 				return sources
 			}
 		}
 		// Unqualified column with no primary table but a primary
 		// subquery in FROM: resolve via the subquery's select list.
 		if tableAlias == "" && table == "" && info.primarySubquery != nil {
-			sources = append(sources, e.resolveSubqueryColumn(info.primarySubquery, col)...)
+			sources = append(sources, e.resolveSubqueryColumn(info.primarySubquery, col, info.subqueryCols[info.primarySubquery])...)
 			return sources
 		}
 
 		if table != "" {
+			aliasKey := tableAlias
+			if aliasKey == "" {
+				aliasKey = info.primaryAlias
+			}
+			if f := info.tableNodes[strings.ToLower(aliasKey)]; f != nil {
+				col = e.unaliasColumn(f, col)
+			}
 			// Check if table is a CTE - resolve recursively
-			if _, isCTE := e.cteNodes[table]; isCTE {
-				cteCols := e.resolveCTE(table)
-				if deeper, ok := cteCols[col]; ok {
+			if e.lookupCTE(table) != nil {
+				resolved, ok := e.resolveCTEOrdered(table)
+				if !ok {
+					// A RECURSIVE body naming its own CTE. The anchor arm
+					// supplies the real sources; recording the CTE's name
+					// here would invent a table that does not exist.
+					break
+				}
+				if deeper, ok := byName(resolved)[strings.ToLower(col)]; ok {
 					sources = append(sources, deeper...)
 				} else {
 					sources = append(sources, SourceColumn{
@@ -396,8 +411,23 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		// the runtime never learned that raw.events is aggregated here and
 		// served a stale total after that source changed.
 		if sub := expr.Field("subquery"); !sub.IsNil() {
-			for _, inner := range subqueryBodies(sub.Field("node")) {
+			// A body may be a set operation, whose own select list is empty:
+			// both arms are walked, or an aggregate inside a UNION arm would
+			// contribute nothing. Every level may declare its own WITH — the
+			// set operation itself as well as each arm — and each is in scope
+			// for what lies beneath it.
+			var visit func(inner *duckast.Node)
+			visit = func(inner *duckast.Node) {
+				if inner.IsNil() {
+					return
+				}
 				restore := e.pushCTEScope(inner)
+				defer restore()
+				if isSetOp(inner) {
+					visit(inner.SetOpLeft())
+					visit(inner.SetOpRight())
+					return
+				}
 				innerInfo := collectAliases(inner.FromTable())
 				// A correlated subquery may name an outer alias, so the outer
 				// scope is a fallback for anything its own FROM does not
@@ -413,6 +443,12 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 				for alias, node := range info.subqueries {
 					if _, shadowed := innerInfo.subqueries[alias]; !shadowed {
 						innerInfo.subqueries[alias] = node
+						innerInfo.subqueryCols[node] = info.subqueryCols[node]
+					}
+				}
+				for alias, node := range info.tableNodes {
+					if _, shadowed := innerInfo.tableNodes[alias]; !shadowed {
+						innerInfo.tableNodes[alias] = node
 					}
 				}
 				// A subquery with no FROM of its own — `(SELECT amount)` —
@@ -422,12 +458,14 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 				if innerInfo.primaryTable == "" && innerInfo.primarySubquery == nil {
 					innerInfo.primaryTable = info.primaryTable
 					innerInfo.primarySubquery = info.primarySubquery
+					innerInfo.primaryAlias = info.primaryAlias
+					innerInfo.subqueryCols[info.primarySubquery] = info.subqueryCols[info.primarySubquery]
 				}
 				for _, sel := range inner.SelectList() {
 					sources = append(sources, e.traceExprWithType(sel, innerInfo)...)
 				}
-				restore()
 			}
+			visit(sub.Field("node"))
 		}
 		// IN-style subqueries also test an outer expression, held in `child`,
 		// which belongs to the enclosing scope.
@@ -456,51 +494,20 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 // as a source called "x", the aggregation was never seen, and a change to the
 // real table was silently served stale.
 //
-// Names are shadowed rather than merged, so an inner CTE reusing an outer
-// name resolves to its own body while it is in scope and the outer one is put
-// back afterwards. Cached resolutions are dropped on both edges, since the
-// same name now means a different query.
+// Each WITH opens a new frame over the current one, so an inner CTE reusing
+// an outer name shadows it while in scope and the outer one is visible again
+// once the returned function pops the frame.
 func (e *Extractor) pushCTEScope(n *duckast.Node) func() {
 	ctes := n.CTEs()
 	if len(ctes) == 0 {
 		return func() {}
 	}
-	type saved struct {
-		node *duckast.Node
-		had  bool
-	}
-	prev := make(map[string]saved, len(ctes))
+	frame := &cteFrame{defs: make(map[string]*cteDef, len(ctes)), parent: e.scope}
 	for _, cte := range ctes {
-		old, had := e.cteNodes[cte.Name]
-		prev[cte.Name] = saved{node: old, had: had}
-		e.cteNodes[cte.Name] = cte.Node
-		delete(e.resolved, cte.Name)
+		frame.defs[strings.ToLower(cte.Name)] = &cteDef{node: cte.Node, aliases: cte.Aliases, frame: frame}
 	}
-	return func() {
-		for name, s := range prev {
-			delete(e.resolved, name)
-			if s.had {
-				e.cteNodes[name] = s.node
-			} else {
-				delete(e.cteNodes, name)
-			}
-		}
-	}
-}
-
-// subqueryBodies flattens a subquery body into the SELECT nodes that actually
-// carry a select list. A body may be a set operation, whose own SelectList()
-// is empty — without descending into both sides, an aggregate inside a
-// `UNION` arm contributes no lineage and the runtime never learns the source
-// is aggregated.
-func subqueryBodies(n *duckast.Node) []*duckast.Node {
-	if n.IsNil() {
-		return nil
-	}
-	if n.IsSetOpNode() {
-		return append(subqueryBodies(n.SetOpLeft()), subqueryBodies(n.SetOpRight())...)
-	}
-	return []*duckast.Node{n}
+	e.scope = frame
+	return func() { e.scope = frame.parent }
 }
 
 // keepInner decides the transformation recorded for a source reached through a
@@ -539,13 +546,46 @@ func classifyFunction(funcName string, isOperator bool) TransformationType {
 func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 	// Set operation node: output schema from LEFT, each output column has
 	// sources from BOTH sides (positionally aligned).
-	if n.IsSetOpNode() {
-		var leftCols, rightCols []ColumnLineage
-		if left := n.SetOpLeft(); !left.IsNil() {
-			leftCols = e.extractMainQuery(left)
+	if isSetOp(n) {
+		// Each arm may carry its own WITH — `(WITH x AS (...) SELECT * FROM x)
+		// UNION ALL ...` — which is in scope for that arm only.
+		arm := func(side *duckast.Node) []ColumnLineage {
+			if side.IsNil() {
+				return nil
+			}
+			restore := e.pushCTEScope(side)
+			defer restore()
+			return e.extractMainQuery(side)
 		}
-		if right := n.SetOpRight(); !right.IsNil() {
-			rightCols = e.extractMainQuery(right)
+		leftCols, rightCols := arm(n.SetOpLeft()), arm(n.SetOpRight())
+		// An arm whose star could not be expanded has no positional columns
+		// to merge. Keeping the other arm's columns would present sources
+		// that silently leave that arm out, so the whole result is unknown.
+		for _, cols := range [][]ColumnLineage{leftCols, rightCols} {
+			for _, c := range cols {
+				if isPlaceholder(c) {
+					return unexpandedStar()
+				}
+			}
+		}
+		// UNION BY NAME matches columns by name, not position: the output is
+		// the left side's columns followed by any the right side adds.
+		if strings.HasSuffix(n.SetOpType(), "_BY_NAME") {
+			merged := make([]ColumnLineage, 0, len(leftCols)+len(rightCols))
+			index := make(map[string]int, len(leftCols))
+			for _, lc := range leftCols {
+				index[strings.ToLower(lc.Column)] = len(merged)
+				merged = append(merged, ColumnLineage{Column: lc.Column, Sources: append([]SourceColumn{}, lc.Sources...)})
+			}
+			for _, rc := range rightCols {
+				if at, ok := index[strings.ToLower(rc.Column)]; ok {
+					merged[at].Sources = append(merged[at].Sources, rc.Sources...)
+					continue
+				}
+				index[strings.ToLower(rc.Column)] = len(merged)
+				merged = append(merged, ColumnLineage{Column: rc.Column, Sources: append([]SourceColumn{}, rc.Sources...)})
+			}
+			return merged
 		}
 		var merged []ColumnLineage
 		for i, lc := range leftCols {
@@ -564,6 +604,10 @@ func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 	var result []ColumnLineage
 	aliases := collectAliases(n.FromTable())
 	for _, expr := range n.SelectList() {
+		if expr.Class() == "STAR" {
+			result = append(result, e.expandStar(expr, n.FromTable(), aliases)...)
+			continue
+		}
 		result = append(result, ColumnLineage{
 			Column:  getOutputName(expr),
 			Sources: e.traceExprWithType(expr, aliases),
@@ -572,12 +616,302 @@ func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 	return result
 }
 
+// starColumn is one column a star expands to, with the relation that
+// supplies it so a qualified EXCLUDE or RENAME can tell `a.id` from `b.id`.
+type starColumn struct {
+	relation string // alias, or table name when unaliased
+	schema   string // schema and catalog as written, for an unaliased table
+	catalog  string
+	ColumnLineage
+}
+
+// matches reports whether a qualified EXCLUDE or RENAME key names c. Each part
+// the key states must agree, so `EXCLUDE (s1.t.id)` over `s1.t JOIN s2.t`
+// drops only s1's id, as DuckDB does.
+func (c starColumn) matches(key *duckast.Node) bool {
+	if !strings.EqualFold(key.String("column"), c.Column) {
+		return false
+	}
+	for _, part := range []struct{ want, have string }{
+		{key.String("table"), c.relation},
+		{key.String("schema"), c.schema},
+		{key.String("catalog"), c.catalog},
+	} {
+		if part.want != "" && !strings.EqualFold(part.want, part.have) {
+			return false
+		}
+	}
+	return true
+}
+
+// expandStar turns `*`, `t.*` and their EXCLUDE / REPLACE / RENAME forms into
+// one lineage entry per column the star produces.
+//
+// A star used to become a single `?` column with no sources, which erased the
+// lineage of every model written as `SELECT * FROM ...` or `* EXCLUDE (...)`.
+// A CTE or a derived table is expanded from its own select list; a physical
+// table needs its schema, which the AST does not carry, so it goes through
+// the extractor's ColumnResolver. When any relation the star covers cannot be
+// expanded — a table function, VALUES, COLUMNS(...), no resolver — the old
+// single `?` entry is kept rather than a partial column list that would look
+// complete.
+func (e *Extractor) expandStar(star *duckast.Node, from *duckast.Node, aliases aliasInfo) []ColumnLineage {
+	unknown := unexpandedStar()
+	// COLUMNS(...) selects by pattern or lambda and `*` over an expression
+	// unpacks a struct; neither is a plain relation expansion.
+	if star.Bool("columns") || !star.Field("expr").IsNil() || from.IsNil() {
+		return unknown
+	}
+	relation := star.String("relation_name")
+	cols, ok := e.relationColumns(from, relation)
+	if !ok || len(cols) == 0 {
+		return unknown
+	}
+
+	excluded := func(c starColumn) bool {
+		for _, name := range star.StringList("exclude_list") {
+			if strings.EqualFold(name, c.Column) {
+				return true
+			}
+		}
+		for _, q := range star.FieldList("qualified_exclude_list") {
+			if c.matches(q) {
+				return true
+			}
+		}
+		return false
+	}
+	renamed := func(c starColumn) string {
+		for _, r := range star.FieldList("rename_list") {
+			if c.matches(r.Field("key")) {
+				return r.String("value")
+			}
+		}
+		return c.Column
+	}
+	replacement := func(c starColumn) *duckast.Node {
+		for _, r := range star.FieldList("replace_list") {
+			if strings.EqualFold(r.String("key"), c.Column) {
+				return r.Field("value")
+			}
+		}
+		return nil
+	}
+
+	out := make([]ColumnLineage, 0, len(cols))
+	replaced := make(map[string]bool)
+	for _, c := range cols {
+		if excluded(c) {
+			continue
+		}
+		col := ColumnLineage{Column: renamed(c), Sources: c.Sources}
+		if expr := replacement(c); !expr.IsNil() {
+			// DuckDB replaces the first column of that name and drops any
+			// later one: over a join where both sides have `ort`,
+			// `* REPLACE (upper(b.ort) AS ort)` yields a single `ort`.
+			key := strings.ToLower(c.Column)
+			if replaced[key] {
+				continue
+			}
+			replaced[key] = true
+			col.Sources = e.traceExprWithType(expr, aliases)
+		}
+		out = append(out, col)
+	}
+	return out
+}
+
+// relationColumns lists the columns a star over the FROM item f produces, in
+// output order. relation restricts it to the item with that alias (`t.*`);
+// empty means every item. It reports false when a covered item cannot be
+// expanded.
+func (e *Extractor) relationColumns(f *duckast.Node, relation string) ([]starColumn, bool) {
+	if f.IsNil() {
+		return nil, true
+	}
+	if f.IsJoin() {
+		left, ok := e.relationColumns(f.JoinLeft(), relation)
+		if !ok {
+			return nil, false
+		}
+		// A SEMI or ANTI join only filters the left side; its output has no
+		// columns from the right.
+		if jt := f.String("join_type"); jt == "SEMI" || jt == "ANTI" {
+			return left, true
+		}
+		right, ok := e.relationColumns(f.JoinRight(), relation)
+		if !ok {
+			return nil, false
+		}
+		if relation == "" {
+			left, right = mergeJoinedColumns(f, left, right)
+		}
+		return append(left, right...), true
+	}
+
+	name := f.Alias()
+	if name == "" {
+		name = f.TableName()
+	}
+	if relation != "" && !strings.EqualFold(name, relation) {
+		return nil, true
+	}
+
+	var cols []ColumnLineage
+	switch f.NodeType() {
+	case "BASE_TABLE":
+		table := f.TableName()
+		if schema := f.SchemaName(); schema != "" {
+			table = schema + "." + table
+		}
+		// A CTE name is never qualified, so only a bare name can be one —
+		// otherwise `FROM s.t` would match a CTE quoted as "s.t".
+		if f.SchemaName() == "" && f.CatalogName() == "" && e.lookupCTE(f.TableName()) != nil {
+			resolved, ok := e.resolveCTEOrdered(f.TableName())
+			if !ok {
+				return nil, false
+			}
+			cols = resolved
+			break
+		}
+		if e.columns == nil {
+			return nil, false
+		}
+		names, ok := e.columns(f.CatalogName(), f.SchemaName(), f.TableName())
+		if !ok || len(names) == 0 {
+			return nil, false
+		}
+		for _, col := range names {
+			cols = append(cols, ColumnLineage{
+				Column:  col,
+				Sources: []SourceColumn{{Table: table, Column: col, Transformation: TransformIdentity}},
+			})
+		}
+	case "SUBQUERY":
+		sub := f.SubqueryNode()
+		restore := e.pushCTEScope(sub)
+		cols = e.extractMainQuery(sub)
+		restore()
+	default:
+		// Table functions, VALUES lists and the like have no column list
+		// in the AST.
+		return nil, false
+	}
+	// A CTE or subquery whose own star could not be expanded carries the
+	// placeholder. Passing it on would put a `?` among real columns — or,
+	// through a column alias list, give it a real name.
+	for _, c := range cols {
+		if isPlaceholder(c) {
+			return nil, false
+		}
+	}
+
+	// `FROM t AS x(a, b)` renames the leading columns positionally.
+	aliasNames := f.StringList("column_name_alias")
+	out := make([]starColumn, len(cols))
+	for i, c := range cols {
+		if i < len(aliasNames) {
+			c.Column = aliasNames[i]
+		}
+		out[i] = starColumn{relation: name, ColumnLineage: c}
+		if f.Alias() == "" {
+			out[i].schema, out[i].catalog = f.SchemaName(), f.CatalogName()
+		}
+	}
+	return out, true
+}
+
+// unaliasColumn maps a name from a FROM item's column alias list — `FROM t AS
+// x(a, b)` — back to the column it renames, by position. For a CTE that is
+// the CTE's own output column; for a table it needs the table's schema. When
+// the position cannot be resolved the name is returned unchanged.
+func (e *Extractor) unaliasColumn(f *duckast.Node, col string) string {
+	idx := -1
+	for i, a := range f.StringList("column_name_alias") {
+		if strings.EqualFold(a, col) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return col
+	}
+	if f.SchemaName() == "" && f.CatalogName() == "" && e.lookupCTE(f.TableName()) != nil {
+		if cols, ok := e.resolveCTEOrdered(f.TableName()); ok && idx < len(cols) {
+			return cols[idx].Column
+		}
+		return col
+	}
+	if e.columns != nil {
+		if names, ok := e.columns(f.CatalogName(), f.SchemaName(), f.TableName()); ok && idx < len(names) {
+			return names[idx]
+		}
+	}
+	return col
+}
+
+// isPlaceholder reports whether c is the entry for a star that could not be
+// expanded.
+func isPlaceholder(c ColumnLineage) bool {
+	return c.unexpanded
+}
+
+// mergeJoinedColumns handles the columns an unqualified star emits only once:
+// those named in USING, and for a NATURAL join every column both sides share.
+// They are dropped from the right side. For a RIGHT or FULL join the emitted
+// value can come from the right table, so its sources are merged into the
+// surviving left column rather than lost.
+func mergeJoinedColumns(join *duckast.Node, left, right []starColumn) ([]starColumn, []starColumn) {
+	shared := make(map[string]bool)
+	for _, c := range join.StringList("using_columns") {
+		shared[strings.ToLower(c)] = true
+	}
+	if join.String("ref_type") == "NATURAL" {
+		names := make(map[string]bool, len(right))
+		for _, c := range right {
+			names[strings.ToLower(c.Column)] = true
+		}
+		for _, c := range left {
+			if key := strings.ToLower(c.Column); names[key] {
+				shared[key] = true
+			}
+		}
+	}
+	if len(shared) == 0 {
+		return left, right
+	}
+	joinType := join.String("join_type")
+	mergeRight := joinType == "RIGHT" || joinType == "FULL"
+
+	kept := right[:0:0]
+	for _, r := range right {
+		key := strings.ToLower(r.Column)
+		if !shared[key] {
+			kept = append(kept, r)
+			continue
+		}
+		if !mergeRight {
+			continue
+		}
+		for i := range left {
+			if strings.ToLower(left[i].Column) == key {
+				left[i].Sources = append(append([]SourceColumn{}, left[i].Sources...), r.Sources...)
+				break
+			}
+		}
+	}
+	return left, kept
+}
+
 // aliasInfo contains table alias mapping and the primary table.
 type aliasInfo struct {
-	aliases         map[string]string        // alias -> table name
-	subqueries      map[string]*duckast.Node // alias -> subquery body node
-	primaryTable    string                   // first table in FROM (for unqualified columns)
-	primarySubquery *duckast.Node            // first FROM source if it's a subquery
+	aliases         map[string]string          // lower-cased alias -> table name
+	subqueries      map[string]*duckast.Node   // lower-cased alias -> subquery body node
+	subqueryCols    map[*duckast.Node][]string // subquery body -> `AS d(a, b)` column names
+	tableNodes      map[string]*duckast.Node   // lower-cased alias -> FROM item naming a table or CTE
+	primaryAlias    string                     // alias of the primary table
+	primaryTable    string                     // first table in FROM (for unqualified columns)
+	primarySubquery *duckast.Node              // first FROM source if it's a subquery
 }
 
 // collectAliases builds a map of table aliases to fully qualified table
@@ -586,8 +920,10 @@ type aliasInfo struct {
 // subquery's own select list.
 func collectAliases(ft *duckast.Node) aliasInfo {
 	info := aliasInfo{
-		aliases:    make(map[string]string),
-		subqueries: make(map[string]*duckast.Node),
+		aliases:      make(map[string]string),
+		subqueries:   make(map[string]*duckast.Node),
+		subqueryCols: make(map[*duckast.Node][]string),
+		tableNodes:   make(map[string]*duckast.Node),
 	}
 	if ft.IsNil() {
 		return info
@@ -607,15 +943,22 @@ func collectAliases(ft *duckast.Node) aliasInfo {
 			if alias == "" {
 				alias = name
 			}
-			info.aliases[alias] = qualifiedName
+			// Keyed lower-cased: DuckDB matches `X.id` to `FROM t AS x`.
+			key := strings.ToLower(alias)
+			info.aliases[key] = qualifiedName
+			info.tableNodes[key] = f
 			if first {
 				info.primaryTable = qualifiedName
+				info.primaryAlias = alias
 				first = false
 			}
 		}
 		// Subquery in FROM
 		if sub := f.SubqueryNode(); !sub.IsNil() && f.Alias() != "" {
-			info.subqueries[f.Alias()] = sub
+			info.subqueries[strings.ToLower(f.Alias())] = sub
+			if cols := f.StringList("column_name_alias"); len(cols) > 0 {
+				info.subqueryCols[sub] = cols
+			}
 			if first {
 				info.primarySubquery = sub
 				first = false
@@ -633,9 +976,11 @@ func collectAliases(ft *duckast.Node) aliasInfo {
 }
 
 // resolveSubqueryColumn finds the lineage of a column inside a FROM-subquery.
-// Handles set-op subqueries (UNION inside the subquery) by delegating to
-// resolveSelectNodeCols which knows how to merge LEFT/RIGHT positionally.
-func (e *Extractor) resolveSubqueryColumn(sub *duckast.Node, col string) []SourceColumn {
+// Set-op subqueries (UNION inside the subquery) merge LEFT/RIGHT positionally
+// in extractMainQuery, and a star inside the subquery is expanded there too.
+// colAliases is the derived table's `AS d(a, b)` list: those names replace
+// the body's leading output names, so `d.a` is the body's first column.
+func (e *Extractor) resolveSubqueryColumn(sub *duckast.Node, col string, colAliases []string) []SourceColumn {
 	if sub.IsNil() {
 		return nil
 	}
@@ -646,17 +991,15 @@ func (e *Extractor) resolveSubqueryColumn(sub *duckast.Node, col string) []Sourc
 	restore := e.pushCTEScope(sub)
 	defer restore()
 
-	if sub.IsSetOpNode() {
-		cols := e.resolveSelectNodeCols(sub)
-		return cols[col]
-	}
-	subAliases := collectAliases(sub.FromTable())
-	for _, expr := range sub.SelectList() {
-		if getOutputName(expr) == col {
-			return e.traceExprWithType(expr, subAliases)
+	cols := e.extractMainQuery(sub)
+	for i, name := range colAliases {
+		// Past an unexpanded star the positions are unknown.
+		if i >= len(cols) || isPlaceholder(cols[i]) {
+			break
 		}
+		cols[i].Column = name
 	}
-	return nil
+	return byName(cols)[strings.ToLower(col)]
 }
 
 // getOutputName extracts the output column name from an expression.
@@ -678,7 +1021,15 @@ func getOutputName(expr *duckast.Node) string {
 // ----------------------------------------------------------------------
 
 // ExtractFromAST extracts column-level lineage from a pre-parsed AST JSON.
+// A star over a physical table stays unexpanded; use ExtractFromASTWithColumns
+// when a session is available to read table schemas.
 func ExtractFromAST(astJSON string) ([]ColumnLineage, error) {
+	return ExtractFromASTWithColumns(astJSON, nil)
+}
+
+// ExtractFromASTWithColumns is ExtractFromAST with a resolver for the columns
+// of physical tables, which lets `SELECT *` over them be expanded.
+func ExtractFromASTWithColumns(astJSON string, columns ColumnResolver) ([]ColumnLineage, error) {
 	a, err := duckast.Parse(astJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse AST: %w", err)
@@ -687,13 +1038,44 @@ func ExtractFromAST(astJSON string) ([]ColumnLineage, error) {
 	if len(stmts) == 0 {
 		return nil, fmt.Errorf("no statements in AST")
 	}
-	extractor := newExtractor(a)
+	extractor := newExtractor(a, columns)
 	return extractor.extractMainQuery(stmts[0]), nil
 }
 
+// SessionColumns returns a ColumnResolver that reads table schemas from sess.
+// It resolves names the way the model's own query does, against the session's
+// default catalog, and caches each answer for the resolver's lifetime.
+func SessionColumns(sess *duckdb.Session) ColumnResolver {
+	type entry struct {
+		names []string
+		ok    bool
+	}
+	cache := make(map[[3]string]entry)
+	return func(catalog, schema, table string) ([]string, bool) {
+		key := [3]string{catalog, schema, table}
+		if hit, found := cache[key]; found {
+			return hit.names, hit.ok
+		}
+		var parts []string
+		for _, p := range key {
+			if p != "" {
+				parts = append(parts, duckdb.QuoteIdentifier(p))
+			}
+		}
+		// A failed DESCRIBE — the table is gone, or the name is not a table
+		// at all — leaves the star unexpanded rather than failing lineage
+		// for the whole model.
+		names, err := sess.QueryRows(fmt.Sprintf("SELECT column_name FROM (DESCRIBE %s)", strings.Join(parts, ".")))
+		res := entry{names: names, ok: err == nil && len(names) > 0}
+		cache[key] = res
+		return res.names, res.ok
+	}
+}
+
 // GetAST fetches the parsed AST JSON from DuckDB for a SQL query.
-// The result can be passed to ExtractFromAST and ExtractTablesFromAST
-// to avoid duplicate queries when both column lineage and tables are needed.
+// The result can be passed to ExtractFromASTWithColumns and
+// ExtractTablesFromAST to avoid duplicate queries when both column lineage and
+// tables are needed.
 //
 // DuckDB's json_serialize_sql only supports SELECT statements. For
 // non-SELECT statements (CREATE, INSERT, UPDATE, DELETE, COPY, PIVOT,
@@ -733,14 +1115,16 @@ func GetAST(sess *duckdb.Session, sql string) (string, error) {
 }
 
 // Extract extracts column-level lineage from a SQL query using DuckDB's AST parser.
-// Note: If you also need table references, use GetAST + ExtractFromAST + ExtractTablesFromAST
-// to avoid duplicate queries.
+// Note: If you also need table references, use GetAST +
+// ExtractFromASTWithColumns(ast, SessionColumns(sess)) + ExtractTablesFromAST to
+// avoid duplicate queries. Plain ExtractFromAST leaves a star over a physical
+// table unexpanded.
 func Extract(sess *duckdb.Session, sql string) ([]ColumnLineage, error) {
 	astJSON, err := GetAST(sess, sql)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractFromAST(astJSON)
+	return ExtractFromASTWithColumns(astJSON, SessionColumns(sess))
 }
 
 // TableRef represents a table reference with its role in the query.
@@ -832,7 +1216,7 @@ func collectTablesScoped(n *duckast.Node, parentScope map[string]bool, primaryPt
 			scope[k] = true
 		}
 		for _, cte := range ctes {
-			scope[cte.Name] = true
+			scope[strings.ToLower(cte.Name)] = true
 		}
 	}
 
@@ -845,7 +1229,7 @@ func collectTablesScoped(n *duckast.Node, parentScope map[string]bool, primaryPt
 		// catalog-qualified ref is always physical.
 		schema := n.SchemaName()
 		catalog := n.CatalogName()
-		if schema == "" && catalog == "" && scope[name] {
+		if schema == "" && catalog == "" && scope[strings.ToLower(name)] {
 			return
 		}
 		fullName := name
@@ -911,7 +1295,7 @@ func findPrimaryBaseTable(stmt *duckast.Node, parentScope map[string]bool) *duck
 	// Descend SET_OPERATION_NODE.left chain to the leftmost SELECT-shaped
 	// branch — the "primary" of `A UNION B` is whatever A's primary is.
 	n := stmt
-	for n.IsSetOpNode() {
+	for isSetOp(n) {
 		n = n.SetOpLeft()
 		if n.IsNil() {
 			return nil
@@ -927,7 +1311,7 @@ func findPrimaryBaseTable(stmt *duckast.Node, parentScope map[string]bool) *duck
 			scope[k] = true
 		}
 		for _, cte := range ctes {
-			scope[cte.Name] = true
+			scope[strings.ToLower(cte.Name)] = true
 		}
 	}
 	return descendFromTable(n.FromTable(), scope)
@@ -943,7 +1327,7 @@ func descendFromTable(node *duckast.Node, scope map[string]bool) *duckast.Node {
 	}
 	switch node.NodeType() {
 	case "BASE_TABLE":
-		if node.SchemaName() == "" && node.CatalogName() == "" && scope[node.TableName()] {
+		if node.SchemaName() == "" && node.CatalogName() == "" && scope[strings.ToLower(node.TableName())] {
 			return nil
 		}
 		return node
@@ -991,14 +1375,15 @@ func GetAllTablesFromRefs(tables []TableRef) []string {
 	return result
 }
 
-// ExtractAll extracts both column lineage and table dependencies in a single query.
-// More efficient than calling Extract and GetAllTables separately.
+// ExtractAll extracts both column lineage and table dependencies from a single
+// AST serialisation. More efficient than calling Extract and GetAllTables
+// separately; a star over a physical table still costs a DESCRIBE per table.
 func ExtractAll(sess *duckdb.Session, sql string) ([]ColumnLineage, []string, error) {
 	astJSON, err := GetAST(sess, sql)
 	if err != nil {
 		return nil, nil, err
 	}
-	colLineage, err := ExtractFromAST(astJSON)
+	colLineage, err := ExtractFromASTWithColumns(astJSON, SessionColumns(sess))
 	if err != nil {
 		return nil, nil, err
 	}

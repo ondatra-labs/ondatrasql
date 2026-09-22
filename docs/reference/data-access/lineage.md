@@ -31,6 +31,8 @@ Each column is classified by how it was derived:
 
 Lineage is extracted from the SQL AST, across CTEs, joins, and subqueries. A wrapper does not hide what it wraps: `SUM(amount)::BIGINT` is recorded as an `AGGREGATION` of `amount`, not as a `CAST`, and the same holds for an aggregate inside a `CASE` arm. `CAST` and `CONDITIONAL` are recorded when there is nothing more specific underneath.
 
+`SELECT *` is expanded to one entry per column, with `EXCLUDE`, `REPLACE` and `RENAME` applied, `USING` or `NATURAL` join columns listed once, and only the left side's columns for a `SEMI` or `ANTI` join. `UNION BY NAME` matches columns by name rather than position. Over a CTE or a subquery the columns come from its select list. Over a table they come from the table's schema in the running session. A star that cannot be expanded, such as one over a table function, `VALUES` or `COLUMNS(...)`, is recorded as a single `?` column with no sources.
+
 ### Markers in the rendered output
 
 The ASCII view abbreviates the transformation next to each column:

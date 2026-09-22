@@ -219,7 +219,7 @@ func (r *Runner) extractLineage(sql string) ([]lineage.ColumnLineage, []string, 
 		return nil, nil, err
 	}
 
-	colLineage, err := lineage.ExtractFromAST(astJSON)
+	colLineage, err := lineage.ExtractFromASTWithColumns(astJSON, lineage.SessionColumns(r.sess))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -917,7 +917,7 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// when CDC must be reverted.
 
 	tables, _ := lineage.ExtractTablesFromAST(astJSON)
-	colLineage, _ := lineage.ExtractFromAST(astJSON)
+	colLineage, _ := lineage.ExtractFromASTWithColumns(astJSON, lineage.SessionColumns(r.sess))
 
 	// Determine which tables need CDC:
 	// 1. Primary table (first FROM) always gets CDC

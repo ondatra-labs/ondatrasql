@@ -863,7 +863,7 @@ func TestExtract_UnionAllColumnLineage(t *testing.T) {
 }
 
 func TestExtract_CteWithUnion(t *testing.T) {
-	// resolveCTE has its own AST walker; if it doesn't recurse into Left/Right
+	// CTE resolution walks the body itself; if it doesn't recurse into Left/Right
 	// the column traces back to the CTE name itself ("c.x") instead of the
 	// real upstream tables.
 	sql := `WITH c AS (

@@ -245,12 +245,17 @@ func TestExtractFromAST_SubqueryCTEShadowingIsRestored(t *testing.T) {
 	// Register an outer CTE, push a subquery scope that reuses the name, then
 	// confirm the outer body is restored.
 	e := &Extractor{
-		cteNodes: map[string]*duckast.Node{
-			"x": duckast.NewNode(map[string]any{"type": "SELECT_NODE", "marker": "outer"}),
-		},
-		resolved:  map[string]map[string][]SourceColumn{},
+		resolved:  map[uintptr][]ColumnLineage{},
 		resolving: map[uintptr]bool{},
 	}
+	outer := duckast.NewNode(map[string]any{
+		"type": "SELECT_NODE",
+		"cte_map": map[string]any{"map": []any{map[string]any{
+			"key":   "x",
+			"value": map[string]any{"query": map[string]any{"node": map[string]any{"type": "SELECT_NODE", "marker": "outer"}}},
+		}}},
+	})
+	e.pushCTEScope(outer)
 	inner := duckast.NewNode(map[string]any{
 		"type": "SELECT_NODE",
 		"cte_map": map[string]any{"map": []any{map[string]any{
@@ -259,18 +264,18 @@ func TestExtractFromAST_SubqueryCTEShadowingIsRestored(t *testing.T) {
 		}}},
 	})
 	restore := e.pushCTEScope(inner)
-	if got := e.cteNodes["x"].String("marker"); got != "inner" {
+	if got := e.lookupCTE("x").node.String("marker"); got != "inner" {
 		t.Errorf("inner CTE must shadow the outer one, got %q", got)
 	}
 	restore()
-	if got := e.cteNodes["x"].String("marker"); got != "outer" {
+	if got := e.lookupCTE("x").node.String("marker"); got != "outer" {
 		t.Errorf("the outer CTE must be restored after the subquery, got %q", got)
 	}
 }
 
 // A subquery-local CTE may reuse a name that is currently being resolved, and
-// its body may reference that name. resolveCTE uses the entry in e.resolved as
-// its recursion guard, so clearing that entry to shadow the name left the
+// its body may reference that name. CTE resolution once used its cache entry
+// as the recursion guard, so clearing that entry to shadow the name left the
 // in-flight resolution writing into a map that no longer existed — a panic on
 // user SQL, not a wrong answer.
 const selfReferencingShadowedCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE",` +
