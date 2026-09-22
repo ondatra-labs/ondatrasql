@@ -491,6 +491,54 @@ func walkValue(v any, visit func(*Node) bool) {
 	}
 }
 
+// ChildExpressions returns the expression nodes nested directly inside n —
+// the values of its fields that are themselves expressions, reached through
+// lists and through maps that are not expressions (`order_bys`, `case_checks`
+// and the like). It is what lets a walker handle an expression class it does
+// not know by name: the operands are still found, so a new or overlooked class
+// contributes its sources instead of silently contributing none.
+//
+// The `subquery` field is left out: a subquery resolves its names against its
+// own FROM clause, so it has to be traced with its own scope rather than the
+// enclosing one.
+func (n *Node) ChildExpressions() []*Node {
+	if n.IsNil() {
+		return nil
+	}
+	var out []*Node
+	collectExpressions(n.raw, &out)
+	return out
+}
+
+func collectExpressions(m map[string]any, out *[]*Node) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if k != "subquery" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		collectExpressionValue(m[k], out)
+	}
+}
+
+func collectExpressionValue(v any, out *[]*Node) {
+	switch x := v.(type) {
+	case map[string]any:
+		node := &Node{raw: x}
+		if node.Class() != "" {
+			*out = append(*out, node)
+			return
+		}
+		collectExpressions(x, out)
+	case []any:
+		for _, item := range x {
+			collectExpressionValue(item, out)
+		}
+	}
+}
+
 // ----- Mutation: ReplaceBaseTables (used by CDC) -----
 
 func replaceInValue(v any, typeCheck func(*Node) bool, match func(*Node) bool, build func(*Node) map[string]any) any {

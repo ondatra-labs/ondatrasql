@@ -48,3 +48,55 @@ func TestExpandStar_ResolverMissFallsBackToPlaceholder(t *testing.T) {
 		t.Errorf("cols = %+v, want a single sourceless ?", cols)
 	}
 }
+
+// The classification rules are pure functions, so they are pinned without a
+// DuckDB session: the integration tests above need one, and `make test` would
+// otherwise cover none of this.
+func TestOperatorTransform(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		nodeType  string
+		transform TransformationType
+		name      string
+	}{
+		{"OPERATOR_COALESCE", TransformFunction, "COALESCE"},
+		{"OPERATOR_TRY", TransformFunction, "TRY"},
+		{"ARRAY_EXTRACT", TransformFunction, "ARRAY EXTRACT"},
+		{"STRUCT_EXTRACT", TransformFunction, "STRUCT EXTRACT"},
+		{"ARRAY_SLICE", TransformFunction, "ARRAY SLICE"},
+		{"OPERATOR_IS_NULL", TransformConditional, "IS NULL"},
+		{"COMPARE_IN", TransformConditional, "IN"},
+		{"CONJUNCTION_AND", TransformConditional, "AND"},
+		{"COMPARE_BETWEEN", TransformConditional, "BETWEEN"},
+	}
+	for _, tc := range cases {
+		transform, name := operatorTransform(tc.nodeType)
+		if transform != tc.transform || name != tc.name {
+			t.Errorf("operatorTransform(%q) = %q, %q; want %q, %q",
+				tc.nodeType, transform, name, tc.transform, tc.name)
+		}
+	}
+}
+
+// An aggregate underneath a scalar wrapper has to survive: GetCDCTables reads
+// it to decide that a delta is unsound. The wrapper's own classification wins
+// only when it is the aggregate.
+func TestKeepAggregate(t *testing.T) {
+	t.Parallel()
+	agg := SourceColumn{Transformation: TransformAggregation, FunctionName: "max"}
+	if got, fn := keepAggregate(agg, TransformFunction, "upper"); got != TransformAggregation || fn != "max" {
+		t.Errorf("upper(max(x)) = %q, %q; want AGGREGATION, max", got, fn)
+	}
+	plain := SourceColumn{Transformation: TransformIdentity}
+	if got, fn := keepAggregate(plain, TransformAggregation, "max"); got != TransformAggregation || fn != "max" {
+		t.Errorf("max(x) = %q, %q; want AGGREGATION, max", got, fn)
+	}
+	arith := SourceColumn{Transformation: TransformArithmetic}
+	if got, _ := keepAggregate(arith, TransformAggregation, "sum"); got != TransformAggregation {
+		t.Errorf("sum(a + b) = %q; want AGGREGATION", got)
+	}
+	cast := SourceColumn{Transformation: TransformCast}
+	if got, _ := keepAggregate(cast, TransformFunction, "upper"); got != TransformCast {
+		t.Errorf("upper(x::INT) = %q; want CAST", got)
+	}
+}

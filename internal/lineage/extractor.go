@@ -218,6 +218,13 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		var table, col, tableAlias string
 		switch {
 		case len(colNames) == 1:
+			// A lambda parameter is bound by the lambda, not read from a
+			// table. Resolving it against the FROM clause invented a column:
+			// `list_transform(xs, x -> x || name)` reported a source column
+			// literally called `x`.
+			if info.bound[strings.ToLower(colNames[0])] {
+				return nil
+			}
 			col = colNames[0]
 			table = info.primaryTable
 		case len(colNames) >= 2:
@@ -282,9 +289,10 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 	case "FUNCTION":
 		transType := classifyFunction(expr.FunctionName(), expr.IsOperator())
 		appendFunc := func(cs SourceColumn) {
+			transform, fn := keepAggregate(cs, transType, expr.FunctionName())
 			sources = append(sources, SourceColumn{
 				Table: cs.Table, Column: cs.Column,
-				Transformation: transType, FunctionName: expr.FunctionName(),
+				Transformation: transform, FunctionName: fn,
 			})
 		}
 		for _, child := range expr.Children() {
@@ -313,9 +321,10 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 		// in children. (Bug 23)
 		transType := classifyFunction(expr.FunctionName(), expr.IsOperator())
 		appendWindow := func(cs SourceColumn) {
+			transform, fn := keepAggregate(cs, transType, expr.FunctionName())
 			sources = append(sources, SourceColumn{
 				Table: cs.Table, Column: cs.Column,
-				Transformation: transType, FunctionName: expr.FunctionName(),
+				Transformation: transform, FunctionName: fn,
 			})
 		}
 		for _, child := range expr.Children() {
@@ -451,6 +460,13 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 						innerInfo.tableNodes[alias] = node
 					}
 				}
+				// Lambda parameters are only in scope for a subquery that
+				// resolves against the outer query. One with its own FROM
+				// defines its own names, and inheriting the binding there
+				// silently dropped every column it reads.
+				if innerInfo.primaryTable == "" && innerInfo.primarySubquery == nil {
+					innerInfo.bound = info.bound
+				}
 				// A subquery with no FROM of its own — `(SELECT amount)` —
 				// resolves an unqualified column entirely against the outer
 				// query, so it inherits the outer primary too. Copying only
@@ -461,24 +477,78 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 					innerInfo.primaryAlias = info.primaryAlias
 					innerInfo.subqueryCols[info.primarySubquery] = info.subqueryCols[info.primarySubquery]
 				}
-				for _, sel := range inner.SelectList() {
-					sources = append(sources, e.traceExprWithType(sel, innerInfo)...)
+				// A SCALAR subquery yields the value itself, so its column is
+				// copied. An ANY / EXISTS subquery is a test: both the outer
+				// expression and the columns it is tested against are
+				// conditions, not copies.
+				if subqueryType := expr.String("subquery_type"); subqueryType == "SCALAR" {
+					for _, sel := range inner.SelectList() {
+						sources = append(sources, e.traceExprWithType(sel, innerInfo)...)
+					}
+				} else {
+					sources = append(sources, e.traceWrapped(inner.SelectList(), innerInfo,
+						TransformConditional, operatorName(subqueryType))...)
 				}
 			}
 			visit(sub.Field("node"))
 		}
 		// IN-style subqueries also test an outer expression, held in `child`,
-		// which belongs to the enclosing scope.
-		sources = append(sources, e.traceExprWithType(expr.Child(), info)...)
+		// which belongs to the enclosing scope. It is tested, not copied:
+		// `name IN (SELECT ...)` reported IDENTITY, which is what
+		// DetectRenames reads as a renamed column.
+		sources = append(sources, e.traceWrapped([]*duckast.Node{expr.Child()}, info,
+			TransformConditional, operatorName(expr.String("subquery_type")))...)
 
 	case "COMPARISON":
 		// Binary comparison operators (used in CASE WHEN, JOIN ON, etc.).
 		// DuckDB stores operands in `left`/`right`, NOT `children`.
-		sources = append(sources, e.traceExprWithType(expr.ExprLeft(), info)...)
-		sources = append(sources, e.traceExprWithType(expr.ExprRight(), info)...)
-		for _, child := range expr.Children() {
-			sources = append(sources, e.traceExprWithType(child, info)...)
+		// A comparison is a condition, not a copy: reporting IDENTITY would
+		// let DetectRenames read `a = b` as a renamed column.
+		operands := append([]*duckast.Node{expr.ExprLeft(), expr.ExprRight()}, expr.Children()...)
+		sources = append(sources, e.traceWrapped(operands, info, TransformConditional, operatorName(expr.NodeType()))...)
+
+	case "LAMBDA":
+		// DuckDB writes the JSON arrow as a lambda too: `j -> 'a'` is
+		// `lhs` = the column j, `expr` = the constant key. There `lhs` is a
+		// real column, so binding it as a parameter emptied the lineage —
+		// the very failure this walker exists to prevent. A lambda whose
+		// body is a bare constant is that arrow, never a useful lambda.
+		if expr.Field("expr").Class() == "CONSTANT" {
+			sources = append(sources, e.traceExprWithType(expr.Field("lhs"), info)...)
+			break
 		}
+		// `x -> x || name`: `lhs` binds the parameters, `expr` is the body.
+		// Only the body reads columns, and the parameter names must not be
+		// resolved against the FROM clause while it is traced.
+		inner := info
+		inner.bound = make(map[string]bool, len(info.bound)+1)
+		for k := range info.bound {
+			inner.bound[k] = true
+		}
+		for _, param := range lambdaParams(expr.Field("lhs")) {
+			inner.bound[strings.ToLower(param)] = true
+		}
+		sources = append(sources, e.traceExprWithType(expr.Field("expr"), inner)...)
+
+	case "OPERATOR", "CONJUNCTION", "BETWEEN":
+		// COALESCE, IS NULL, NOT, IN, AND / OR, BETWEEN. None of them is a
+		// FUNCTION node, so none was traced: `COALESCE(a.x, b.y)` produced a
+		// column with no sources at all, which is most of what a dimension
+		// model coalescing several registers is made of.
+		transform, name := operatorTransform(expr.NodeType())
+		sources = append(sources, e.traceWrapped(expr.ChildExpressions(), info, transform, name)...)
+
+	default:
+		// An expression class this walker does not name explicitly still has
+		// operands, and they still carry the column references. Walking them
+		// keeps an unknown or newly added class from contributing nothing —
+		// the failure mode that hid casts, CASE else-branches and every
+		// operator above until someone measured the lineage.
+		// The wrapper is recorded as a FUNCTION rather than passed through:
+		// an unknown construct is not a direct copy, and IDENTITY is what
+		// DetectRenames reads as a renamed column.
+		sources = append(sources, e.traceWrapped(expr.ChildExpressions(), info,
+			TransformFunction, operatorName(expr.NodeType()))...)
 	}
 
 	return sources
@@ -522,6 +592,95 @@ func keepInner(inner SourceColumn, wrapper TransformationType) (TransformationTy
 		return wrapper, ""
 	}
 	return inner.Transformation, inner.FunctionName
+}
+
+// traceWrapped traces operands and records each source as reached through a
+// wrapper expression: the wrapper's classification and name apply unless the
+// source already has a more specific one, as for a cast or a CASE arm.
+func (e *Extractor) traceWrapped(operands []*duckast.Node, info aliasInfo, wrapper TransformationType, name string) []SourceColumn {
+	var out []SourceColumn
+	for _, operand := range operands {
+		for _, cs := range e.traceExprWithType(operand, info) {
+			transform, fn := keepInner(cs, wrapper)
+			// Only a function-shaped wrapper names itself. A CASE arm records
+			// a CONDITIONAL without a name, and a comparison that labelled
+			// itself made the two disagree: the rendered view then showed
+			// [MIX] for `CASE WHEN status = 'x' THEN name END`, and `model
+			// impact` printed labels like `EQUAL()`.
+			if wrapper == TransformFunction &&
+				(cs.Transformation == "" || cs.Transformation == TransformIdentity) {
+				fn = name
+			}
+			out = append(out, SourceColumn{
+				Table: cs.Table, Column: cs.Column,
+				Transformation: transform, FunctionName: fn,
+			})
+		}
+	}
+	return out
+}
+
+// operatorName turns an AST node type into a readable label: OPERATOR_IS_NULL
+// becomes "IS NULL".
+func operatorName(nodeType string) string {
+	name := nodeType
+	for _, prefix := range []string{"OPERATOR_", "CONJUNCTION_", "COMPARE_"} {
+		name = strings.TrimPrefix(name, prefix)
+	}
+	return strings.ReplaceAll(name, "_", " ")
+}
+
+// lambdaParams returns the names a lambda's left-hand side binds. DuckDB
+// writes a single parameter as a COLUMN_REF and several as a function node
+// whose children are the names.
+func lambdaParams(lhs *duckast.Node) []string {
+	if lhs.IsNil() {
+		return nil
+	}
+	if names := lhs.ColumnNames(); len(names) > 0 {
+		return names[len(names)-1:]
+	}
+	var out []string
+	for _, child := range lhs.ChildExpressions() {
+		out = append(out, lambdaParams(child)...)
+	}
+	return out
+}
+
+// operatorTransform classifies an OPERATOR / CONJUNCTION / BETWEEN node from
+// its AST type and gives it a readable name. The class is not only predicates:
+// `COALESCE` picks a value and `a[1]`, `a[1:2]`, `(a).b` and `grouping(a)`
+// read one out of a value, so those read as functions. What is left — IS NULL,
+// NOT, IN, AND / OR, BETWEEN — is a condition, which is what CONDITIONAL
+// already means for a CASE arm.
+func operatorTransform(nodeType string) (TransformationType, string) {
+	name := operatorName(nodeType)
+	switch {
+	case name == "COALESCE", name == "TRY", strings.Contains(name, "EXTRACT"),
+		strings.Contains(name, "SLICE"), strings.Contains(name, "GROUPING"),
+		strings.Contains(name, "UNPACK"):
+		return TransformFunction, name
+	}
+	return TransformConditional, name
+}
+
+// keepAggregate decides what a scalar wrapper records for a source it reached
+// through another expression. The wrapper's own classification normally wins —
+// `SUM(a + b)` is an AGGREGATION of a and b, not arithmetic — but an
+// AGGREGATION underneath survives, because GetCDCTables reads it to decide
+// that a delta is unsound for the model. `upper(max(x))` used to come back as
+// a plain function, and the source was then given delta CDC it cannot take.
+func keepAggregate(inner SourceColumn, wrapper TransformationType, wrapperName string) (TransformationType, string) {
+	if wrapper == TransformAggregation {
+		return wrapper, wrapperName
+	}
+	// Outside an aggregate the rule is the one a cast and a CASE arm follow:
+	// a more specific inner classification survives the wrapper.
+	transform, fn := keepInner(inner, wrapper)
+	if transform == wrapper && fn == "" {
+		fn = wrapperName
+	}
+	return transform, fn
 }
 
 // classifyFunction determines the transformation type based on function name.
@@ -909,6 +1068,7 @@ type aliasInfo struct {
 	subqueries      map[string]*duckast.Node   // lower-cased alias -> subquery body node
 	subqueryCols    map[*duckast.Node][]string // subquery body -> `AS d(a, b)` column names
 	tableNodes      map[string]*duckast.Node   // lower-cased alias -> FROM item naming a table or CTE
+	bound           map[string]bool            // lower-cased lambda parameters, which name no column
 	primaryAlias    string                     // alias of the primary table
 	primaryTable    string                     // first table in FROM (for unqualified columns)
 	primarySubquery *duckast.Node              // first FROM source if it's a subquery

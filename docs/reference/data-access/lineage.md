@@ -25,11 +25,11 @@ Each column is classified by how it was derived:
 | `IDENTITY` | Direct copy | `SELECT name` |
 | `AGGREGATION` | Aggregated value | `SUM(amount)` |
 | `ARITHMETIC` | Computed | `price * quantity` |
-| `CONDITIONAL` | Logic applied | `CASE WHEN ...` |
+| `CONDITIONAL` | Logic applied | `CASE WHEN ...`, `a = b`, `a IS NULL`, `a IN (...)`, `a AND b`, `a BETWEEN x AND y` |
 | `CAST` | Type conversion | `CAST(id AS VARCHAR)` |
 | `FUNCTION` | Function call | `UPPER(name)` |
 
-Lineage is extracted from the SQL AST, across CTEs, joins, and subqueries. A wrapper does not hide what it wraps: `SUM(amount)::BIGINT` is recorded as an `AGGREGATION` of `amount`, not as a `CAST`, and the same holds for an aggregate inside a `CASE` arm. `CAST` and `CONDITIONAL` are recorded when there is nothing more specific underneath.
+Lineage is extracted from the SQL AST, across CTEs, joins, and subqueries. A wrapper does not hide what it wraps: `SUM(amount)::BIGINT` is recorded as an `AGGREGATION` of `amount`, not as a `CAST`, and the same holds for an aggregate inside a `CASE` arm. `CAST` and `CONDITIONAL` are recorded when there is nothing more specific underneath. `COALESCE(a, b)` is a `FUNCTION` of both, as is reading a value out of one — `a[1]`, `a[1:2]`, `(a).b`. A lambda parameter names no column, so `list_transform(xs, x -> x || name)` reads `xs` and `name` only. An expression whose class the extractor does not name explicitly is recorded as a `FUNCTION` of the columns its operands read, so an unfamiliar construct costs precision rather than emptying the lineage. An aggregate is never hidden: `upper(SUM(amount))` stays an `AGGREGATION` of `amount`, which is what change data capture reads to decide that a delta is unsound.
 
 `SELECT *` is expanded to one entry per column, with `EXCLUDE`, `REPLACE` and `RENAME` applied, `USING` or `NATURAL` join columns listed once, and only the left side's columns for a `SEMI` or `ANTI` join. `UNION BY NAME` matches columns by name rather than position. Over a CTE or a subquery the columns come from its select list. Over a table they come from the table's schema in the running session. A star that cannot be expanded, such as one over a table function, `VALUES` or `COLUMNS(...)`, is recorded as a single `?` column with no sources.
 
