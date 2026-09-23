@@ -245,6 +245,108 @@ SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
 	}
 }
 
+// TestLibCall_NackedRetry_DedupsBeforeUniqueConstraint verifies that a
+// @fetch merge model recovers after a failed run. The failed run nacks its
+// claims, so the next run sees the retained rows plus a fresh fetch of the
+// same rows. Without dedup on the SQL-model path those duplicates reached
+// unique(id), which then failed every run and grew the backlog each time.
+// The script path has deduped since the start; this pins the @fetch path.
+func TestLibCall_NackedRetry_DedupsBeforeUniqueConstraint(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "testapi", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["merge"],
+    },
+}
+
+def fetch(resource, page):
+    return {
+        "rows": [
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"},
+        ],
+        "next": None,
+    }
+`)
+
+	// First run fails on a constraint unrelated to the key, leaving the
+	// fetched rows nacked in the state store.
+	p.AddModel("raw/data.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+-- @constraint: unique(id)
+-- @constraint: not_null(missing_col)
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
+`)
+	if _, err := runModelWithLibErr(t, p, "raw/data.sql"); err == nil {
+		t.Fatal("run 1: expected constraint failure")
+	}
+
+	// Fix the model but keep unique(id).
+	p.AddModel("raw/data.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+-- @constraint: unique(id)
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
+`)
+	if r2, err := runModelWithLibErr(t, p, "raw/data.sql"); err != nil {
+		var errs []string
+		if r2 != nil {
+			errs = r2.Errors
+		}
+		t.Fatalf("run 2: nacked rows + fresh fetch must dedup before unique(id), got: %v %v", err, errs)
+	}
+
+	count, cerr := p.Sess.QueryValue("SELECT COUNT(*) FROM raw.data")
+	if cerr != nil {
+		t.Fatalf("count: %v", cerr)
+	}
+	if count != "2" {
+		t.Fatalf("expected 2 rows after retry, got %s", count)
+	}
+}
+
+// TestLibCall_FreshDuplicateKey_StillFailsUnique pins the other side of the
+// retry dedup: with no backlog from an earlier run, a key the source returns
+// twice is a real defect, and unique(id) must still fail on it rather than
+// have one of the rows dropped.
+func TestLibCall_FreshDuplicateKey_StillFailsUnique(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "testapi", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["merge"],
+    },
+}
+
+def fetch(resource, page):
+    return {
+        "rows": [
+            {"id": 1, "name": "Alice"},
+            {"id": 1, "name": "Alicia"},
+        ],
+        "next": None,
+    }
+`)
+
+	p.AddModel("raw/data.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+-- @constraint: unique(id)
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
+`)
+	if _, err := runModelWithLibErr(t, p, "raw/data.sql"); err == nil {
+		t.Fatal("expected unique(id) to fail on a key the source returned twice")
+	}
+}
+
 // TestLibCall_EarlyExit_NacksClaims verifies that if a lib-call fails mid-execution
 // (e.g. second lib-call errors after first already claimed), all claims are nacked.
 // Regression test for early exit paths not cleaning up inflight claims.

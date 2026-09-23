@@ -1436,6 +1436,17 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			needsBackfill = false
 		}
 	}
+	// A failed @fetch run leaves its rows in the state store, and the next
+	// run fetches them again on top. Dedup only then: without a backlog a
+	// duplicate key came from the source itself, and unique() should see it.
+	// With a backlog, a source duplicate in the same run is collapsed too;
+	// telling the two apart would mean trusting temp-table row order to
+	// match staging order, which nothing guarantees. A nil AST means the
+	// strict-fetch validator was skipped, so the row-for-row shape the
+	// dedup relies on is unverified.
+	if model.Fetch && parsedAST != nil && libBacklog(libCalls) > 0 {
+		r.dedupStateStoreRows(model, tmpTable, result)
+	}
 	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, decision.RunType == "backfill", result)
 
 	// Run constraints (batched - single query for all constraints)
@@ -2368,4 +2379,54 @@ func filterColumnsByName(columns []backfill.Column, names []string) []backfill.C
 		}
 	}
 	return filtered
+}
+
+// libBacklog sums the rows earlier runs left in staging across libCalls.
+func libBacklog(libCalls []LibCall) int64 {
+	var n int64
+	for i := range libCalls {
+		if sr := libCalls[i].ScriptResult; sr != nil {
+			n += sr.RetainedRows()
+		}
+	}
+	return n
+}
+
+// dedupStateStoreRows keeps only the last row per key in tmpTable for kinds
+// that may carry state-store duplicates. When a run fails after rows were
+// staged (a constraint failure, a failed materialize, a crash), the claims
+// are nacked and the rows stay in the state store. The next run fetches the
+// same rows again on top of the retained ones, so the temp table holds each
+// key twice and a unique constraint on the key fails every run from then on.
+//
+// Callers must only pass temp tables that are a row-for-row projection of
+// the collected rows, which the strict-fetch contract guarantees for @fetch
+// models (no JOIN, WHERE, GROUP BY or DISTINCT). On an arbitrary SQL model a
+// duplicate key is a real defect the constraints are there to catch.
+//
+// tracked is left out on purpose: its group_key names a group of rows, not a
+// row, so keeping one row per group would silently drop the rest of it.
+func (r *Runner) dedupStateStoreRows(model *parser.Model, tmpTable string, result *Result) {
+	dedupKey := model.UniqueKey
+	if dedupKey == "" {
+		return
+	}
+	switch model.Kind {
+	case "merge", "scd2":
+	default:
+		return
+	}
+	// Split on commas for the script path; merge and scd2 reject a composite
+	// unique_key at parse time, so @fetch models always pass one column.
+	var parts []string
+	for _, col := range strings.Split(dedupKey, ",") {
+		parts = append(parts, duckdb.QuoteIdentifier(strings.TrimSpace(col)))
+	}
+	dedupSQL := fmt.Sprintf(
+		"DELETE FROM %s WHERE rowid NOT IN (SELECT MAX(rowid) FROM %s GROUP BY %s)",
+		tmpTable, tmpTable, strings.Join(parts, ", "))
+	if err := r.sess.Exec(dedupSQL); err != nil {
+		// Non-fatal: if dedup fails, proceed with potential duplicates
+		result.Warnings = append(result.Warnings, fmt.Sprintf("dedup warning: %v", err))
+	}
 }

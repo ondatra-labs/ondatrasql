@@ -41,6 +41,7 @@ type stateCollector struct {
 	mu        sync.Mutex      // guards seq counter increments
 	seq       int64           // next seq to assign (monotonic per process)
 	rowCount  atomic.Int64
+	retained  int64 // rows left in staging by earlier runs, counted at open
 }
 
 // newStateCollector ensures the per-target staging table exists, recovers
@@ -140,6 +141,7 @@ func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*s
 		st:        st,
 		sess:      sess,
 		seq:       startSeq,
+		retained:  existing,
 	}
 	sc.rowCount.Store(existing)
 	return sc, nil

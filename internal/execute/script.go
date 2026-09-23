@@ -14,7 +14,6 @@ import (
 	"os"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
-	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
 	"github.com/ondatra-labs/ondatrasql/internal/validation"
@@ -217,38 +216,9 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	tmpTable := scriptResult.TempTable
 
-	// Deduplicate temp table by key column for kinds that may have state-store duplicates.
-	// When a script crashes after save.row() but before materialization, state-store retains
-	// the rows. On the next run, the script produces the same rows again, resulting in
-	// duplicates in the temp table. Dedup keeps only the last row per key column.
-	// Determine the key column for dedup
-	dedupKey := model.UniqueKey
-	if model.Kind == "tracked" {
-		dedupKey = model.GroupKey
-	}
-	if dedupKey != "" {
-		switch model.Kind {
-		case "merge", "tracked", "scd2":
-			// Handle composite key (comma-separated)
-			var groupByCols string
-			if strings.Contains(dedupKey, ",") {
-				var parts []string
-				for _, col := range strings.Split(dedupKey, ",") {
-					parts = append(parts, duckdb.QuoteIdentifier(strings.TrimSpace(col)))
-				}
-				groupByCols = strings.Join(parts, ", ")
-			} else {
-				groupByCols = duckdb.QuoteIdentifier(dedupKey)
-			}
-			dedupSQL := fmt.Sprintf(
-				"DELETE FROM %s WHERE rowid NOT IN (SELECT MAX(rowid) FROM %s GROUP BY %s)",
-				tmpTable, tmpTable, groupByCols)
-			if err := r.sess.Exec(dedupSQL); err != nil {
-				// Non-fatal: if dedup fails, proceed with potential duplicates
-				result.Warnings = append(result.Warnings, fmt.Sprintf("dedup warning: %v", err))
-			}
-		}
-	}
+	// Drop state-store duplicates before constraints see them (shared with
+	// runner.go's @fetch path).
+	r.dedupStateStoreRows(model, tmpTable, result)
 
 	// Schema evolution check — shared with runner.go's SQL-model path so
 	// the two execution paths can't drift on this critical correctness logic.

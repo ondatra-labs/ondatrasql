@@ -1455,6 +1455,16 @@ func (r *Result) CreateTempTable() error {
 	return nil
 }
 
+// RetainedRows reports how many rows an earlier run left in staging for this
+// target (nacked or crashed), which this run's temp table includes on top of
+// its own rows. Zero when not state-backed.
+func (r *Result) RetainedRows() int64 {
+	if r.state == nil {
+		return 0
+	}
+	return r.state.retained
+}
+
 // AckClaims acknowledges all state-backed claims (successful DuckLake commit).
 func (r *Result) AckClaims() error {
 	if r.state == nil || len(r.ClaimIDs) == 0 {
