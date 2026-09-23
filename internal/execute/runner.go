@@ -694,6 +694,13 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						kwargs["initial_value"] = ""
 					}
 
+					// libTarget names this call's staging table and temp table.
+					// It carries the model target so two models calling the
+					// same lib never share staging: a model's failed run leaves
+					// its rows there for its own retry, not for the next model.
+					libCallName := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
+					libTarget := model.Target + "/" + libCallName
+
 					rt := script.NewRuntime(r.sess, nil, r.projectDir)
 					if r.projectDir != "" && model.Kind != "table" {
 						st, err := r.getStateStore()
@@ -701,10 +708,18 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 							return nil, err
 						}
 						rt.SetStateStore(st)
+						// Before v0.42.2 staging was keyed by the lib call
+						// alone. Rows left there cannot be assigned to a model
+						// safely, so they are reported rather than picked up.
+						if n, claimed, err := script.LegacyStagingRows(st, libCallName); err != nil {
+							result.Warnings = append(result.Warnings, fmt.Sprintf("check legacy staging for %s: %v", call.FuncName, err))
+						} else if n > 0 {
+							result.Warnings = append(result.Warnings, fmt.Sprintf(
+								"legacy staging table \"fetch:%s\" holds %d rows (%d claimed by an interrupted run) from before v0.42.2; staging is now per model, so they are no longer retried and may belong to any model calling %s. Inspect them in the state database, then DROP TABLE \"fetch:%s\" to clear this warning",
+								libCallName, n, claimed, call.FuncName, libCallName))
+						}
 					}
 
-					// Execute lib function (unique target per call to avoid temp table collision)
-					libTarget := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
 					var scriptResult *script.Result
 					var runErr error
 					if call.Lib.APIConfig != nil {

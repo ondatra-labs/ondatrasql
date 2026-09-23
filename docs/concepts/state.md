@@ -20,10 +20,17 @@ State also has different durability concerns. Data in DuckLake must never be los
 | In-flight push claims (events being delivered) | `state.sync_inflight` + `state.sync_claim` |
 | Async job references (sinks that return a job id) | `state.sync_jobref` |
 | Per-row push outcomes (crash-safe ack) | `state.sync_apply_log` |
-| Fetch staging buffer (`save.row()` rows pre-materialize) | `state."fetch:<target>"` (one table per fetch target) |
+| Fetch staging buffer (`save.row()` rows pre-materialize) | `state."fetch:<model>/_lib_<lib>_<n>"` (one table per `@fetch` model, except `@kind: table`, which fetches in memory; names over 63 characters end in a hash) |
 | OAuth refresh tokens | `state.tokens` |
 
-Tables are created idempotently on first open by `internal/sql/state/init.sql`. You do not define them.
+Tables are created idempotently on first open by `internal/sql/state/init.sql`, and fetch staging tables on a model's first fetch. You do not define them.
+
+Before v0.42.2, fetch staging was keyed by the lib call alone (`fetch:_lib_<lib>_<n>`), shared by every model calling that lib. If such a table still holds rows, runs warn about it: the rows cannot be attributed to one model, so they are no longer retried. Inspect them, then drop the table to clear the warning:
+
+```sql
+SELECT count(*), count(claim_id) FROM state."fetch:_lib_<lib>_<n>";
+DROP TABLE state."fetch:_lib_<lib>_<n>";
+```
 
 ## How the backend is chosen
 

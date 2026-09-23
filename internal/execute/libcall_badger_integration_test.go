@@ -17,6 +17,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
 
@@ -344,6 +345,131 @@ SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
 `)
 	if _, err := runModelWithLibErr(t, p, "raw/data.sql"); err == nil {
 		t.Fatal("expected unique(id) to fail on a key the source returned twice")
+	}
+}
+
+// TestLibCall_SharedLib_StagingIsPerModel verifies that two @fetch models
+// calling the same lib keep separate staging. Staging used to be keyed by
+// the lib call alone (_lib_<func>_<index>), so rows one model left behind
+// after a failed run were claimed by the next model calling that lib and
+// landed in the wrong table.
+func TestLibCall_SharedLib_StagingIsPerModel(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "testapi", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["merge"],
+    },
+}
+
+def fetch(resource, page):
+    if resource == "a":
+        return {"rows": [{"id": 1, "name": "from_a"}], "next": None}
+    return {"rows": [{"id": 2, "name": "from_b"}], "next": None}
+`)
+
+	// Model A fails after its fetch, leaving its row in staging.
+	p.AddModel("raw/a.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+-- @constraint: not_null(missing_col)
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('a')
+`)
+	if _, err := runModelWithLibErr(t, p, "raw/a.sql"); err == nil {
+		t.Fatal("model a: expected constraint failure")
+	}
+
+	// Model B calls the same lib and must see only its own row.
+	p.AddModel("raw/b.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('b')
+`)
+	runModelWithLib(t, p, "raw/b.sql")
+
+	names, err := p.Sess.QueryRows("SELECT name FROM raw.b ORDER BY id")
+	if err != nil {
+		t.Fatalf("query raw.b: %v", err)
+	}
+	if len(names) != 1 || names[0] != "from_b" {
+		t.Fatalf("raw.b must hold only its own row, got %v", names)
+	}
+
+	// Model A, once fixed, still gets its retained row back.
+	p.AddModel("raw/a.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('a')
+`)
+	runModelWithLib(t, p, "raw/a.sql")
+	names, err = p.Sess.QueryRows("SELECT name FROM raw.a ORDER BY id")
+	if err != nil {
+		t.Fatalf("query raw.a: %v", err)
+	}
+	if len(names) != 1 || names[0] != "from_a" {
+		t.Fatalf("raw.a must hold only its own row, got %v", names)
+	}
+}
+
+// TestLibCall_LegacyStaging_Warns verifies that rows left in a pre-v0.42.2
+// staging table (keyed by lib call, not by model) are reported instead of
+// being silently orphaned or picked up by whichever model runs first.
+func TestLibCall_LegacyStaging_Warns(t *testing.T) {
+	p := testutil.NewProject(t)
+
+	writeLib(t, p, "testapi", `
+API = {
+    "base_url": "https://example.com",
+    "fetch": {
+        "args": ["resource"],
+        "supported_kinds": ["merge"],
+    },
+}
+
+def fetch(resource, page):
+    return {"rows": [{"id": 1, "name": "fresh"}], "next": None}
+`)
+	p.AddModel("raw/data.sql", `-- @kind: merge
+-- @fetch
+-- @unique_key: id
+SELECT id::BIGINT AS id, name::VARCHAR AS name FROM testapi('items')
+`)
+
+	st, err := state.Open(filepath.Join(p.Dir, "config"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE "fetch:_lib_testapi_0" (seq BIGINT NOT NULL, claim_id VARCHAR, payload BLOB NOT NULL, PRIMARY KEY (seq))`,
+		`INSERT INTO "fetch:_lib_testapi_0" VALUES (0, NULL, '{"id": 9, "name": "legacy"}'::BLOB), (1, 'old-claim', '{"id": 8, "name": "legacy"}'::BLOB)`,
+	} {
+		if _, err := st.DB().Exec(q); err != nil {
+			t.Fatalf("seed legacy staging: %v", err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close state: %v", err)
+	}
+
+	r := runModelWithLib(t, p, "raw/data.sql")
+	var warned bool
+	for _, w := range r.Warnings {
+		if strings.Contains(w, `"fetch:_lib_testapi_0" holds 2 rows (1 claimed by an interrupted run)`) {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a legacy staging warning, got %v", r.Warnings)
+	}
+	names, err := p.Sess.QueryRows("SELECT name FROM raw.data ORDER BY id")
+	if err != nil {
+		t.Fatalf("query raw.data: %v", err)
+	}
+	if len(names) != 1 || names[0] != "fresh" {
+		t.Fatalf("legacy rows must not be picked up, got %v", names)
 	}
 }
 

@@ -6,6 +6,7 @@ package script
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -48,12 +49,12 @@ type stateCollector struct {
 // any inflight claims from a previous crashed run, and returns a collector
 // ready for save() calls.
 func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*stateCollector, error) {
-	// The raw target (e.g. "raw.orders") is used as a quoted DuckDB
-	// identifier so distinct targets never collide. Earlier we sanitized
-	// dots → underscores, which made `raw.orders` and `raw_orders` map to
-	// the same table. ValidateIdentifier already rejects characters that
-	// would break the quoted form (e.g. embedded `"`).
-	tableName := "fetch:" + target
+	// The raw target (e.g. "raw.orders/_lib_api_0" for a lib call) is used
+	// as a quoted identifier, not sanitized, so distinct targets never
+	// collide: sanitizing once mapped `raw.orders` and `raw_orders` to the
+	// same table. Model targets come from validated model paths, so they
+	// cannot carry a `"` that would break the quoting.
+	tableName := stagingTableName(target)
 	db := st.DB()
 
 	createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" (
@@ -145,6 +146,47 @@ func newStateCollector(target string, st *state.State, sess *dbsess.Session) (*s
 	}
 	sc.rowCount.Store(existing)
 	return sc, nil
+}
+
+// maxStagingNameLen is Postgres's identifier limit (NAMEDATALEN-1). A state
+// backend on Postgres truncates longer names silently, and DuckDB then looks
+// the table up under the full name and does not find it.
+const maxStagingNameLen = 63
+
+// stagingTableName maps a collector target to its staging table. Names over
+// the Postgres limit keep a readable prefix and end in a hash of the full
+// target, so distinct long targets stay distinct.
+func stagingTableName(target string) string {
+	name := "fetch:" + target
+	if len(name) <= maxStagingNameLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(target))
+	suffix := "~" + hex.EncodeToString(sum[:8])
+	return name[:maxStagingNameLen-len(suffix)] + suffix
+}
+
+// LegacyStagingRows counts the rows in the staging table a lib call used
+// before staging was keyed by model (fetch:_lib_<func>_<index>): total, and
+// how many of those an interrupted run had claimed (some may already be
+// committed). Zeros when the table does not exist.
+func LegacyStagingRows(st *state.State, libCallName string) (total, claimed int64, err error) {
+	tableName := "fetch:" + libCallName
+	db := st.DB()
+	var exists int64
+	if err := db.QueryRow(
+		`SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database() AND table_name = ?`,
+		tableName).Scan(&exists); err != nil {
+		return 0, 0, fmt.Errorf("look up %q: %w", tableName, err)
+	}
+	if exists == 0 {
+		return 0, 0, nil
+	}
+	if err := db.QueryRow(fmt.Sprintf(
+		`SELECT count(*), count(claim_id) FROM "%s"`, tableName)).Scan(&total, &claimed); err != nil {
+		return 0, 0, fmt.Errorf("count %q: %w", tableName, err)
+	}
+	return total, claimed, nil
 }
 
 // add writes a single row to state.duckdb as JSON. Empty rows are
