@@ -225,6 +225,8 @@ def fetch(page):
 
 `empty_result` has no effect when the fetch returned any rows in total. Unknown string values fall back to the default rather than failing the run.
 
+`no_change` also protects a backfill, for every kind: when a run was going to rebuild the target but every lib returned 0 rows with `no_change`, the existing rows are kept and the rebuild is deferred to the next run. The ordinary `full` run of a `@kind: table @fetch` model is not a backfill and replaces the target as usual. See [Rebuild from an empty fetch](/reference/pipeline/run-types/#rebuild-from-an-empty-fetch).
+
 ## Pagination
 
 The runtime calls `fetch()` in a loop until `"next"` is `None` or missing.

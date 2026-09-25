@@ -21,7 +21,7 @@ The result is a directed acyclic graph (DAG). Models that depend on nothing run 
 Each model gets a run type before execution:
 
 - **skip** — nothing changed, don't run
-- **backfill** — first run or definition changed, rebuild from scratch
+- **backfill** — first run, definition changed, or a rebuild still owed from an earlier run; rebuild from scratch (unless every lib fetched nothing — see [Rebuild from an empty fetch](/reference/pipeline/run-types/#rebuild-from-an-empty-fetch))
 - **incremental** — new or changed data; usually only the delta, but a full query when CDC cannot apply (see [Run types](/reference/pipeline/run-types/))
 - **full** — upstream model changed, re-evaluate
 

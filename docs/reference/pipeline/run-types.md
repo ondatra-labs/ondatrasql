@@ -10,7 +10,7 @@ weight: 8
 | Run type | Trigger | Kinds |
 |---|---|---|
 | `skip` | Hash unchanged, no dep changes, no `@fetch` | non-fetch table only |
-| `backfill` | Model hash changed, config hash changed, first run, or a one-time upgrade rebuild | All |
+| `backfill` | Model hash changed, config hash changed, first run, a one-time upgrade rebuild, or a rebuild still owed from an earlier run | All |
 | `incremental` | Hash unchanged, source data may have changed | append, merge, scd2, tracked |
 | `full` | Upstream dep changed, dep metadata missing/invalid, destructive schema evolution, OR `@kind: table @fetch` (always re-fetches) | table |
 
@@ -100,6 +100,20 @@ Name matching is lexical and deliberately over-inclusive: a macro named `total` 
 | Materialize | no | yes | yes | yes |
 | Sink | backlog only | yes | yes | yes |
 | Commit metadata | no | yes | yes | yes |
+
+## Rebuild from an empty fetch {#rebuild-from-an-empty-fetch}
+
+A `backfill` replaces the target with the result. If every lib call in the model returned 0 rows with `empty_result: "no_change"` (the default) and the result is empty, there is nothing to rebuild from, and replacing the target would empty it. The run keeps the existing rows instead and warns: `all libs reported no change and the result is empty, keeping existing rows instead of rebuilding`. This applies to every kind, `table` included, whatever made the run a backfill — a changed model or config hash, or an escalation during the run.
+
+It does not apply to the ordinary `full` run of a `@kind: table @fetch` model, which re-fetches on every run: an empty result there replaces the target as usual.
+
+No rows are written, so there is nothing to validate either: audits do not execute, and a constraint violation in the empty result is not reported. A constraint or audit that does not parse, or a constraint that cannot execute (it names a column the model does not produce), still fails the run.
+
+An added column is still applied. Any other schema change — a type change, a rename, a dropped column — would rewrite columns of the rows being kept (a type change is applied as drop and re-add, which empties the column), so it is deferred with the rebuild and the run warns `schema change would rewrite the kept rows and the result is empty, deferring it with the rebuild`. That run commits nothing, so the next run still sees the model as changed.
+
+The rebuild is not dropped. A run that keeps the rows commits with `rebuild_pending: true` in `commit_extra_info`, and the next run is a `backfill` with `run_reason: rebuild pending`. Each run that fetches nothing again keeps the rows and defers the rebuild once more, until a run has data to build from.
+
+On a first run there is no target to keep, so the empty result creates an empty target as usual.
 
 ## Sink on skip
 

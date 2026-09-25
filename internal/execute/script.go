@@ -218,7 +218,13 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	// Drop state-store duplicates before constraints see them (shared with
 	// runner.go's @fetch path).
-	r.dedupStateStoreRows(model, tmpTable, result)
+	if err := r.dedupStateStoreRows(model, tmpTable); err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		_ = scriptResult.NackClaims() // claim retries on next run if Nack fails
+		r.cleanup(tmpTable)
+		result.Duration = time.Since(start)
+		return result, err
+	}
 
 	// Schema evolution check — shared with runner.go's SQL-model path so
 	// the two execution paths can't drift on this critical correctness logic.

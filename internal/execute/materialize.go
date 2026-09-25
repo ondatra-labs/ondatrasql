@@ -120,8 +120,16 @@ func (r *Runner) tableExistsCheck(target string) (bool, error) {
 // source, and materializeSCD2 skips closing current versions absent from it —
 // so target rows are preserved (an empty no_change reply means "no new data",
 // not "everything deleted"), while schema evolution and audits still run.
+//
+// keepTarget is set when the runner cancelled a rebuild of an existing target
+// because every lib reported no change and the result is empty. Kind table
+// rebuilds on every run regardless of isBackfill, so it has to be told to
+// leave its rows alone; the other kinds already write nothing from an empty
+// non-backfill result. The commit is marked rebuild_pending, so the next run
+// rebuilds instead of treating the new model hash as already applied.
 type trackedRunOpts struct {
 	noDeleteOnMissingGroups bool
+	keepTarget              bool
 }
 
 func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bool, schemaChange *backfill.SchemaChange, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, opts trackedRunOpts, extraPreSQL ...string) (int64, error) {
@@ -176,7 +184,12 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 
 	// Check if target table already exists. If it does, never use CREATE OR REPLACE —
 	// it breaks DuckLake's snapshot chain. Use TRUNCATE + INSERT BY NAME instead.
-	targetExists, _ := r.tableExistsCheck(model.Target)
+	targetExists, existsErr := r.tableExistsCheck(model.Target)
+	if existsErr != nil && opts.keepTarget {
+		// A kept target must not be mistaken for a missing one: the create
+		// path is CREATE OR REPLACE from the empty result.
+		return 0, fmt.Errorf("check target exists: %w", existsErr)
+	}
 
 	// Build the main SQL statement
 	var mainSQL string
@@ -185,6 +198,8 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 	case "table":
 		if !targetExists {
 			mainSQL = sql.MustFormat("execute/table.sql", model.Target, tmpTable)
+		} else if opts.keepTarget {
+			mainSQL = "SELECT 1"
 		} else {
 			mainSQL = fmt.Sprintf("TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT * FROM %s",
 				model.Target, model.Target, tmpTable)
@@ -324,6 +339,7 @@ func (r *Runner) materialize(model *parser.Model, tmpTable string, isBackfill bo
 		GitBranch:  r.gitInfo.Branch,
 		GitRepoURL: r.gitInfo.RepoURL,
 	}
+	info.RebuildPending = opts.keepTarget
 	jsonBytes, err := json.Marshal(info)
 	if err != nil {
 		return 0, fmt.Errorf("marshal commit metadata: %w", err)
@@ -723,6 +739,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			GitBranch:  r.gitInfo.Branch,
 			GitRepoURL: r.gitInfo.RepoURL,
 		}
+		info.RebuildPending = opts.keepTarget
 		jsonBytes, err := json.Marshal(info)
 		if err != nil {
 			return 0, fmt.Errorf("marshal commit metadata: %w", err)
@@ -777,6 +794,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			DuckDBVersion: r.sess.GetVersion(), Steps: steps,
 			GitCommit: r.gitInfo.Commit, GitBranch: r.gitInfo.Branch, GitRepoURL: r.gitInfo.RepoURL,
 		}
+		info.RebuildPending = opts.keepTarget
 		jsonBytes, _ := json.Marshal(info)
 
 		// Kind conversion (e.g. table → scd2): the existing target lacks the
@@ -926,6 +944,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		GitBranch:     r.gitInfo.Branch,
 		GitRepoURL:    r.gitInfo.RepoURL,
 	}
+	info.RebuildPending = opts.keepTarget
 	jsonBytes, err := json.Marshal(info)
 	if err != nil {
 		return rollbackOnErr(err, "marshal commit metadata")
@@ -1156,6 +1175,7 @@ FROM %s s JOIN group_hash g ON %s`,
 		GitBranch:     r.gitInfo.Branch,
 		GitRepoURL:    r.gitInfo.RepoURL,
 	}
+	info.RebuildPending = opts.keepTarget
 
 	if !tableExists {
 		// First run: CREATE table from hashed temp table

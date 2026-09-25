@@ -1435,20 +1435,37 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		// an empty result has nothing to rebuild from, which is the case that
 		// would otherwise wipe the target.
 		//
-		// An unreadable count is treated as empty: preserving rows costs a
-		// missed refresh, while rebuilding from an unknown result risks
-		// emptying the target outright.
-		empty := true
-		if cnt, err := r.sess.QueryValue(fmt.Sprintf("SELECT count(*) FROM %s", tmpTable)); err != nil {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("count temp rows for smart-skip check: %v", err))
-		} else {
-			empty = cnt == "0"
+		// An unreadable count fails the run. Guessing "empty" would discard
+		// a real result and skip its constraints and audits; guessing "not
+		// empty" would rebuild from what may be nothing.
+		cnt, err := r.sess.QueryValue(fmt.Sprintf("SELECT count(*) FROM %s", tmpTable))
+		if err != nil {
+			err = fmt.Errorf("count temp rows for smart-skip check: %w", err)
+			result.Errors = append(result.Errors, err.Error())
+			r.cleanup(tmpTable)
+			result.Duration = time.Since(start)
+			return result, err
 		}
-		if empty {
-			result.Warnings = append(result.Warnings,
-				"all libs reported no change and the result is empty, keeping existing rows instead of rebuilding")
+		if cnt == "0" {
 			needsBackfill = false
+			// Without a target there are no rows to keep, and the empty
+			// build is the whole first run. An unreadable existence check
+			// fails the run: guessing "missing" would create the target
+			// over its rows, and guessing "exists" hands materialize the
+			// same unanswered question.
+			targetExists, existsErr := r.tableExistsCheck(model.Target)
+			if existsErr != nil {
+				err := fmt.Errorf("check target exists for smart-skip: %w", existsErr)
+				result.Errors = append(result.Errors, err.Error())
+				r.cleanup(tmpTable)
+				result.Duration = time.Since(start)
+				return result, err
+			}
+			if targetExists {
+				result.Warnings = append(result.Warnings,
+					"all libs reported no change and the result is empty, keeping existing rows instead of rebuilding")
+				trackedOpts.keepTarget = true
+			}
 		}
 	}
 	// A failed @fetch run leaves its rows in the state store, and the next
@@ -1460,9 +1477,37 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// strict-fetch validator was skipped, so the row-for-row shape the
 	// dedup relies on is unverified.
 	if model.Fetch && parsedAST != nil && libBacklog(libCalls) > 0 {
-		r.dedupStateStoreRows(model, tmpTable, result)
+		if err := r.dedupStateStoreRows(model, tmpTable); err != nil {
+			result.Errors = append(result.Errors, err.Error())
+			r.cleanup(tmpTable)
+			result.Duration = time.Since(start)
+			return result, err
+		}
 	}
-	schemaChange, needsBackfill = r.detectSchemaEvolution(model, tmpTable, needsBackfill, decision.RunType == "backfill", result)
+	schemaChange, evolvedBackfill := r.detectSchemaEvolution(model, tmpTable, needsBackfill, decision.RunType == "backfill", result)
+	if trackedOpts.keepTarget && (evolvedBackfill || (schemaChange != nil &&
+		(len(schemaChange.TypeChanged) > 0 || len(schemaChange.Dropped) > 0 || len(schemaChange.Renamed) > 0))) {
+		// Only an added column leaves the kept rows as they are. The change
+		// type alone cannot say so: an added column next to a promotable
+		// type change classifies as additive as a whole. A change
+		// that demands a rebuild (a unique_key type change) would truncate
+		// the target like the rebuild that was cancelled, and a type change,
+		// rename or drop rewrites columns of rows this run promised to keep:
+		// a type change is DROP + ADD and nulls the column. Defer it with the
+		// rebuild by not committing at all: a commit would record the new
+		// schema as applied, and the next run would find nothing to evolve.
+		// Without one, the last commit still holds the old hash and schema,
+		// so the next run rebuilds and detects the change again.
+		result.Warnings = append(result.Warnings,
+			"schema change would rewrite the kept rows and the result is empty, deferring it with the rebuild")
+		ackLibClaims()
+		result.RowsAffected = 0
+		r.cleanup(tmpTable)
+		result.Duration = time.Since(start)
+		return result, nil
+	} else {
+		needsBackfill = evolvedBackfill
+	}
 
 	// Run constraints (batched - single query for all constraints)
 	stepStart = time.Now()
@@ -1474,12 +1519,16 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 			result.Errors = append(result.Errors, err.Error())
 		}
 
-		// Execute batched constraint check if we have valid constraints
+		// Execute batched constraint check if we have valid constraints.
+		// A kept target writes nothing, so a violation found in the empty
+		// result is not reported: at_least_one would fail on nothing at all.
+		// The query still runs, so a constraint the model cannot execute (a
+		// column that does not exist) fails the run like any model defect.
 		if batchSQL != "" {
 			rows, err := r.sess.QueryRows(batchSQL)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("constraint check error: %v", err))
-			} else {
+			} else if !trackedOpts.keepTarget {
 				// Each row is an error message from a failed constraint
 				for _, row := range rows {
 					if row != "" {
@@ -1517,6 +1566,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		r.cleanup(tmpTable)
 		result.Duration = time.Since(start)
 		return result, fmt.Errorf("audit parse errors")
+	}
+	// A kept target writes nothing, so an audit would only judge rows this
+	// run never touched, and fail a skip that did what it should.
+	if trackedOpts.keepTarget {
+		auditSQL = ""
 	}
 
 	// Build ack SQL for lib-call state-store claims — included in the materialize
@@ -2421,15 +2475,19 @@ func libBacklog(libCalls []LibCall) int64 {
 //
 // tracked is left out on purpose: its group_key names a group of rows, not a
 // row, so keeping one row per group would silently drop the rest of it.
-func (r *Runner) dedupStateStoreRows(model *parser.Model, tmpTable string, result *Result) {
+//
+// A failed dedup is fatal. Carrying on would feed the retained duplicates to
+// the unique constraint, which then reports a defect in the source data
+// instead of the dedup failure that caused it.
+func (r *Runner) dedupStateStoreRows(model *parser.Model, tmpTable string) error {
 	dedupKey := model.UniqueKey
 	if dedupKey == "" {
-		return
+		return nil
 	}
 	switch model.Kind {
 	case "merge", "scd2":
 	default:
-		return
+		return nil
 	}
 	// Split on commas for the script path; merge and scd2 reject a composite
 	// unique_key at parse time, so @fetch models always pass one column.
@@ -2441,7 +2499,7 @@ func (r *Runner) dedupStateStoreRows(model *parser.Model, tmpTable string, resul
 		"DELETE FROM %s WHERE rowid NOT IN (SELECT MAX(rowid) FROM %s GROUP BY %s)",
 		tmpTable, tmpTable, strings.Join(parts, ", "))
 	if err := r.sess.Exec(dedupSQL); err != nil {
-		// Non-fatal: if dedup fails, proceed with potential duplicates
-		result.Warnings = append(result.Warnings, fmt.Sprintf("dedup warning: %v", err))
+		return fmt.Errorf("dedup state-store rows on %s: %w", dedupKey, err)
 	}
+	return nil
 }

@@ -50,6 +50,12 @@ type CommitInfo struct {
 	DagRunID      string                  `json:"dag_run_id,omitempty"`
 	Depends       []string                `json:"depends"`
 
+	// RebuildPending marks a commit that kept the target's existing rows
+	// after cancelling a rebuild, because every lib reported no change and
+	// the result was empty. The rows were not built by this commit's model
+	// hash, so the next run must still rebuild.
+	RebuildPending bool `json:"rebuild_pending,omitempty"`
+
 	Kind          string `json:"kind,omitempty"`           // table/append/merge/scd2/partition
 	SourceFile    string `json:"source_file,omitempty"`    // models/staging/orders.sql
 	StartTime     string `json:"start_time,omitempty"`     // ISO8601 timestamp

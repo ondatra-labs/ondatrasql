@@ -13,6 +13,9 @@ latest_commits AS (
         commit_extra_info->>'model' AS model,
         commit_extra_info->>'sql_hash' AS prev_hash,
         commit_extra_info->>'config_hash' AS prev_config_hash,
+        -- Set when the last run kept the target's rows instead of rebuilding
+        -- from an empty result; the rebuild is still owed.
+        COALESCE(TRY_CAST(commit_extra_info->>'rebuild_pending' AS BOOLEAN), false) AS rebuild_pending,
         commit_extra_info->>'depends' AS depends_raw,
         snapshot_id,
         -- Partition on lowercased model so case-variant commits are deduped
@@ -37,6 +40,7 @@ model_status AS (
         -- config, so the one-time rebuild can name itself instead of posing
         -- as an ordinary "sql changed".
         lc.prev_config_hash IS NULL AS prev_config_hash_missing,
+        COALESCE(lc.rebuild_pending, false) AS rebuild_pending,
         lc.depends_raw,
         TRY_CAST(lc.depends_raw AS VARCHAR[]) AS depends_array,
         CASE
@@ -91,12 +95,14 @@ SELECT
     CASE
         -- Non-table kinds: standard logic
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'backfill'
+        WHEN ms.kind != 'table' AND ms.rebuild_pending THEN 'backfill'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'backfill'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'backfill'
         WHEN ms.kind != 'table' AND ms.prev_config_hash != ms.current_config_hash THEN 'backfill'
         WHEN ms.kind != 'table' THEN 'incremental'
         -- Table kind: dependency-aware skip logic
         WHEN ms.prev_hash = '' THEN 'backfill'
+        WHEN ms.rebuild_pending THEN 'backfill'
         WHEN ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'backfill'
         WHEN ms.prev_hash != ms.current_hash THEN 'backfill'
         WHEN ms.prev_config_hash != ms.current_config_hash THEN 'backfill'
@@ -113,6 +119,7 @@ SELECT
     CASE
         -- Non-table kinds
         WHEN ms.kind != 'table' AND ms.prev_hash = '' THEN 'first run'
+        WHEN ms.kind != 'table' AND ms.rebuild_pending THEN 'rebuild pending'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'hash format changed (upgrade)'
         WHEN ms.kind != 'table' AND ms.prev_hash != ms.current_hash THEN 'sql changed'
         WHEN ms.kind != 'table' AND ms.prev_config_hash != ms.current_config_hash THEN 'config changed'
@@ -122,6 +129,7 @@ SELECT
         WHEN ms.kind != 'table' THEN 'incremental run'
         -- Table kind
         WHEN ms.prev_hash = '' THEN 'first run'
+        WHEN ms.rebuild_pending THEN 'rebuild pending'
         WHEN ms.prev_hash != ms.current_hash AND ms.prev_config_hash_missing THEN 'hash format changed (upgrade)'
         WHEN ms.prev_hash != ms.current_hash THEN 'sql changed'
         WHEN ms.prev_config_hash != ms.current_config_hash THEN 'config changed'

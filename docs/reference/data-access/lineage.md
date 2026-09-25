@@ -59,8 +59,9 @@ Every run stores metadata in `commit_extra_info` on the DuckLake snapshot. All f
 | `model` | Target table name |
 | `kind` | `table`, `append`, `merge`, `scd2`, `tracked` |
 | `run_type` | `backfill`, `incremental`, `full`, `skip` |
-| `run_reason` | Why that run type was chosen — e.g. `first run`, `sql changed`, `config changed`, `dep changed: <target>`, `hash format changed (upgrade)` |
+| `run_reason` | Why that run type was chosen — e.g. `first run`, `sql changed`, `config changed`, `dep changed: <target>`, `hash format changed (upgrade)`, `rebuild pending` |
 | `rows_affected` | Rows written |
+| `rebuild_pending` | `true` when the run kept the target's rows instead of rebuilding from an empty fetch; the next run rebuilds. Absent otherwise. See [Rebuild from an empty fetch](/reference/pipeline/run-types/#rebuild-from-an-empty-fetch) |
 | `start_time` | Run start (ISO 8601) |
 | `end_time` | Run end (ISO 8601) |
 | `duration_ms` | Execution time in milliseconds |
