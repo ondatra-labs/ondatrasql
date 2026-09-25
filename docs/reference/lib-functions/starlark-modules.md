@@ -261,7 +261,7 @@ print("debug info")           # log to stderr (secrets auto-redacted)
 
 ## Secret redaction
 
-Secrets from `.env` are automatically removed from `print()` output and error messages:
+Credentials are masked in `print()` output. The masking matches patterns in the text — key names such as `token`, `secret` and `password`, `Authorization` headers, URL passwords — not the values in `.env`, so a secret printed without one of those around it is not caught. Error messages get a narrower set, aimed at the connection strings DuckDB echoes: `password=` values, URL passwords and secret options, but not `token=` or headers.
 
 ```
 Bearer eyJhbG...  →  Bearer [REDACTED]

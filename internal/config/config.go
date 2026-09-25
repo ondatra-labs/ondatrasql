@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 )
 
 // CatalogInfo holds parsed information from catalog.sql.
@@ -30,6 +32,11 @@ type CatalogInfo struct {
 
 	// Alias is the catalog alias (e.g. "lake").
 	Alias string
+
+	// UnsetEnv names the variables catalog.sql references that were not set
+	// when ConnStr was expanded. A sandbox run attaches ConnStr directly, so
+	// its failure is annotated with these (see configenv.Annotate).
+	UnsetEnv []string
 }
 
 // Config holds the runtime configuration.
@@ -132,31 +139,10 @@ var dataPathRe = regexp.MustCompile(`(?i)DATA_PATH\s+'([^']+)'`)
 
 // parseCatalogSQL reads catalog.sql and extracts catalog connection info.
 // Falls back to defaults if the file is missing or unparseable.
-// stripLineComment removes everything from the first `--` outside a
-// single-quoted string literal to end-of-line. Preserves `--` that
-// appear inside SQL string literals (e.g. a connection string with a
-// password containing `--`) so the ATTACH statement survives.
-// Standalone helper rather than inlined so the test for `pa--ss`
-// safety can drive a focused unit test.
+// stripLineComment is configenv.StripLineComment, kept under this name for
+// the pa--ss unit test that drives it.
 func stripLineComment(line string) string {
-	inString := false
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-		if ch == '\'' {
-			// SQL doubles quotes to escape: '' inside a literal stays
-			// inside. Toggle on the boundary single quote.
-			if i+1 < len(line) && line[i+1] == '\'' {
-				i++ // skip both quotes (escaped quote)
-				continue
-			}
-			inString = !inString
-			continue
-		}
-		if !inString && ch == '-' && i+1 < len(line) && line[i+1] == '-' {
-			return line[:i]
-		}
-	}
-	return line
+	return configenv.StripLineComment(line)
 }
 
 func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
@@ -202,7 +188,8 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 	// Collapse multi-line ATTACH statements into single lines so the regex
 	// can match ATTACH ... AS ... that spans multiple lines in catalog.sql.
 	collapsed := strings.ReplaceAll(stripped.String(), "\n", " ")
-	lines := strings.Split(os.ExpandEnv(collapsed), ";")
+	expanded, unset := configenv.Expand(collapsed)
+	lines := strings.Split(expanded, ";")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -233,10 +220,11 @@ func parseCatalogSQL(configPath, projectDir string) CatalogInfo {
 		connStr := "ducklake:" + catType + ":" + catPath
 
 		info := CatalogInfo{
-			Type:    catType,
-			ConnStr: connStr,
-			Path:    catPath,
-			Alias:   alias,
+			Type:     catType,
+			ConnStr:  connStr,
+			Path:     catPath,
+			Alias:    alias,
+			UnsetEnv: unset,
 		}
 
 		// Extract DATA_PATH if present

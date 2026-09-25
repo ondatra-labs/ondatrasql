@@ -16,10 +16,11 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
+	"github.com/ondatra-labs/ondatrasql/internal/redact"
 )
 
 // version is set at build time via -ldflags "-X main.version=x.y.z"
-var version = "0.43.0"
+var version = "0.43.1"
 
 // exitCoder is implemented by errors that map to a specific process exit
 // code. Used by main() to honour the validate-style 0/1/2 contract.
@@ -29,7 +30,11 @@ type exitCoder interface {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		msg := err.Error()
+		// Redacted as the last step before stderr: whatever reached here, a
+		// connection string echoed by a DuckDB extension included, loses its
+		// credentials. Most errors are already clean from the session layer;
+		// this catches the ones that did not pass through it.
+		msg := redact.String(err.Error())
 		// Strip internal wrapper prefixes for cleaner stderr output
 		for _, prefix := range []string{"materialize: ", "create temp table: "} {
 			msg = strings.TrimPrefix(msg, prefix)

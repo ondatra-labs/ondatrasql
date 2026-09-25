@@ -6,7 +6,9 @@
 package git
 
 import (
+	neturl "net/url"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -72,5 +74,26 @@ func normalizeGitURL(url string) string {
 		url = strings.Replace(url, "git@", "https://", 1)
 	}
 
+	// Drop credentials. CI checkouts often authenticate in the remote URL
+	// itself (https://x-access-token:ghp_…@github.com/…, or a bare token as
+	// the user), and this URL is written into every DuckLake commit's
+	// metadata. The user of an ssh:// remote (git@) is not a secret and
+	// stays, so git_repo_url keeps matching older commits.
+	u, err := neturl.Parse(url)
+	if err != nil {
+		// Unparsable (a bad % escape in the token, say): cut the userinfo
+		// by hand rather than keep a credential we could not inspect.
+		return httpUserinfoRe.ReplaceAllString(url, "${1}")
+	}
+	if u.User != nil {
+		_, hasPassword := u.User.Password()
+		if hasPassword || u.Scheme == "http" || u.Scheme == "https" {
+			u.User = nil
+			url = u.String()
+		}
+	}
+
 	return url
 }
+
+var httpUserinfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.\-]*://)[^/]*@`)

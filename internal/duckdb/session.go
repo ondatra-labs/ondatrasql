@@ -23,6 +23,8 @@ import (
 	"time"
 
 	duckdbdriver "github.com/duckdb/duckdb-go/v2" // DuckDB driver (aliased; internal package is also named duckdb)
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
+	"github.com/ondatra-labs/ondatrasql/internal/redact"
 	_ "github.com/lib/pq"                          // postgres driver for sandbox-fork side connection
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
@@ -365,6 +367,11 @@ func stmtTypeName(t duckdbdriver.StmtType) string {
 
 // ExecContext executes SQL with context support.
 func (s *Session) ExecContext(ctx context.Context, sqlStr string) error {
+	return redactErr(s.execContext(ctx, sqlStr))
+}
+
+// execContext is ExecContext without the redaction.
+func (s *Session) execContext(ctx context.Context, sqlStr string) error {
 	sqlStr = strings.TrimSpace(sqlStr)
 	if sqlStr == "" || isOnlyComments(sqlStr) {
 		return nil
@@ -387,6 +394,12 @@ func (s *Session) Exec(sqlStr string) error {
 
 // QueryContext executes SQL and returns CSV-formatted output for compatibility.
 func (s *Session) QueryContext(ctx context.Context, sqlStr string) (string, error) {
+	v, err := s.queryContext(ctx, sqlStr)
+	return v, redactErr(err)
+}
+
+// queryContext is QueryContext without the redaction.
+func (s *Session) queryContext(ctx context.Context, sqlStr string) (string, error) {
 	sqlStr = strings.TrimSpace(sqlStr)
 	if sqlStr == "" || isOnlyComments(sqlStr) {
 		return "", nil
@@ -415,6 +428,12 @@ func (s *Session) Query(sqlStr string) (string, error) {
 
 // QueryValueContext returns the first value of the first row.
 func (s *Session) QueryValueContext(ctx context.Context, sqlStr string) (string, error) {
+	v, err := s.queryValueContext(ctx, sqlStr)
+	return v, redactErr(err)
+}
+
+// queryValueContext is QueryValueContext without the redaction.
+func (s *Session) queryValueContext(ctx context.Context, sqlStr string) (string, error) {
 	sqlStr = strings.TrimSpace(sqlStr)
 	if sqlStr == "" || isOnlyComments(sqlStr) {
 		return "", nil
@@ -445,6 +464,12 @@ func (s *Session) QueryValue(sqlStr string) (string, error) {
 
 // QueryRowsContext returns first column of each row.
 func (s *Session) QueryRowsContext(ctx context.Context, sqlStr string) ([]string, error) {
+	v, err := s.queryRowsContext(ctx, sqlStr)
+	return v, redactErr(err)
+}
+
+// queryRowsContext is QueryRowsContext without the redaction.
+func (s *Session) queryRowsContext(ctx context.Context, sqlStr string) ([]string, error) {
 	sqlStr = strings.TrimSpace(sqlStr)
 	if sqlStr == "" || isOnlyComments(sqlStr) {
 		return nil, nil
@@ -481,6 +506,12 @@ func (s *Session) QueryRows(sqlStr string) ([]string, error) {
 
 // QueryRowsMapContext returns rows as maps.
 func (s *Session) QueryRowsMapContext(ctx context.Context, sqlStr string) ([]map[string]string, error) {
+	v, err := s.queryRowsMapContext(ctx, sqlStr)
+	return v, redactErr(err)
+}
+
+// queryRowsMapContext is QueryRowsMapContext without the redaction.
+func (s *Session) queryRowsMapContext(ctx context.Context, sqlStr string) ([]map[string]string, error) {
 	sqlStr = strings.TrimSpace(sqlStr)
 	if sqlStr == "" || isOnlyComments(sqlStr) {
 		return nil, nil
@@ -539,6 +570,12 @@ func (s *Session) QueryRowsAny(sqlStr string) ([]map[string]any, error) {
 
 // QueryRowsAnyContext returns rows as maps with native Go types preserved.
 func (s *Session) QueryRowsAnyContext(ctx context.Context, sqlStr string) ([]map[string]any, error) {
+	v, err := s.queryRowsAnyContext(ctx, sqlStr)
+	return v, redactErr(err)
+}
+
+// queryRowsAnyContext is QueryRowsAnyContext without the redaction.
+func (s *Session) queryRowsAnyContext(ctx context.Context, sqlStr string) ([]map[string]any, error) {
 	sqlStr = strings.TrimSpace(sqlStr)
 	if sqlStr == "" || isOnlyComments(sqlStr) {
 		return nil, nil
@@ -587,6 +624,11 @@ func (s *Session) QueryRowsAnyContext(ctx context.Context, sqlStr string) ([]map
 // QueryPrint executes SQL and prints results in the specified format.
 // Supported formats: "markdown", "box", "table", "json", "csv"
 func (s *Session) QueryPrint(sqlQuery, format string) error {
+	return redactErr(s.queryPrint(sqlQuery, format))
+}
+
+// queryPrint is QueryPrint without the redaction.
+func (s *Session) queryPrint(sqlQuery, format string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -825,9 +867,9 @@ func (s *Session) InitWithCatalog(configPath string) error {
 		if err != nil || len(content) == 0 {
 			return nil // File missing or empty is OK
 		}
-		sql := os.ExpandEnv(string(content))
+		sql, unset := configenv.Expand(string(content))
 		if err := s.Exec(sql); err != nil {
-			return fmt.Errorf("load %s: %w", name, err)
+			return configenv.Annotate(fmt.Errorf("load %s: %w", name, err), unset)
 		}
 		return nil
 	}
@@ -874,8 +916,9 @@ func (s *Session) InitWithCatalog(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("catalog.sql required: %w", err)
 	}
-	if err := s.Exec(os.ExpandEnv(string(catalogContent))); err != nil {
-		return fmt.Errorf("load catalog.sql: %w", err)
+	catalogSQL, unset := configenv.Expand(string(catalogContent))
+	if err := s.Exec(catalogSQL); err != nil {
+		return configenv.Annotate(fmt.Errorf("load catalog.sql: %w", err), unset)
 	}
 
 	// Validate the catalog backend. OndatraSQL supports DuckLake catalogs over
@@ -1027,12 +1070,12 @@ func (s *Session) loadMacroFile(path, catalogAlias string) error {
 		return nil // Empty file is OK
 	}
 
-	sql := os.ExpandEnv(string(content))
+	sql, unset := configenv.Expand(string(content))
 	sql = strings.ReplaceAll(sql, "{{catalog}}", catalogAlias)
 	sql = macroPrefix.ReplaceAllString(sql, "${1}memory.")
 
 	if err := s.Exec(sql); err != nil {
-		return fmt.Errorf("load %s: %w", filepath.Base(path), err)
+		return configenv.Annotate(fmt.Errorf("load %s: %w", filepath.Base(path), err), unset)
 	}
 	return nil
 }
@@ -1064,7 +1107,7 @@ func (s *Session) loadConfigSQL(configPath, primary, fallback, catalogAlias stri
 		return nil
 	}
 
-	sql := os.ExpandEnv(string(content))
+	sql, unset := configenv.Expand(string(content))
 	sql = strings.ReplaceAll(sql, "{{catalog}}", catalogAlias)
 
 	loadedFile := primary
@@ -1072,7 +1115,7 @@ func (s *Session) loadConfigSQL(configPath, primary, fallback, catalogAlias stri
 		loadedFile = fallback
 	}
 	if err := s.Exec(sql); err != nil {
-		return fmt.Errorf("load %s: %w", loadedFile, err)
+		return configenv.Annotate(fmt.Errorf("load %s: %w", loadedFile, err), unset)
 	}
 	return nil
 }
@@ -1161,7 +1204,7 @@ func (s *Session) validateCatalogBackend() error {
 					"  ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.files/');\n"+
 					"  ATTACH 'ducklake:postgres:host=localhost dbname=lake' AS lake (DATA_PATH '/path/to/data/');\n"+
 					"raw sqlite, duckdb, or other database attaches are not supported because the runner needs DuckLake's snapshots, time travel, and commit metadata",
-				db.name, db.typ, db.path)
+				db.name, db.typ, redact.String(db.path))
 		}
 	}
 
@@ -1179,11 +1222,11 @@ func (s *Session) validateCatalogBackend() error {
 				"catalog %q is a DuckLake-on-mysql catalog (path %q), but OndatraSQL only supports sqlite, duckdb, and postgres backends — "+
 					"the sandbox feature uses backend-native fork primitives (cp for sqlite/duckdb, CREATE DATABASE TEMPLATE for postgres) and there is no equivalent for mysql; "+
 					"migrate your catalog to postgres, sqlite, or duckdb, or open an issue if mysql support is critical for your use case",
-				db.name, db.path)
+				db.name, redact.String(db.path))
 		default:
 			return fmt.Errorf(
 				"catalog %q has an unrecognised DuckLake backend (path %q) — OndatraSQL supports sqlite and postgres only",
-				db.name, db.path)
+				db.name, redact.String(db.path))
 		}
 	}
 
@@ -1357,7 +1400,8 @@ func (s *Session) forkPostgresCatalog(prodConnStr string) (string, error) {
 	}
 	prodDB := params["dbname"]
 	if prodDB == "" {
-		return "", fmt.Errorf("fork prod catalog: postgres conn string is missing dbname (got %q)", rawConn)
+		// Not echoing rawConn: it carries the password.
+		return "", fmt.Errorf("fork prod catalog: postgres conn string is missing dbname")
 	}
 
 	// Generate a unique sandbox database name. Process id + random keeps
@@ -1478,11 +1522,13 @@ func SandboxPgActiveConnections(prodConnStr string) int {
 func parsePostgresConnString(s string) (map[string]string, error) {
 	result := make(map[string]string)
 	s = strings.TrimSpace(s)
+	orig := s
 	for len(s) > 0 {
 		// Find key
 		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			return nil, fmt.Errorf("invalid postgres conn token at %q", s)
+			// Only the offset: the rest of the string can hold the password.
+			return nil, fmt.Errorf("invalid postgres conn string: expected key=value at byte %d", len(orig)-len(s))
 		}
 		key := strings.TrimSpace(s[:eq])
 		s = s[eq+1:]
@@ -1693,8 +1739,9 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 		if err != nil || len(content) == 0 {
 			return nil
 		}
-		if err := s.Exec(os.ExpandEnv(string(content))); err != nil {
-			return fmt.Errorf("load %s: %w", name, err)
+		sql, unset := configenv.Expand(string(content))
+		if err := s.Exec(sql); err != nil {
+			return configenv.Annotate(fmt.Errorf("load %s: %w", name, err), unset)
 		}
 		return nil
 	}
@@ -1761,7 +1808,9 @@ func (s *Session) InitSandbox(configPath, prodConnStr, prodDataPath, sandboxCata
 			return err
 		}
 	default:
-		return fmt.Errorf("sandbox v2 supports sqlite, duckdb, and postgres catalog backends (got %q)", prodConnStr)
+		// Only the backend prefix: the rest of the string can hold a password.
+		backend, _, _ := strings.Cut(strings.TrimPrefix(prodConnStr, "ducklake:"), ":")
+		return fmt.Errorf("sandbox v2 supports sqlite, duckdb, and postgres catalog backends (got %q)", backend)
 	}
 
 	prodAttach := fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY", EscapeSQL(prodConnStr), QuoteIdentifier(prodAlias))
@@ -2058,4 +2107,25 @@ func printCSV(cols []string, data [][]string) error {
 		fmt.Println(strings.Join(escaped, ","))
 	}
 	return nil
+}
+
+// redactErr masks credentials in an error from DuckDB before it leaves the
+// session. DuckDB's extensions echo whole connection strings in their errors
+// (a failed DuckLake ATTACH over Postgres prints the password twice), and
+// everything downstream — stderr, --json, commit metadata — prints what it
+// gets. Every query method returns through here, so there is one place where
+// that text is cleaned instead of one per caller.
+//
+// A driver *Error is replaced by a redacted copy rather than wrapped, so a
+// caller that reaches its Msg through errors.As does not find the original.
+func redactErr(err error) error {
+	var de *duckdbdriver.Error
+	if errors.As(err, &de) && de == err {
+		clean := redact.String(de.Msg)
+		if clean == de.Msg {
+			return err
+		}
+		return &duckdbdriver.Error{Type: de.Type, Msg: clean}
+	}
+	return redact.Error(err)
 }

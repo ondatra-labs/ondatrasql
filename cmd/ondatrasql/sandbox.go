@@ -12,6 +12,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/redact"
 	sql "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
@@ -151,7 +152,7 @@ func printSandboxResult(result *execute.Result, target string, err error) {
 		// Model failed before producing a result
 		if err != nil {
 			printPaddedLine(fmt.Sprintf("[FAIL] %s", target))
-			errMsg := err.Error()
+			errMsg := redact.String(err.Error())
 			if len(errMsg) > 50 {
 				errMsg = errMsg[:47] + "..."
 			}
@@ -177,10 +178,10 @@ func printSandboxResult(result *execute.Result, target string, err error) {
 		result.RowsAffected, result.Duration.Round(1e6)))
 
 	if len(result.Errors) > 0 {
-		printPaddedLine(fmt.Sprintf("       %s", truncate(result.Errors[0], 50)))
+		printPaddedLine(fmt.Sprintf("       %s", truncate(redact.String(result.Errors[0]), 50)))
 	}
 	for _, w := range result.Warnings {
-		printPaddedLine(fmt.Sprintf("  WARN: %s", truncate(w, 50)))
+		printPaddedLine(fmt.Sprintf("  WARN: %s", truncate(redact.String(w), 50)))
 	}
 }
 
@@ -313,7 +314,9 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 
 		for target, errMsg := range failedTargets {
 			printPaddedLine(target)
-			// Truncate long error messages
+			// Redact before truncating: a cut can split a credential in
+			// two and leave the pattern unmatched.
+			errMsg = redact.String(errMsg)
 			if len(errMsg) > 55 {
 				errMsg = errMsg[:52] + "..."
 			}

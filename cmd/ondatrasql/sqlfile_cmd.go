@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 )
@@ -78,7 +79,7 @@ func runSQLFile(cfg *config.Config, sqlFile string, sandboxMode bool) error {
 		}
 		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
-			return fmt.Errorf("init sandbox session: %w", err)
+			return configenv.Annotate(fmt.Errorf("init sandbox session: %w", err), cfg.Catalog.UnsetEnv)
 		}
 	} else {
 		if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {

@@ -14,6 +14,8 @@ Load secrets and config from `.env` in the project root. System environment vari
 | Starlark scripts | `env.get("VAR")` |
 | Starlark write | `env.set("VAR", "value")` |
 
+A variable used in a SQL config file but not set anywhere expands to an empty string. If the statement then fails, the error starts with `not set in the environment: NAME, …;`, so a missing variable is named rather than hidden behind the failure it caused. A variable set to an empty value counts as set.
+
 ## .env Syntax
 
 ```bash
@@ -49,6 +51,14 @@ Provider name maps to an env prefix: `google-sheets` becomes `GOOGLE_SHEETS_*`. 
 | `<PREFIX>_AUTH_URL` | Authorization endpoint |
 | `<PREFIX>_TOKEN_URL` | Token endpoint |
 | `<PREFIX>_SCOPE` | OAuth2 scopes (required) |
+
+## PostgreSQL
+
+Read by libpq, the client the DuckDB postgres extension uses, so a Postgres catalog or state database can connect without a password in its `ATTACH` string.
+
+| Variable | Description |
+|---|---|
+| `PGPASSWORD` | Password for connections that do not set `password=` themselves. Keeps the credential out of the SQL statement, and so out of any error that echoes it. |
 
 ## Cloud Storage
 

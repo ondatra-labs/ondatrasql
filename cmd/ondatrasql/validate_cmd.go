@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
@@ -1319,8 +1320,9 @@ func loadProjectExtensions(sess *duckdb.Session, configPath string) error {
 	if len(content) == 0 {
 		return nil
 	}
-	if err := sess.Exec(os.ExpandEnv(string(content))); err != nil {
-		return fmt.Errorf("execute %s: %w", path, err)
+	sql, unset := configenv.Expand(string(content))
+	if err := sess.Exec(sql); err != nil {
+		return configenv.Annotate(fmt.Errorf("execute %s: %w", path, err), unset)
 	}
 	return nil
 }

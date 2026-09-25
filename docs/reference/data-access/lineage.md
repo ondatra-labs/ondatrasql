@@ -77,7 +77,7 @@ Every run stores metadata in `commit_extra_info` on the DuckLake snapshot. All f
 | `duckdb_version` | DuckDB version used |
 | `git_commit` | Commit SHA |
 | `git_branch` | Branch name |
-| `git_repo_url` | Repository URL |
+| `git_repo_url` | Repository URL, as `origin` reports it with `git@host:` rewritten to `https://`. Credentials are removed: an http(s) URL loses its user part, any URL loses a password. Commits written before v0.43.1 may still hold a token here |
 | `error` | Error message (on failure) |
 
 ## Querying Metadata

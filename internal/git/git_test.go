@@ -57,6 +57,28 @@ func TestNormalizeGitURL(t *testing.T) {
 			input: "",
 			want:  "",
 		},
+		{
+			// A CI checkout authenticating in the remote URL: the token
+			// must not reach commit metadata.
+			name:  "HTTPS with token userinfo",
+			input: "https://x-access-token:ghp_S3ntinel@github.com/org/repo.git",
+			want:  "https://github.com/org/repo",
+		},
+		{
+			name:  "ssh user is not a secret and stays",
+			input: "ssh://git@github.com/org/repo.git",
+			want:  "ssh://git@github.com/org/repo",
+		},
+		{
+			name:  "unparsable token is still cut",
+			input: "https://x-access-token:gh%zz@github.com/org/repo",
+			want:  "https://github.com/org/repo",
+		},
+		{
+			name:  "HTTPS with user only",
+			input: "https://marcus@github.com/org/repo",
+			want:  "https://github.com/org/repo",
+		},
 	}
 
 	for _, tt := range tests {

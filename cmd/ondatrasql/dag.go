@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
 	"github.com/ondatra-labs/ondatrasql/internal/git"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
+	"github.com/ondatra-labs/ondatrasql/internal/redact"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
@@ -99,7 +101,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 		}
 		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
-			return fmt.Errorf("init sandbox session: %w", err)
+			return configenv.Annotate(fmt.Errorf("init sandbox session: %w", err), cfg.Catalog.UnsetEnv)
 		}
 	} else {
 		if err := sess.InitWithCatalog(cfg.ConfigPath); err != nil {
@@ -167,7 +169,7 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 			} else if result != nil {
 				printResult(result)
 			} else if err != nil {
-				output.Fprintf("[FAILED] %s\n  ERROR: %s\n", model.Target, cleanErrorMessage(err.Error()))
+				output.Fprintf("[FAILED] %s\n  ERROR: %s\n", model.Target, redact.String(cleanErrorMessage(err.Error())))
 			}
 			// If runner.Run failed before producing a Result (e.g.
 			// state-store open failure, blueprint resolution),
@@ -229,10 +231,10 @@ func runAll(ctx context.Context, cfg *config.Config, sandboxMode bool) error {
 				"schema_version": 1,
 				"kind":           "dag_warning",
 				"source":         "_gc",
-				"message":        gcErr.Error(),
+				"message":        redact.String(gcErr.Error()),
 			})
 		} else {
-			output.Fprintf("warning: %v (pipeline ran anyway; rerun GC at next pipeline start)\n", gcErr)
+			output.Fprintf("warning: %s (pipeline ran anyway; rerun GC at next pipeline start)\n", redact.String(gcErr.Error()))
 		}
 	}
 

@@ -81,6 +81,14 @@ bugcheck-static:
 	@# returned zero column lineage while the test passed.
 	@! grep -rn '"class":"OPERATOR_' --include=*.go . \
 		|| (echo "bugcheck-static: AST fixture sets class to a type value (see ast-fixture-class-is-type)"; exit 1)
+	@# config-sql-expandenv: config SQL expanded with os.ExpandEnv. An unset
+	@# variable silently becomes "", and in a connection string that turns
+	@# `host=${PG_HOST} port=5432` into a failure about resolving "port=5432"
+	@# while the real cause, PG_HOST unset, never shows. configenv.Expand does
+	@# the same expansion and reports the unset names for configenv.Annotate.
+	@! grep -rnE 'os\.ExpandEnv\(|os\.Expand\(.*os\.Getenv' --include=*.go internal cmd \
+		| grep -v '_test\.go:' | grep -v '^internal/configenv/' | grep -v '^\S*:[0-9]*:\s*//' \
+		|| (echo "bugcheck-static: config SQL expanded with os.ExpandEnv, use configenv.Expand (see config-sql-expandenv)"; exit 1)
 	@echo "bugcheck-static: clean"
 
 build:

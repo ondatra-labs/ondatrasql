@@ -5,6 +5,7 @@
 package script
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -113,5 +114,21 @@ func TestRedactURLPreservesNonSensitive(t *testing.T) {
 	got := RedactURL(in)
 	if got != in {
 		t.Errorf("RedactURL(%q) = %q, want unchanged", in, got)
+	}
+}
+
+// The HTTP-shaped rule matches the key names anywhere in a word, so joined
+// keys in API bodies and query strings are masked too. Pinned because a
+// stricter, word-anchored rule once dropped them.
+func TestRedactSecrets_JoinedKeys(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{
+		`Get "https://x/api?authtoken=S3ntinel"`,
+		`apitoken=S3ntinel`, `sessiontoken=S3ntinel`, `apisecret=S3ntinel`,
+		`dbpassword=S3ntinel`, `AUTHTOKEN=S3ntinel`, `clientSecret=S3ntinel`,
+	} {
+		if got := RedactSecrets(in); strings.Contains(got, "S3ntinel") {
+			t.Errorf("RedactSecrets(%q) = %q, secret survived", in, got)
+		}
 	}
 }

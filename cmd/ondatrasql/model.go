@@ -18,6 +18,7 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
@@ -26,6 +27,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/redact"
 )
 
 // loadModelsFromDir loads all SQL models from the configured models directory.
@@ -198,7 +200,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 		}
 		sandboxCatalog := filepath.Join(sandboxDir, "sandbox.sqlite")
 		if err := sess.InitSandbox(cfg.ConfigPath, cfg.Catalog.ConnStr, cfg.Catalog.DataPath, sandboxCatalog, cfg.Catalog.Alias); err != nil {
-			return fmt.Errorf("init sandbox session: %w", err)
+			return configenv.Annotate(fmt.Errorf("init sandbox session: %w", err), cfg.Catalog.UnsetEnv)
 		}
 		// Show sandbox banner after session init (so we can query dependencies)
 		printSandboxBanner(cfg, sess, model)
@@ -247,7 +249,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 		switch {
 		case err != nil:
 			printPaddedLine(fmt.Sprintf("[FAILED] %s", model.Target))
-			for _, line := range wrapErrorMessage(cleanErrorMessage(err.Error()), 60) {
+			for _, line := range wrapErrorMessage(redact.String(cleanErrorMessage(err.Error())), 60) {
 				printPaddedLine("  " + line)
 			}
 		case result != nil:
@@ -259,7 +261,7 @@ func runModel(ctx context.Context, cfg *config.Config, target string, sandboxMod
 				result.Target, result.Kind, result.RunType,
 				result.RowsAffected, result.Duration.Round(1e6), reason))
 			for _, w := range result.Warnings {
-				printPaddedLine(fmt.Sprintf("  WARN: %s", truncateStr(w, 54)))
+				printPaddedLine(fmt.Sprintf("  WARN: %s", truncateStr(redact.String(w), 54)))
 			}
 			showValidationStatus(model, result)
 		}
@@ -307,10 +309,10 @@ func printResult(result *execute.Result) {
 		result.RowsAffected, result.Duration.Round(1e6), reason)
 
 	for _, err := range result.Errors {
-		output.Fprintf("  ERROR: %s\n", cleanErrorMessage(err))
+		output.Fprintf("  ERROR: %s\n", redact.String(cleanErrorMessage(err)))
 	}
 	for _, warn := range result.Warnings {
-		output.Fprintf("  WARN: %s\n", warn)
+		output.Fprintf("  WARN: %s\n", redact.String(warn))
 	}
 }
 
@@ -371,11 +373,11 @@ func emitModelResultJSON(result *execute.Result, dagRunID string, sandbox bool) 
 	// the documented "always emitted" envelope shape).
 	cleanErrors := []string{}
 	for _, e := range result.Errors {
-		cleanErrors = append(cleanErrors, cleanErrorMessage(e))
+		cleanErrors = append(cleanErrors, redact.String(cleanErrorMessage(e)))
 	}
-	warnings := result.Warnings
-	if warnings == nil {
-		warnings = []string{}
+	warnings := []string{}
+	for _, w := range result.Warnings {
+		warnings = append(warnings, redact.String(w))
 	}
 
 	output.EmitJSON(output.ModelResult{
@@ -446,7 +448,7 @@ func showSandboxImpact(cfg *config.Config, target string) {
 	if len(analysis.SkippedDownstreams) > 0 {
 		printPaddedLine(fmt.Sprintf("%d downstream lookup(s) failed:", len(analysis.SkippedDownstreams)))
 		for tgt, e := range analysis.SkippedDownstreams {
-			printPaddedLine(fmt.Sprintf("  ! %s: %s", tgt, truncateStr(e.Error(), 48)))
+			printPaddedLine(fmt.Sprintf("  ! %s: %s", tgt, truncateStr(redact.String(e.Error()), 48)))
 		}
 		printEmptyLine()
 	}

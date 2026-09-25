@@ -200,7 +200,7 @@ func (q quoteState) quoted() bool { return q.inString || q.inIdent }
 // NOT excluded, despite sounding like pure plumbing:
 //
 //   - Credentials do not live in these files. cmd/ondatrasql loads .env into
-//     the process environment and loadConfigSQL runs os.ExpandEnv over every
+//     the process environment and loadConfigSQL runs configenv.Expand over every
 //     config file, so secret *values* are ${VAR} references. Rotating a
 //     credential edits .env, which is not hashed either way.
 //   - What these files do hold is topology — a secret's ENDPOINT, REGION,

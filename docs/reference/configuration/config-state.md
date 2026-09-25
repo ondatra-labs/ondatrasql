@@ -70,9 +70,11 @@ The Go runtime is backend-agnostic — it only depends on `state` being an attac
 ```sql
 INSTALL postgres;
 LOAD postgres;
-ATTACH 'dbname=ondatra_state host=db.internal port=5432 user=ondatra password=${PG_STATE_PASSWORD}'
+ATTACH 'dbname=ondatra_state host=db.internal port=5432 user=ondatra'
     AS state (TYPE postgres);
 ```
+
+The password comes from `PGPASSWORD` in the environment, which libpq reads, rather than from the connection string — see [Catalog](/reference/configuration/config-catalog/#postgresql) for why.
 
 Removes the filesystem lock, so several `ondatrasql` processes can hold state open at once. Useful when running in ephemeral containers, where a local `state.duckdb` would be wiped between runs.
 

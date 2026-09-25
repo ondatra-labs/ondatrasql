@@ -35,11 +35,15 @@ ATTACH 'ducklake:duckdb:ducklake_catalog.duckdb' AS lake
 ### PostgreSQL
 
 ```sql
-ATTACH 'ducklake:postgres:dbname=ducklake_catalog host=db.prod.internal user=ondatra password=${PG_PASSWORD}' AS lake
+ATTACH 'ducklake:postgres:dbname=ducklake_catalog host=${PG_HOST} port=5432 user=ondatra' AS lake
     (DATA_PATH 's3://my-bucket/data/');
 ```
 
-Requires `postgres` in `extensions.sql`. Environment variables (`${PG_PASSWORD}`) are expanded before parsing.
+Requires `postgres` in `extensions.sql`. Environment variables (`${PG_HOST}`) are expanded before parsing.
+
+Leave the password out of the connection string and export `PGPASSWORD` instead. The postgres extension connects through libpq, which reads it from the environment. A password written into the string — `password=${PG_PASSWORD}` works too — becomes part of the SQL, and a failed ATTACH echoes that SQL in its error. OndatraSQL masks credentials in the errors DuckDB returns to it, and in the errors and warnings a run prints (`password=[REDACTED]`), but that is a pattern match on text — a password that is never in the statement cannot leak from it at all.
+
+If a variable the file uses is not set, it expands to an empty string, and the error that follows names it: `host=${PG_HOST}` with `PG_HOST` unset becomes `host= port=5432`, libpq reports that it cannot resolve `port=5432`, and the message starts with `not set in the environment: PG_HOST;`.
 
 ## Backend Comparison
 

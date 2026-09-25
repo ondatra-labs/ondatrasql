@@ -29,6 +29,8 @@ import (
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
+	"github.com/ondatra-labs/ondatrasql/internal/redact"
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
 
@@ -45,7 +47,7 @@ type State struct {
 // configPath. Fails hard if the file is missing — there is no implicit
 // fallback to .ondatra/state.duckdb.
 //
-// Environment variables in state.sql are expanded via os.ExpandEnv
+// Environment variables in state.sql are expanded as by os.ExpandEnv
 // before execution, so a default like
 //
 //	ATTACH 'state.duckdb' AS state (ENCRYPTION_KEY '${ONDATRA_STATE_KEY}');
@@ -61,7 +63,7 @@ func Open(configPath string) (*State, error) {
 	// Env vars in state.sql (e.g. ${ONDATRA_STATE_KEY}) are expanded
 	// first so the SQL DuckDB sees has concrete values, not literal
 	// `${...}` placeholders.
-	attachSQL := os.ExpandEnv(string(content))
+	attachSQL, unset := configenv.Expand(string(content))
 	initSQL, err := sqlfiles.Load("state/init.sql")
 	if err != nil {
 		return nil, fmt.Errorf("load state/init.sql: %w", err)
@@ -120,9 +122,13 @@ func Open(configPath string) (*State, error) {
 
 	// Force the first connection open now so ATTACH/init errors surface
 	// here rather than on the first query.
+	// Redacted because state.sql usually carries a connection string, and a
+	// failed Postgres ATTACH echoes it — password included.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, err
+		// Redact first, then annotate: redacting afterwards could swallow the
+		// note when the message ends in an empty or unterminated password.
+		return nil, configenv.Annotate(redact.Error(err), unset)
 	}
 
 	return &State{db: db}, nil
