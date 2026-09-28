@@ -563,19 +563,34 @@ var scd2TimeColumns = []syntheticColumn{
 }
 
 // isSCD2SyntheticColumn reports whether name is a column materializeSCD2 adds
-// rather than one the model SELECT produces.
+// rather than one the model SELECT produces. Names match case-insensitively,
+// as DuckDB resolves them.
 func isSCD2SyntheticColumn(name string) bool {
 	for _, c := range scd2SyntheticColumns {
-		if c.name == name {
+		if strings.EqualFold(c.name, name) {
 			return true
 		}
 	}
+	return isSCD2TimeColumn(name)
+}
+
+// isSCD2TimeColumn reports whether name is one of scd2TimeColumns.
+func isSCD2TimeColumn(name string) bool {
 	for _, c := range scd2TimeColumns {
-		if c.name == name {
+		if strings.EqualFold(c.name, name) {
 			return true
 		}
 	}
 	return false
+}
+
+// prevColumns returns the model output columns a previous commit recorded,
+// or none without one.
+func prevColumns(prev *backfill.CommitInfo) []backfill.Column {
+	if prev == nil {
+		return nil
+	}
+	return prev.Columns
 }
 
 // addMissingSyntheticColumnsSQL returns ALTER TABLE ADD COLUMN statements for
@@ -788,10 +803,8 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// of an existing target with run times from the next version on.
 	var cleanCols []string
 	for _, col := range sourceCols {
-		for _, c := range scd2TimeColumns {
-			if strings.EqualFold(col, c.name) {
-				return 0, fmt.Errorf("column %q is reserved in an scd2 model for the version timestamps; rename it, or leave it out with SELECT * EXCLUDE (valid_from_at, valid_to_at) when reading another scd2 table", col)
-			}
+		if isSCD2TimeColumn(col) {
+			return 0, fmt.Errorf("column %q is reserved in an scd2 model for the version timestamps; rename it, or leave it out with SELECT * EXCLUDE (valid_from_at, valid_to_at) when reading another scd2 table", col)
 		}
 		if !isSCD2SyntheticColumn(col) {
 			cleanCols = append(cleanCols, col)
@@ -806,6 +819,31 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// known that the rows stay; a history reset replaces them anyway.
 	var synthSQL, fillTimesSQL string
 	if tableExists {
+		// A target built before the time columns existed may hold a column of
+		// the model's own by one of their names, dropped from the SELECT since.
+		// The previous commit's columns are what the model produced; writing
+		// run times into that column would mix them into its values.
+		targetCols, err := r.getTargetColumns(model.Target)
+		if err != nil {
+			return 0, fmt.Errorf("get target columns for scd2 time columns: %w", err)
+		}
+		held := map[string]bool{}
+		for _, c := range targetCols {
+			if isSCD2TimeColumn(c) {
+				held[strings.ToLower(c)] = true
+			}
+		}
+		if len(held) > 0 {
+			prev, err := backfill.GetModelCommitInfo(r.sess, model.Target)
+			if err != nil {
+				return 0, fmt.Errorf("read previous commit for scd2 time columns: %w", err)
+			}
+			for _, c := range prevColumns(prev) {
+				if held[strings.ToLower(c.Name)] {
+					return 0, fmt.Errorf("target %s holds a column %q the model produced before it was reserved for the scd2 version timestamps; rename or drop that column", model.Target, c.Name)
+				}
+			}
+		}
 		snapSQL, err := r.addMissingSyntheticColumnsSQL(model.Target, scd2SyntheticColumns)
 		if err != nil {
 			return 0, err
