@@ -680,18 +680,11 @@ func (r *Runner) scd2HistoryResetReason(model *parser.Model, tmpTable string) (s
 	if err != nil {
 		return "", fmt.Errorf("capture result schema for scd2 history check: %w", err)
 	}
-	inResult := false
+	// materialize has already checked that the result has the key column.
 	for _, c := range srcCols {
-		if !strings.EqualFold(c.Name, model.UniqueKey) {
-			continue
-		}
-		inResult = true
-		if c.Type != keyType {
+		if strings.EqualFold(c.Name, model.UniqueKey) && c.Type != keyType {
 			return fmt.Sprintf("unique_key column %q changed type from %s to %s", model.UniqueKey, keyType, c.Type), nil
 		}
-	}
-	if !inResult {
-		return fmt.Sprintf("unique_key column %q is not in the result", model.UniqueKey), nil
 	}
 
 	prev, err := backfill.GetModelCommitInfo(r.sess, model.Target)

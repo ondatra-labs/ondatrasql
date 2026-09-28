@@ -123,7 +123,7 @@ A `backfill` of an existing `scd2` target keeps its history. The new result is c
 The comparison joins on `@unique_key` against the current versions, so it only holds while the stored versions carry the same identity as the new result. In these cases the target is rebuilt from scratch instead — every row becomes current with a new `valid_from_snapshot` — and the run warns `scd2 history reset: <reason>`:
 
 - the `@unique_key` column changed type (the type change empties the stored key)
-- `@unique_key` names a column the target does not have, or the result does not have
+- `@unique_key` names a column the target does not have
 - `@unique_key` names another column than the previous run's (recorded as `unique_key` in `commit_extra_info`)
 - the target was built under another kind
 - the current versions are not unique and non-null on the key
