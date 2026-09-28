@@ -11,6 +11,7 @@ run_type: backfill
 rows_affected: 1
 run_reason: unique_key type changed
 warning: schema evolution: unique_key column "id" type changed from INTEGER to VARCHAR, forcing backfill
+warning: scd2 history reset: unique_key column "id" changed type from INTEGER to VARCHAR
 id_type: VARCHAR
 val: v2
 --- run 3: incremental (no type mismatch) ---
