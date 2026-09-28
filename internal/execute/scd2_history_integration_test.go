@@ -278,3 +278,33 @@ SELECT id, name, price::VARCHAR AS price FROM raw.src
 		}
 	})
 }
+
+// TestSCD2_UpstreamKeyTypeChange_KeyCaseInsensitive pins that a key type
+// change forces a rebuild when @unique_key differs from the column only in
+// case. The escalation matched the key case-sensitively, so an upstream type
+// change ran as an incremental DROP + ADD that nulled every stored key, and
+// the NULL keys then hid every row from change detection.
+func TestSCD2_UpstreamKeyTypeChange_KeyCaseInsensitive(t *testing.T) {
+	p := testutil.NewProject(t)
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)
+`)
+	p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: ID
+SELECT * FROM raw.src
+`)
+	runModel(t, p, "raw/src.sql")
+	runModel(t, p, "dim/item.sql")
+
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT id::VARCHAR AS id, name FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)
+`)
+	runModel(t, p, "raw/src.sql")
+	r := runModel(t, p, "dim/item.sql")
+	if r.RunReason != "unique_key type changed" {
+		t.Errorf("run_reason=%q, want \"unique_key type changed\"", r.RunReason)
+	}
+	if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE id IS NULL"); got != "0" {
+		t.Errorf("rows with a NULL key=%s, want 0", got)
+	}
+}
