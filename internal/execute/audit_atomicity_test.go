@@ -307,8 +307,8 @@ SELECT 1 AS id, 'a' AS name
 	}
 }
 
-// Incremental-path coverage: scd2 and partition kinds use their own
-// dedicated commit templates (scd2_update.sql, partition_delete.sql)
+// Incremental-path coverage: scd2 and partition kinds commit through
+// their own paths (materializeSCD2's transaction, partition_delete.sql)
 // that wrap their own BEGIN/COMMIT and were not initially threading
 // the auditSQL through the template's pre-commit-checks slot. Without
 // this regression test we silently dropped audits on the second run
@@ -365,8 +365,8 @@ SELECT 'EU' AS region, 1 AS id, 999 AS amount UNION ALL SELECT 'US', 2, 999
 
 			// Second run modifies the data and adds a guaranteed-failing
 			// audit. This goes through the incremental path —
-			// scd2_update.sql or partition_delete.sql — and exercises
-			// the audit slot we threaded through those templates.
+			// materializeSCD2 or partition_delete.sql — and exercises
+			// the audit slot threaded through them.
 			p.AddModel(modelPath, tc.secondRun)
 			_, err := runModelErr(t, p, modelPath)
 			if err == nil {

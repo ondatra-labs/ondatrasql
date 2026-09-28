@@ -327,6 +327,35 @@ func TestEmbeddedSQL_SandboxQueryTemplatesValid(t *testing.T) {
 		mustExec(t, db, "INSERT INTO lake.staging.scd2_diff VALUES (1, 'Alice', 1, 9223372036854775807, true)")
 	})
 
+	// A prod target built before valid_from_at/valid_to_at existed lacks
+	// them while the sandbox has them. EXCLUDE of a missing column fails, so
+	// the templates filter by name; the diff must still see no difference.
+	t.Run("scd2_prod_without_time_columns", func(t *testing.T) {
+		mustExec(t, db, "CREATE TABLE lake.staging.scd2_old (id INT, name VARCHAR, valid_from_snapshot BIGINT, valid_to_snapshot BIGINT, is_current BOOLEAN)")
+		mustExec(t, db, "INSERT INTO lake.staging.scd2_old VALUES (1, 'Alice', 1, NULL, true)")
+		mustExec(t, db, "CREATE TABLE sandbox.staging.scd2_old (id INT, name VARCHAR, valid_from_snapshot BIGINT, valid_to_snapshot BIGINT, is_current BOOLEAN, valid_from_at TIMESTAMPTZ, valid_to_at TIMESTAMPTZ)")
+		mustExec(t, db, "INSERT INTO sandbox.staging.scd2_old VALUES (1, 'Alice', 1, NULL, true, now(), NULL)")
+		for _, name := range []string{"queries/sandbox_diff_count_scd2.sql", "queries/sandbox_sample_scd2.sql"} {
+			tmpl, err := Load(name)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			for _, dir := range [][2]string{{"sandbox", "lake"}, {"lake", "sandbox"}} {
+				q := fmt.Sprintf(tmpl, dir[0], dir[1], "staging.scd2_old")
+				if name == "queries/sandbox_sample_scd2.sql" {
+					q = "SELECT COUNT(*) FROM (" + fmt.Sprintf(tmpl, dir[0], dir[1], "staging.scd2_old", "2") + ")"
+				}
+				var count int
+				if err := db.QueryRowContext(context.Background(), q).Scan(&count); err != nil {
+					t.Fatalf("%s %s→%s: %v", name, dir[0], dir[1], err)
+				}
+				if count != 0 {
+					t.Errorf("%s %s→%s = %d, want 0 (only the time columns differ)", name, dir[0], dir[1], count)
+				}
+			}
+		}
+	})
+
 	// Verify generic diff detects known differences.
 	t.Run("generic_diff_detects_changes", func(t *testing.T) {
 		tmpl, err := Load("queries/sandbox_diff_count.sql")

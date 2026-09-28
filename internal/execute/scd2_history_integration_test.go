@@ -7,6 +7,7 @@
 package execute_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -180,6 +181,9 @@ SELECT id, upper(name) AS name, price FROM raw.src
 			if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE is_current IS NOT true"); got != "0" {
 				t.Errorf("closed versions after reset=%s, want 0", got)
 			}
+			if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE valid_from_at IS NULL OR valid_to_at IS NOT NULL"); got != "0" {
+				t.Errorf("versions after reset without valid_from_at, or with valid_to_at=%s, want 0", got)
+			}
 		})
 	}
 }
@@ -306,5 +310,164 @@ SELECT id::VARCHAR AS id, name FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)
 	}
 	if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE id IS NULL"); got != "0" {
 		t.Errorf("rows with a NULL key=%s, want 0", got)
+	}
+}
+
+// scd2HistoryProject builds dim.item through three writes: the first run, a
+// data change (id 1 changes, id 3 is deleted) and a logic change. Each write
+// runs as its own ondatrasql process would: the test shares one session
+// across runs, which would otherwise keep curr_snapshot from the session's
+// start.
+func scd2HistoryProject(t *testing.T) *testutil.Project {
+	t.Helper()
+	p := testutil.NewProject(t)
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT * FROM (VALUES (1, 'a', 10), (2, 'b', 20), (3, 'c', 30)) t(id, name, price)
+`)
+	p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT id, name, price FROM raw.src
+`)
+	runModelAsProcess(t, p, "raw/src.sql")
+	runModelAsProcess(t, p, "dim/item.sql")
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT * FROM (VALUES (1, 'a', 11), (2, 'b', 20)) t(id, name, price)
+`)
+	runModelAsProcess(t, p, "raw/src.sql")
+	runModelAsProcess(t, p, "dim/item.sql")
+	p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT id, upper(name) AS name, price FROM raw.src
+`)
+	runModelAsProcess(t, p, "dim/item.sql")
+	return p
+}
+
+// TestSCD2_VersionTimestamps pins valid_from_at / valid_to_at: every version
+// is dated when it is written, a closed version ends when the next one
+// starts, and a current version has no end.
+func TestSCD2_VersionTimestamps(t *testing.T) {
+	p := scd2HistoryProject(t)
+
+	if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE valid_from_at IS NULL"); got != "0" {
+		t.Errorf("versions without valid_from_at=%s, want 0", got)
+	}
+	if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE (valid_to_at IS NULL) != is_current"); got != "0" {
+		t.Errorf("versions whose valid_to_at does not match is_current=%s, want 0", got)
+	}
+	// id 1 has three versions; each closed one ends when the next begins.
+	gaps := queryVal(t, p, `SELECT COUNT(*) FROM (
+		SELECT valid_to_at, lead(valid_from_at) OVER (ORDER BY valid_from_snapshot) AS next_from
+		FROM dim.item WHERE id = 1) WHERE valid_to_at IS DISTINCT FROM next_from AND next_from IS NOT NULL`)
+	if gaps != "0" {
+		t.Errorf("id 1 versions whose end is not the next start=%s, want 0", gaps)
+	}
+	if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE valid_to_at < valid_from_at"); got != "0" {
+		t.Errorf("versions ending before they start=%s, want 0", got)
+	}
+}
+
+// TestSCD2_VersionTimestamps_FilledOnUpgrade pins the upgrade of a target
+// built before valid_from_at / valid_to_at existed: its next run adds them and
+// dates each version with the snapshot time of the commit that wrote or closed
+// it. A version whose starting snapshot has expired stays NULL rather than
+// taking a later commit's time.
+func TestSCD2_VersionTimestamps_FilledOnUpgrade(t *testing.T) {
+	p := scd2HistoryProject(t)
+	for _, q := range []string{
+		"ALTER TABLE dim.item DROP COLUMN valid_from_at",
+		"ALTER TABLE dim.item DROP COLUMN valid_to_at",
+	} {
+		if err := p.Sess.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	// The first write's starting snapshot expires: those versions cannot be
+	// dated, while the later ones still can.
+	firstStart := queryVal(t, p, "SELECT min(valid_from_snapshot) FROM dim.item")
+	if err := p.Sess.Exec("CALL ducklake_expire_snapshots('" + p.Sess.CatalogAlias() + "', versions => [" + firstStart + "])"); err != nil {
+		t.Fatalf("expire snapshot %s: %v", firstStart, err)
+	}
+
+	runModelAsProcess(t, p, "dim/item.sql")
+
+	const firstCommitAfter = `(SELECT min_by(snapshot_time, snapshot_id) FROM snapshots()
+		WHERE lower(commit_extra_info->>'model') = 'dim.item' AND snapshot_id > %s)`
+	wrong := queryVal(t, p, `SELECT COUNT(*) FROM dim.item d WHERE valid_from_snapshot != `+firstStart+` AND
+		valid_from_at IS DISTINCT FROM `+fmt.Sprintf(firstCommitAfter, "d.valid_from_snapshot"))
+	if wrong != "0" {
+		t.Errorf("versions dated to another commit than the one that wrote them=%s, want 0", wrong)
+	}
+	if got := queryVal(t, p, "SELECT COUNT(*) FILTER (WHERE valid_from_at IS NULL) || '/' || COUNT(*) FROM dim.item WHERE valid_from_snapshot = "+firstStart); got != "3/3" {
+		t.Errorf("first-write versions without valid_from_at=%s, want 3/3 (their snapshot expired)", got)
+	}
+	closedWrong := queryVal(t, p, `SELECT COUNT(*) FROM dim.item d WHERE NOT is_current AND
+		valid_to_at IS DISTINCT FROM `+fmt.Sprintf(firstCommitAfter, "d.valid_to_snapshot + 1"))
+	if closedWrong != "0" {
+		t.Errorf("closed versions dated to another commit than the one that closed them=%s, want 0", closedWrong)
+	}
+}
+
+// runModelAsProcess runs a model after refreshing curr_snapshot, as a new
+// ondatrasql process would.
+func runModelAsProcess(t *testing.T, p *testutil.Project, rel string) {
+	t.Helper()
+	if err := p.Sess.RefreshSnapshot(); err != nil {
+		t.Fatalf("refresh snapshot: %v", err)
+	}
+	runModel(t, p, rel)
+}
+
+// TestSCD2_VersionTimestamps_GapLeavesNull pins the upgrade when the commit
+// that wrote a version has expired but the snapshot it started from has not,
+// as expiring by version list can leave. The first remaining commit of the
+// model is a later one, and dating the version by it would be wrong: the
+// version stays NULL instead.
+func TestSCD2_VersionTimestamps_GapLeavesNull(t *testing.T) {
+	p := scd2HistoryProject(t)
+	for _, q := range []string{
+		"ALTER TABLE dim.item DROP COLUMN valid_from_at",
+		"ALTER TABLE dim.item DROP COLUMN valid_to_at",
+	} {
+		if err := p.Sess.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	// The data change's versions (id 1 at price 11) start from start2; the
+	// commit that wrote them is the first dim.item commit after it.
+	start2 := queryVal(t, p, "SELECT valid_from_snapshot FROM dim.item WHERE id = 1 AND price = 11 AND name = 'a'")
+	write2 := queryVal(t, p, `SELECT min(snapshot_id) FROM snapshots()
+		WHERE lower(commit_extra_info->>'model') = 'dim.item' AND snapshot_id > `+start2)
+	if err := p.Sess.Exec("CALL ducklake_expire_snapshots('" + p.Sess.CatalogAlias() + "', versions => [" + write2 + "])"); err != nil {
+		t.Fatalf("expire snapshot %s: %v", write2, err)
+	}
+
+	runModelAsProcess(t, p, "dim/item.sql")
+
+	if got := queryVal(t, p, "SELECT COALESCE(CAST(valid_from_at AS VARCHAR), 'NULL') FROM dim.item WHERE id = 1 AND price = 11 AND name = 'a'"); got != "NULL" {
+		t.Errorf("version written by an expired commit got valid_from_at=%s, want NULL", got)
+	}
+	// The first write lies before the gap and is still dated. (The logic
+	// change's versions start from the expired snapshot itself, so they
+	// stay NULL too.)
+	if got := queryVal(t, p, "SELECT COUNT(*) FILTER (WHERE valid_from_at IS NULL) || '/' || COUNT(*) FROM dim.item WHERE valid_from_snapshot < "+start2); got != "0/3" {
+		t.Errorf("first-write versions without valid_from_at=%s, want 0/3", got)
+	}
+}
+
+// TestSCD2_ModelColumnNamedLikeTimestamp_Fails pins that an scd2 model whose
+// result has its own valid_from_at or valid_to_at fails instead of having it
+// dropped. Dropping it would leave the name to the version timestamps, and
+// an existing target that already holds the model's own column by that name
+// would have it overwritten with run times from the next version on.
+func TestSCD2_ModelColumnNamedLikeTimestamp_Fails(t *testing.T) {
+	p := testutil.NewProject(t)
+	p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT * FROM (VALUES (1, TIMESTAMPTZ '2026-01-01 00:00:00+00')) t(id, valid_from_at)
+`)
+	_, err := runModelErr(t, p, "dim/item.sql")
+	if err == nil || !strings.Contains(err.Error(), "reserved in an scd2 model") {
+		t.Fatalf("want a reserved-column error, got %v", err)
 	}
 }

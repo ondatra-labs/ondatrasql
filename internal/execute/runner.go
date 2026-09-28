@@ -2413,7 +2413,8 @@ func (r *Runner) detectSchemaEvolution(
 }
 
 // filterKindColumns removes kind-specific columns from a schema before comparison.
-// Tracked adds _content_hash, SCD2 adds valid_from_snapshot/valid_to_snapshot/is_current.
+// Tracked adds _content_hash, SCD2 adds valid_from_snapshot/valid_to_snapshot/is_current
+// and valid_from_at/valid_to_at.
 // These are added by materialization logic, not user SQL, so they won't appear in temp tables.
 func filterKindColumns(schema []backfill.Column, kind string) []backfill.Column {
 	var exclude map[string]bool
@@ -2421,7 +2422,7 @@ func filterKindColumns(schema []backfill.Column, kind string) []backfill.Column 
 	case "tracked":
 		exclude = map[string]bool{"_content_hash": true}
 	case "scd2":
-		exclude = map[string]bool{"valid_from_snapshot": true, "valid_to_snapshot": true, "is_current": true}
+		exclude = map[string]bool{"valid_from_snapshot": true, "valid_to_snapshot": true, "is_current": true, "valid_from_at": true, "valid_to_at": true}
 	default:
 		return schema
 	}
