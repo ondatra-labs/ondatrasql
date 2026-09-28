@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -276,10 +277,15 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 			// Both directions: a row can leave without another arriving and
 			// the total stay the same, as when scd2 closes a current version.
 			addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), m.Target)
-			added, _ := sess.QueryValue(addedSQL)
-			addedCount := parseSandboxCount(added)
+			added, addedErr := sess.QueryValue(addedSQL)
 			removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), m.Target)
-			removed, _ := sess.QueryValue(removedSQL)
+			removed, removedErr := sess.QueryValue(removedSQL)
+			if diffErr := errors.Join(addedErr, removedErr); diffErr != nil {
+				printPaddedLine(fmt.Sprintf("  [WARN] %s: row diff error: %s", m.Target, truncate(diffErr.Error(), 40)))
+				warnings++
+				continue
+			}
+			addedCount := parseSandboxCount(added)
 			removedCount := parseSandboxCount(removed)
 
 			if addedCount > 0 || removedCount > 0 {
