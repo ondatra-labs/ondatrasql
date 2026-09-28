@@ -52,6 +52,18 @@ The tradeoff: tracked adds a `_content_hash` column and does full-state comparis
 
 SCD2 (Slowly Changing Dimension Type 2) keeps every version of a row. When a product's price changes, the old row gets a `valid_to_snapshot` and a new row is inserted with `is_current = true`. If you're doing dimensional modeling for BI, this is the standard technique.
 
+Each version carries five columns next to the model's own:
+
+| Column | Holds |
+|---|---|
+| `valid_from_snapshot` | The DuckLake snapshot the version was written from |
+| `valid_to_snapshot` | The last snapshot the version was current in; NULL while it is current |
+| `is_current` | `true` for the current version of each key |
+| `valid_from_at` | When the run that wrote the version ran |
+| `valid_to_at` | When the run that closed the version ran; NULL while it is current |
+
+Use the timestamps to date a version. `ducklake_expire_snapshots` removes old snapshots together with their times, so a snapshot id older than the retention can no longer be dated, while `valid_from_at` and `valid_to_at` stay. A target built before the timestamp columns existed gets them on its next run, filled from the snapshots that still exist; versions whose snapshots have already expired keep NULL.
+
 Changing the model keeps the history too: the rebuild closes the rows the change affects and adds new versions, instead of starting over. A changed `@unique_key` or a change of kind still starts over; see [SCD2 rebuilds](/reference/pipeline/run-types/#scd2-rebuilds).
 
 `@push` is not supported with scd2. To push current state to an external system, use `@kind: table` with `WHERE is_current = true` in a separate sync model.

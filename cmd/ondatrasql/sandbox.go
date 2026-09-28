@@ -121,7 +121,7 @@ func internalMaterializationColumns(kind string) []string {
 	case "tracked":
 		return []string{"_content_hash"}
 	case "scd2":
-		return []string{"valid_from_snapshot", "valid_to_snapshot", "is_current"}
+		return []string{"valid_from_snapshot", "valid_to_snapshot", "is_current", "valid_from_at", "valid_to_at"}
 	default:
 		return nil
 	}

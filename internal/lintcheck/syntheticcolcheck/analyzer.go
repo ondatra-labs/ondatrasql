@@ -68,6 +68,8 @@ var syntheticColumnNames = []string{
 	"valid_from_snapshot",
 	"valid_to_snapshot",
 	"is_current",
+	"valid_from_at",
+	"valid_to_at",
 	"_content_hash",
 }
 

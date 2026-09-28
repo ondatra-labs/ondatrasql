@@ -552,6 +552,32 @@ var scd2SyntheticColumns = []syntheticColumn{
 	{"is_current", "BOOLEAN"},
 }
 
+// scd2TimeColumns date each version with the time of the run that opened and
+// closed it. The snapshot ids alone cannot be dated once
+// ducklake_expire_snapshots has removed their snapshots. A target built before
+// these columns existed gets them on its next run, filled from the snapshots
+// that are still there (scd2_backfill_times.sql).
+var scd2TimeColumns = []syntheticColumn{
+	{"valid_from_at", "TIMESTAMPTZ"},
+	{"valid_to_at", "TIMESTAMPTZ"},
+}
+
+// isSCD2SyntheticColumn reports whether name is a column materializeSCD2 adds
+// rather than one the model SELECT produces.
+func isSCD2SyntheticColumn(name string) bool {
+	for _, c := range scd2SyntheticColumns {
+		if c.name == name {
+			return true
+		}
+	}
+	for _, c := range scd2TimeColumns {
+		if c.name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // addMissingSyntheticColumnsSQL returns ALTER TABLE ADD COLUMN statements for
 // any of the wanted synthetic columns the target table does not already have,
 // or "" if it already has them all.
@@ -721,7 +747,8 @@ func (r *Runner) scd2HistoryResetReason(model *parser.Model, tmpTable string) (s
 }
 
 // materializeSCD2 creates or updates an SCD2 table with history tracking.
-// SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
+// SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot,
+// is_current, valid_from_at and valid_to_at.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
 // On subsequent runs, closes old versions and inserts new versions for changed/new rows.
 func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfill bool, schemaEvolutionSQL, auditSQL, sqlHash, runType string, result *Result, startTime time.Time, opts trackedRunOpts, extraPreSQL ...string) (int64, error) {
@@ -757,11 +784,30 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// Filter out any SCD2 columns that might be in source
 	var cleanCols []string
 	for _, col := range sourceCols {
-		if col != "valid_from_snapshot" && col != "valid_to_snapshot" && col != "is_current" {
+		if !isSCD2SyntheticColumn(col) {
 			cleanCols = append(cleanCols, col)
 		}
 	}
 	colList := quoteIdentifiers(cleanCols)
+
+	// An existing target gets the synthetic columns it lacks inside the write's
+	// transaction: the snapshot columns on a kind conversion (e.g. table →
+	// scd2), the time columns on a target built before they existed. Added
+	// time columns are filled from the snapshots that still exist.
+	if tableExists {
+		synthSQL, err := r.addMissingSyntheticColumnsSQL(model.Target, scd2SyntheticColumns)
+		if err != nil {
+			return 0, err
+		}
+		timeSQL, err := r.addMissingSyntheticColumnsSQL(model.Target, scd2TimeColumns)
+		if err != nil {
+			return 0, err
+		}
+		if timeSQL != "" {
+			timeSQL += ";\n" + sql.MustFormat("execute/scd2_backfill_times.sql", model.Target, escapeSQL(model.Target))
+		}
+		schemaEvolutionSQL = prependSQL(prependSQL(synthSQL, timeSQL), schemaEvolutionSQL)
+	}
 
 	var rowsAffected int64
 
@@ -893,17 +939,10 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		info.UniqueKey = model.UniqueKey
 		jsonBytes, _ := json.Marshal(info)
 
-		// Kind conversion (e.g. table → scd2): the existing target lacks the
-		// SCD2 synthetic columns the INSERT … BY NAME below references. Add any
-		// missing ones inside the same transaction before the INSERT binds.
-		synthSQL, synthErr := r.addMissingSyntheticColumnsSQL(model.Target, scd2SyntheticColumns)
-		if synthErr != nil {
-			return 0, synthErr
-		}
-		schemaEvolutionSQL = prependSQL(synthSQL, schemaEvolutionSQL)
-
+		// The synthetic columns the INSERT … BY NAME below references were
+		// added to schemaEvolutionSQL above when the target lacked them.
 		mainSQL := fmt.Sprintf(
-			"TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT %s, %d::BIGINT AS valid_from_snapshot, CAST(NULL AS BIGINT) AS valid_to_snapshot, true AS is_current FROM %s",
+			"TRUNCATE %s;\nINSERT INTO %s BY NAME SELECT %s, %d::BIGINT AS valid_from_snapshot, CAST(NULL AS BIGINT) AS valid_to_snapshot, true AS is_current, now() AS valid_from_at, CAST(NULL AS TIMESTAMPTZ) AS valid_to_at FROM %s",
 			model.Target, model.Target, colList, currSnapshot, tmpTable)
 		if schemaEvolutionSQL != "" {
 			mainSQL = schemaEvolutionSQL + ";\n" + mainSQL
@@ -1058,7 +1097,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 
 	// Close old versions for changed rows
-	closeChangedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_changes WHERE _change_type = 'changed')",
+	closeChangedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, valid_to_at = now(), is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_changes WHERE _change_type = 'changed')",
 		model.Target, currSnapshot-1, uk, uk)
 	if err := r.sess.Exec(closeChangedSQL); err != nil {
 		return rollbackOnErr(err, "close changed versions")
@@ -1072,7 +1111,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// is opt-in via empty_result=delete_missing, or comes from a non-lib SQL
 	// source where the empty result IS authoritative.)
 	if !opts.noDeleteOnMissingGroups {
-		closeDeletedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_deleted)",
+		closeDeletedSQL := fmt.Sprintf("UPDATE %s SET valid_to_snapshot = %d, valid_to_at = now(), is_current = false WHERE is_current IS true AND %s IN (SELECT %s FROM scd2_deleted)",
 			model.Target, currSnapshot-1, uk, uk)
 		if err := r.sess.Exec(closeDeletedSQL); err != nil {
 			return rollbackOnErr(err, "close deleted versions")
@@ -1080,7 +1119,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	}
 
 	// Insert new versions
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s, valid_from_snapshot, valid_to_snapshot, is_current) SELECT %s, %d, NULL, true FROM scd2_changes",
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s, valid_from_snapshot, valid_to_snapshot, is_current, valid_from_at, valid_to_at) SELECT %s, %d, NULL, true, now(), NULL FROM scd2_changes",
 		model.Target, colList, colList, currSnapshot)
 	if err := r.sess.Exec(insertSQL); err != nil {
 		return rollbackOnErr(err, "insert new versions")

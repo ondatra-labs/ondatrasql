@@ -120,7 +120,7 @@ On a first run there is no target to keep, so the empty result creates an empty 
 
 A `backfill` of an existing `scd2` target keeps its history. The new result is compared with the current versions the way an incremental run compares them: changed rows are closed and get a new version, rows missing from the result are closed, and rows whose values did not change keep their version. A logic change therefore shows up as new versions at the snapshot of the change, in a commit with `run_reason: sql changed`, and `rows_affected` counts the versions written rather than the whole result.
 
-The comparison joins on `@unique_key` against the current versions, so it only holds while the stored versions carry the same identity as the new result. In these cases the target is rebuilt from scratch instead — every row becomes current with a new `valid_from_snapshot` — and the run warns `scd2 history reset: <reason>`:
+The comparison joins on `@unique_key` against the current versions, so it only holds while the stored versions carry the same identity as the new result. In these cases the target is rebuilt from scratch instead — every row becomes current with a new `valid_from_snapshot` and `valid_from_at` — and the run warns `scd2 history reset: <reason>`:
 
 - the `@unique_key` column changed type (the type change empties the stored key)
 - `@unique_key` names a column the target does not have
