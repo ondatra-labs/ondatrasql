@@ -28,6 +28,10 @@ jobs:
         with:
           path-to-document: "https://github.com/${{ github.repository }}/blob/main/CLA.md"
           branch: main
+          # The default, ./signatures/cla.json, is rejected by the contents
+          # API ("malformed path component"). The file is committed, so the
+          # action never has to create it: its create path always fails the run.
+          path-to-signatures: signatures/cla.json
           allowlist: webmarcus
           remote-organization-name: ""
           remote-repository-name: ""
