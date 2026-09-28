@@ -273,11 +273,16 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 			if m.Kind == "scd2" {
 				diffTemplate = "queries/sandbox_diff_count_scd2.sql"
 			}
+			// Both directions: a row can leave without another arriving and
+			// the total stay the same, as when scd2 closes a current version.
 			addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), m.Target)
 			added, _ := sess.QueryValue(addedSQL)
 			addedCount := parseSandboxCount(added)
+			removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), m.Target)
+			removed, _ := sess.QueryValue(removedSQL)
+			removedCount := parseSandboxCount(removed)
 
-			if addedCount > 0 {
+			if addedCount > 0 || removedCount > 0 {
 				changed++
 				changedModels = append(changedModels, m.Target)
 			} else {
