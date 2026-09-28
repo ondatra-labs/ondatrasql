@@ -781,9 +781,18 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	if err != nil {
 		return 0, fmt.Errorf("get source columns: %w", err)
 	}
-	// Filter out any SCD2 columns that might be in source
+	// Filter out any SCD2 columns that might be in source. The snapshot
+	// columns are dropped, which lets a model SELECT * from another scd2
+	// table. The time columns are refused instead: they are common names for
+	// a model's own timestamps, and dropping one would overwrite that column
+	// of an existing target with run times from the next version on.
 	var cleanCols []string
 	for _, col := range sourceCols {
+		for _, c := range scd2TimeColumns {
+			if strings.EqualFold(col, c.name) {
+				return 0, fmt.Errorf("column %q is reserved in an scd2 model for the version timestamps; rename it, or leave it out with SELECT * EXCLUDE (valid_from_at, valid_to_at) when reading another scd2 table", col)
+			}
+		}
 		if !isSCD2SyntheticColumn(col) {
 			cleanCols = append(cleanCols, col)
 		}

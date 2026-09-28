@@ -62,6 +62,8 @@ Each version carries five columns next to the model's own:
 | `valid_from_at` | When the write that created the version began |
 | `valid_to_at` | When the write that closed the version began; NULL while it is current |
 
+The five names are reserved in an `scd2` model. `valid_from_snapshot`, `valid_to_snapshot` and `is_current` in the model's result are dropped. `valid_from_at` or `valid_to_at` in the result fails the run, since dropping a column of your own by that name would overwrite it with run times: rename it, or leave it out with `SELECT * EXCLUDE (valid_from_at, valid_to_at)` when reading another scd2 table.
+
 Use the timestamps to date a version. `ducklake_expire_snapshots` removes old snapshots together with their times, so a snapshot id older than the retention can no longer be dated, while `valid_from_at` and `valid_to_at` stay.
 
 A target built before the timestamp columns existed gets them on its next run, which rewrites the table once to fill them in. Those older versions are dated with the commit time of the snapshot that wrote or closed them, a moment after the write began. Versions whose snapshots have already expired keep NULL.

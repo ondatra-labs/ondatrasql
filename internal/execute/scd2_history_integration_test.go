@@ -454,3 +454,20 @@ func TestSCD2_VersionTimestamps_GapLeavesNull(t *testing.T) {
 		t.Errorf("first-write versions without valid_from_at=%s, want 0/3", got)
 	}
 }
+
+// TestSCD2_ModelColumnNamedLikeTimestamp_Fails pins that an scd2 model whose
+// result has its own valid_from_at or valid_to_at fails instead of having it
+// dropped. Dropping it would leave the name to the version timestamps, and
+// an existing target that already holds the model's own column by that name
+// would have it overwritten with run times from the next version on.
+func TestSCD2_ModelColumnNamedLikeTimestamp_Fails(t *testing.T) {
+	p := testutil.NewProject(t)
+	p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT * FROM (VALUES (1, TIMESTAMPTZ '2026-01-01 00:00:00+00')) t(id, valid_from_at)
+`)
+	_, err := runModelErr(t, p, "dim/item.sql")
+	if err == nil || !strings.Contains(err.Error(), "reserved in an scd2 model") {
+		t.Fatalf("want a reserved-column error, got %v", err)
+	}
+}
