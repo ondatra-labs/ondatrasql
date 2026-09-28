@@ -448,8 +448,13 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 	}
 	addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), target)
 	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
-	added, _ := sess.QueryValue(addedSQL)
-	removed, _ := sess.QueryValue(removedSQL)
+	added, addedErr := sess.QueryValue(addedSQL)
+	removed, removedErr := sess.QueryValue(removedSQL)
+	if diffErr := errors.Join(addedErr, removedErr); diffErr != nil {
+		printPaddedLine(fmt.Sprintf("    [WARN] row diff error: %s", truncate(diffErr.Error(), 40)))
+		printEmptyLine()
+		return
+	}
 	addedCount := parseSandboxCount(added)
 	removedCount := parseSandboxCount(removed)
 
@@ -561,8 +566,13 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 	addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), target)
 	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
 
-	added, _ := sess.QueryValue(addedSQL)
-	removed, _ := sess.QueryValue(removedSQL)
+	added, addedErr := sess.QueryValue(addedSQL)
+	removed, removedErr := sess.QueryValue(removedSQL)
+	if diffErr := errors.Join(addedErr, removedErr); diffErr != nil {
+		printPaddedLine(fmt.Sprintf("  [WARN] row diff error: %s", truncate(diffErr.Error(), 40)))
+		printEmptyLine()
+		return
+	}
 
 	addedCount := parseSandboxCount(added)
 	removedCount := parseSandboxCount(removed)
