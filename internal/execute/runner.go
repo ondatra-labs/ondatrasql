@@ -2360,11 +2360,13 @@ func (r *Runner) detectSchemaEvolution(
 	}
 	if keyCol != "" && len(change.TypeChanged) > 0 {
 		ukCols := make(map[string]bool)
+		// Column names resolve case-insensitively: `@unique_key: ID` is the
+		// column `id`, and missing its type change nulls every stored key.
 		for _, part := range strings.Split(keyCol, ",") {
-			ukCols[strings.TrimSpace(part)] = true
+			ukCols[strings.ToLower(strings.TrimSpace(part))] = true
 		}
 		for _, tc := range change.TypeChanged {
-			if ukCols[tc.Column] {
+			if ukCols[strings.ToLower(tc.Column)] {
 				result.RunType = "backfill"
 				result.RunReason = "unique_key type changed"
 				result.Warnings = append(result.Warnings,

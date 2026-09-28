@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -273,11 +274,21 @@ func showDagSandboxSummary(sess *duckdb.Session, models []*parser.Model, failedT
 			if m.Kind == "scd2" {
 				diffTemplate = "queries/sandbox_diff_count_scd2.sql"
 			}
+			// Both directions: a row can leave without another arriving and
+			// the total stay the same, as when scd2 closes a current version.
 			addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), m.Target)
-			added, _ := sess.QueryValue(addedSQL)
+			added, addedErr := sess.QueryValue(addedSQL)
+			removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), m.Target)
+			removed, removedErr := sess.QueryValue(removedSQL)
+			if diffErr := errors.Join(addedErr, removedErr); diffErr != nil {
+				printPaddedLine(fmt.Sprintf("  [WARN] %s: row diff error: %s", m.Target, truncate(diffErr.Error(), 40)))
+				warnings++
+				continue
+			}
 			addedCount := parseSandboxCount(added)
+			removedCount := parseSandboxCount(removed)
 
-			if addedCount > 0 {
+			if addedCount > 0 || removedCount > 0 {
 				changed++
 				changedModels = append(changedModels, m.Target)
 			} else {
@@ -437,8 +448,13 @@ func showDagModelDiff(sess *duckdb.Session, target, kind string) {
 	}
 	addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), target)
 	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
-	added, _ := sess.QueryValue(addedSQL)
-	removed, _ := sess.QueryValue(removedSQL)
+	added, addedErr := sess.QueryValue(addedSQL)
+	removed, removedErr := sess.QueryValue(removedSQL)
+	if diffErr := errors.Join(addedErr, removedErr); diffErr != nil {
+		printPaddedLine(fmt.Sprintf("    [WARN] row diff error: %s", truncate(diffErr.Error(), 40)))
+		printEmptyLine()
+		return
+	}
 	addedCount := parseSandboxCount(added)
 	removedCount := parseSandboxCount(removed)
 
@@ -550,8 +566,13 @@ func showSandboxDiff(sess *duckdb.Session, target, kind string) {
 	addedSQL := sql.MustFormat(diffTemplate, sess.CatalogAlias(), sess.ProdAlias(), target)
 	removedSQL := sql.MustFormat(diffTemplate, sess.ProdAlias(), sess.CatalogAlias(), target)
 
-	added, _ := sess.QueryValue(addedSQL)
-	removed, _ := sess.QueryValue(removedSQL)
+	added, addedErr := sess.QueryValue(addedSQL)
+	removed, removedErr := sess.QueryValue(removedSQL)
+	if diffErr := errors.Join(addedErr, removedErr); diffErr != nil {
+		printPaddedLine(fmt.Sprintf("  [WARN] row diff error: %s", truncate(diffErr.Error(), 40)))
+		printEmptyLine()
+		return
+	}
 
 	addedCount := parseSandboxCount(added)
 	removedCount := parseSandboxCount(removed)

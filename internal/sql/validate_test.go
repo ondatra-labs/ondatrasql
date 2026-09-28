@@ -293,6 +293,40 @@ func TestEmbeddedSQL_SandboxQueryTemplatesValid(t *testing.T) {
 		mustExec(t, db, "INSERT INTO sandbox.staging.scd2_diff VALUES (1, 'Alice', 99, 9223372036854775807, true)")
 	})
 
+	// A rebuild keeps SCD2 history, so the sandbox holds the same closed
+	// versions as prod. A change back to an older value must still count:
+	// comparing every version would find it among prod's closed rows.
+	t.Run("scd2_change_matching_closed_version_detected", func(t *testing.T) {
+		for _, cat := range []string{"sandbox", "lake"} {
+			mustExec(t, db, "INSERT INTO "+cat+".staging.scd2_diff VALUES (1, 'Alice Old', 1, 98, false)")
+		}
+		mustExec(t, db, "UPDATE sandbox.staging.scd2_diff SET name = 'Alice Old' WHERE is_current")
+
+		for _, name := range []string{"queries/sandbox_diff_count_scd2.sql", "queries/sandbox_sample_scd2.sql"} {
+			tmpl, err := Load(name)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			q := fmt.Sprintf(tmpl, "sandbox", "lake", "staging.scd2_diff")
+			if name == "queries/sandbox_sample_scd2.sql" {
+				q = fmt.Sprintf(tmpl, "sandbox", "lake", "staging.scd2_diff", "2")
+				q = "SELECT COUNT(*) FROM (" + q + ")"
+			}
+			var count int
+			if err := db.QueryRowContext(context.Background(), q).Scan(&count); err != nil {
+				t.Fatalf("Scan %s: %v", name, err)
+			}
+			if count != 1 {
+				t.Errorf("%s = %d, want 1 (current name Alice → Alice Old matches a closed version)", name, count)
+			}
+		}
+
+		mustExec(t, db, "DELETE FROM sandbox.staging.scd2_diff")
+		mustExec(t, db, "INSERT INTO sandbox.staging.scd2_diff VALUES (1, 'Alice', 99, 9223372036854775807, true)")
+		mustExec(t, db, "DELETE FROM lake.staging.scd2_diff")
+		mustExec(t, db, "INSERT INTO lake.staging.scd2_diff VALUES (1, 'Alice', 1, 9223372036854775807, true)")
+	})
+
 	// Verify generic diff detects known differences.
 	t.Run("generic_diff_detects_changes", func(t *testing.T) {
 		tmpl, err := Load("queries/sandbox_diff_count.sql")

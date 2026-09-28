@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/parser"
+	"github.com/ondatra-labs/ondatrasql/internal/testutil"
 )
 
 // TestTableExistsIn_RealSession verifies tableExistsIn against a live
@@ -147,5 +149,34 @@ func TestTableExistsIn_ClosedSession(t *testing.T) {
 	}
 	if exists {
 		t.Errorf("expected exists=false on error, got true")
+	}
+}
+
+// TestShowDagSandboxSummary_SCD2ClosedVersionIsChange pins that the DAG
+// summary counts an scd2 model as changed when the sandbox only closed a
+// current version. Closing adds no row, so the total matches prod and the
+// sandbox-minus-prod diff of current versions is empty; only the
+// prod-minus-sandbox direction sees it.
+func TestShowDagSandboxSummary_SCD2ClosedVersionIsChange(t *testing.T) {
+	prod := testutil.NewProject(t)
+	for _, q := range []string{
+		"CREATE SCHEMA IF NOT EXISTS staging",
+		"CREATE TABLE staging.hist (id INTEGER, name VARCHAR, valid_from_snapshot BIGINT, valid_to_snapshot BIGINT, is_current BOOLEAN)",
+		"INSERT INTO staging.hist VALUES (1, 'a', 1, NULL, true), (2, 'b', 1, NULL, true)",
+	} {
+		if err := prod.Sess.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	sbox := testutil.NewSandboxProject(t, prod)
+	if err := sbox.Sess.Exec("UPDATE staging.hist SET valid_to_snapshot = 2, is_current = false WHERE id = 2"); err != nil {
+		t.Fatalf("close version in sandbox: %v", err)
+	}
+
+	out := captureOutput(t, func() {
+		showDagSandboxSummary(sbox.Sess, []*parser.Model{{Target: "staging.hist", Kind: "scd2"}}, nil)
+	})
+	if !strings.Contains(out, "Changed:   1 models") {
+		t.Errorf("closed scd2 version not counted as a change:\n%s", out)
 	}
 }

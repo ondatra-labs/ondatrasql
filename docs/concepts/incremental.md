@@ -31,7 +31,7 @@ The cursor resets and a full reload runs when:
 - You changed config that this model actually uses — a macro or variable it names, a source it reads, or session-wide config like `settings.sql` or `sources.sql`. Editing a macro no other model calls, bumping `threads`, adding a schema, or touching `state.sql` rebuilds nothing. See [Run Types](/reference/pipeline/run-types/) for the exact rules.
 - An earlier run owed a rebuild but kept its rows because every lib fetched nothing — see [Rebuild from an empty fetch](/reference/pipeline/run-types/#rebuild-from-an-empty-fetch). That is also the exception to the list above: a reload whose libs all return 0 rows with `empty_result: "no_change"` keeps the existing rows and waits for a run with data.
 
-This is intentionally destructive. A changed query means the old data was produced by a different definition, so starting fresh is safer than trying to patch incrementally on top of stale data. On backfill, `is_backfill` is `True` and `last_value` falls back to `initial_value` (passed as kwargs to `fetch()`).
+This is intentionally destructive. A changed query means the old data was produced by a different definition, so starting fresh is safer than trying to patch incrementally on top of stale data. The exception is an existing `scd2` target: its history is what the model exists to keep, so the rebuild compares the new result with the current versions instead (see [SCD2 rebuilds](/reference/pipeline/run-types/#scd2-rebuilds)). On backfill, `is_backfill` is `True` and `last_value` falls back to `initial_value` (passed as kwargs to `fetch()`).
 
 ## The tradeoffs you should know about
 

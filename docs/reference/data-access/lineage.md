@@ -62,6 +62,7 @@ Every run stores metadata in `commit_extra_info` on the DuckLake snapshot. All f
 | `run_reason` | Why that run type was chosen — e.g. `first run`, `sql changed`, `config changed`, `dep changed: <target>`, `hash format changed (upgrade)`, `rebuild pending` |
 | `rows_affected` | Rows written |
 | `rebuild_pending` | `true` when the run kept the target's rows instead of rebuilding from an empty fetch; the next run rebuilds. Absent otherwise. See [Rebuild from an empty fetch](/reference/pipeline/run-types/#rebuild-from-an-empty-fetch) |
+| `unique_key` | `scd2` only: the `@unique_key` the versions are compared on. A rebuild whose key differs from it starts the history over. Absent on other kinds and on scd2 commits written before it was recorded. See [SCD2 rebuilds](/reference/pipeline/run-types/#scd2-rebuilds) |
 | `start_time` | Run start (ISO 8601) |
 | `end_time` | Run end (ISO 8601) |
 | `duration_ms` | Execution time in milliseconds |

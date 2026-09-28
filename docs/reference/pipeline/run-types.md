@@ -28,7 +28,8 @@ Before this change, config content was folded into `sql_hash`. Splitting it out 
 
 Plan for it before upgrading a production lake:
 
-- `append` and `merge` models are rebuilt with `TRUNCATE` + `INSERT`, and `scd2` models have their history rebuilt. If a model's source no longer holds the full history — a rolling API window, a truncated staging table — that history is not recoverable from the source.
+- `append` and `merge` models are rebuilt with `TRUNCATE` + `INSERT`. If a model's source no longer holds the full history — a rolling API window, a truncated staging table — that history is not recoverable from the source.
+- `scd2` models keep their history (see [SCD2 rebuilds](#scd2-rebuilds)). Since the model's output is unchanged, the rebuild writes no new versions.
 - `@fetch` models re-fetch from the beginning: the incremental cursor resets to `@incremental_initial`.
 
 Projects with no `config/` directory are unaffected: their `sql_hash` is unchanged and nothing rebuilds.
@@ -103,7 +104,7 @@ Name matching is lexical and deliberately over-inclusive: a macro named `total` 
 
 ## Rebuild from an empty fetch {#rebuild-from-an-empty-fetch}
 
-A `backfill` replaces the target with the result. If every lib call in the model returned 0 rows with `empty_result: "no_change"` (the default) and the result is empty, there is nothing to rebuild from, and replacing the target would empty it. The run keeps the existing rows instead and warns: `all libs reported no change and the result is empty, keeping existing rows instead of rebuilding`. This applies to every kind, `table` included, whatever made the run a backfill — a changed model or config hash, or an escalation during the run.
+A `backfill` replaces the target with the result (an existing `scd2` target is compared with it instead; see [SCD2 rebuilds](#scd2-rebuilds)). If every lib call in the model returned 0 rows with `empty_result: "no_change"` (the default) and the result is empty, there is nothing to rebuild from, and replacing the target would empty it. The run keeps the existing rows instead and warns: `all libs reported no change and the result is empty, keeping existing rows instead of rebuilding`. This applies to every kind, `table` included, whatever made the run a backfill — a changed model or config hash, or an escalation during the run.
 
 It does not apply to the ordinary `full` run of a `@kind: table @fetch` model, which re-fetches on every run: an empty result there replaces the target as usual.
 
@@ -114,6 +115,24 @@ An added column is still applied. Any other schema change — a type change, a r
 The rebuild is not dropped. A run that keeps the rows commits with `rebuild_pending: true` in `commit_extra_info`, and the next run is a `backfill` with `run_reason: rebuild pending`. Each run that fetches nothing again keeps the rows and defers the rebuild once more, until a run has data to build from.
 
 On a first run there is no target to keep, so the empty result creates an empty target as usual.
+
+## SCD2 rebuilds {#scd2-rebuilds}
+
+A `backfill` of an existing `scd2` target keeps its history. The new result is compared with the current versions the way an incremental run compares them: changed rows are closed and get a new version, rows missing from the result are closed, and rows whose values did not change keep their version. A logic change therefore shows up as new versions at the snapshot of the change, in a commit with `run_reason: sql changed`, and `rows_affected` counts the versions written rather than the whole result.
+
+The comparison joins on `@unique_key` against the current versions, so it only holds while the stored versions carry the same identity as the new result. In these cases the target is rebuilt from scratch instead — every row becomes current with a new `valid_from_snapshot` — and the run warns `scd2 history reset: <reason>`:
+
+- the `@unique_key` column changed type (the type change empties the stored key)
+- `@unique_key` names a column the target does not have
+- `@unique_key` names another column than the previous run's (recorded as `unique_key` in `commit_extra_info`)
+- the target was built under another kind
+- the current versions are not unique and non-null on the key
+
+A target whose last commit was written before `unique_key` was recorded has nothing to compare the key with. There a change to another column is caught only when the current versions are not unique on it; a change to a column that is also unique keeps the history and compares on the new key. Every scd2 commit from this version on records the key, so only a rebuild before the first such commit is affected.
+
+Schema changes apply to the stored versions too. An added column is NULL in older versions, and each current row gets a new version the first time. A dropped column disappears from the whole history. A type change is applied as drop and re-add, so the column is NULL in every closed version.
+
+To start the history over deliberately, drop the target (`DROP TABLE schema.table`); the next run is a first run.
 
 ## Sink on skip
 

@@ -643,6 +643,83 @@ func commitTxnSQL(writeSQL, auditSQL, target, extraInfo string, extraPreSQL []st
 	return sql.MustFormat("execute/commit.sql", writeSQL, auditSQL, target, escapeSQL(extraInfo))
 }
 
+// scd2HistoryResetReason decides whether a rebuild of an existing SCD2 target
+// must drop its history. A rebuild keeps history by default: it diffs the new
+// result against the current versions like an incremental run, so a changed
+// model closes the rows it changes at the snapshot of the change.
+//
+// The diff joins on unique_key against is_current, and that only means
+// something while the stored versions carry the same identity as the new
+// result. It does not when the key column is missing or changes type (the
+// type change is DROP + ADD and nulls every stored key), when the target was
+// built under another kind, when the previous commit used another
+// unique_key, or when the current versions are not unique and non-null on the
+// key. Each of those returns a reason, and the caller rebuilds from scratch.
+// Checked against the target as it is now, before this run's schema evolution.
+func (r *Runner) scd2HistoryResetReason(model *parser.Model, tmpTable string) (string, error) {
+	targetCols, err := backfill.CaptureSchema(r.sess, model.Target)
+	if err != nil {
+		return "", fmt.Errorf("capture target schema for scd2 history check: %w", err)
+	}
+	// DuckDB resolves column names case-insensitively, and so does the
+	// unique_key validation: `@unique_key: ID` names the column `id`.
+	targetTypes := make(map[string]string, len(targetCols))
+	for _, c := range targetCols {
+		targetTypes[strings.ToLower(c.Name)] = c.Type
+	}
+	for _, c := range scd2SyntheticColumns {
+		if _, ok := targetTypes[c.name]; !ok {
+			return "target was not built as scd2", nil
+		}
+	}
+	keyType, ok := targetTypes[strings.ToLower(model.UniqueKey)]
+	if !ok {
+		return fmt.Sprintf("unique_key column %q is new", model.UniqueKey), nil
+	}
+	srcCols, err := backfill.CaptureSchema(r.sess, tmpTable)
+	if err != nil {
+		return "", fmt.Errorf("capture result schema for scd2 history check: %w", err)
+	}
+	// materialize has already checked that the result has the key column.
+	for _, c := range srcCols {
+		if strings.EqualFold(c.Name, model.UniqueKey) && c.Type != keyType {
+			return fmt.Sprintf("unique_key column %q changed type from %s to %s", model.UniqueKey, keyType, c.Type), nil
+		}
+	}
+
+	prev, err := backfill.GetModelCommitInfo(r.sess, model.Target)
+	if err != nil {
+		return "", fmt.Errorf("read previous commit for scd2 history check: %w", err)
+	}
+	if prev != nil {
+		if prev.Kind != "" && prev.Kind != "scd2" {
+			return fmt.Sprintf("kind changed from %s to scd2", prev.Kind), nil
+		}
+		// Commits written before unique_key was recorded leave it empty.
+		// The data check below covers them only partly: a change to another
+		// column that is also unique on the current versions goes unseen.
+		if prev.UniqueKey != "" && !strings.EqualFold(prev.UniqueKey, model.UniqueKey) {
+			return fmt.Sprintf("unique_key changed from %s to %s", prev.UniqueKey, model.UniqueKey), nil
+		}
+	}
+
+	uk := duckdb.QuoteIdentifier(model.UniqueKey)
+	badSQL := fmt.Sprintf("SELECT count(*) - count(DISTINCT %s) + count(*) FILTER (WHERE %s IS NULL) FROM %s WHERE is_current IS true",
+		uk, uk, model.Target)
+	badResult, err := r.sess.QueryValue(badSQL)
+	if err != nil {
+		return "", fmt.Errorf("check current versions for scd2 history check: %w", err)
+	}
+	bad, err := parseRowCount(badResult)
+	if err != nil {
+		return "", err
+	}
+	if bad > 0 {
+		return fmt.Sprintf("current versions are not unique and non-null on unique_key %q", model.UniqueKey), nil
+	}
+	return "", nil
+}
+
 // materializeSCD2 creates or updates an SCD2 table with history tracking.
 // SCD2 tables have additional columns: valid_from_snapshot, valid_to_snapshot, is_current.
 // On first run (isBackfill=true or table doesn't exist), creates the table with SCD2 columns.
@@ -740,6 +817,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			GitRepoURL: r.gitInfo.RepoURL,
 		}
 		info.RebuildPending = opts.keepTarget
+		info.UniqueKey = model.UniqueKey
 		jsonBytes, err := json.Marshal(info)
 		if err != nil {
 			return 0, fmt.Errorf("marshal commit metadata: %w", err)
@@ -762,9 +840,26 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		return rowsAffected, nil
 	}
 
+	// A rebuild keeps history unless the stored versions cannot be diffed
+	// against the new result; see scd2HistoryResetReason.
+	keptHistory := false
 	if isBackfill {
-		// SQL changed but table exists: TRUNCATE + INSERT preserves snapshot chain.
-		// SCD2 history resets (all rows become current with new valid_from_snapshot).
+		reason, err := r.scd2HistoryResetReason(model, tmpTable)
+		if err != nil {
+			return 0, err
+		}
+		if reason == "" {
+			isBackfill = false
+			keptHistory = true
+		} else {
+			result.Warnings = append(result.Warnings, "scd2 history reset: "+reason)
+		}
+	}
+
+	if isBackfill {
+		// The stored versions cannot be diffed against the new result:
+		// TRUNCATE + INSERT preserves the snapshot chain, and all rows become
+		// current with a new valid_from_snapshot.
 		countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s", tmpTable)
 		countResult, err := r.sess.QueryValue(countSQL)
 		if err != nil {
@@ -795,6 +890,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			GitCommit: r.gitInfo.Commit, GitBranch: r.gitInfo.Branch, GitRepoURL: r.gitInfo.RepoURL,
 		}
 		info.RebuildPending = opts.keepTarget
+		info.UniqueKey = model.UniqueKey
 		jsonBytes, _ := json.Marshal(info)
 
 		// Kind conversion (e.g. table → scd2): the existing target lacks the
@@ -905,8 +1001,10 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// Nothing actually changed: roll back the open detect transaction and
 	// return without committing. Mirrors the tracked-kind smart-skip. Only when
 	// there is genuinely nothing else to persist (no schema evolution, audits,
-	// or extraPreSQL acks).
-	if rowsAffected == 0 && opts.noDeleteOnMissingGroups && schemaEvolutionSQL == "" && auditSQL == "" && len(extraPreSQL) == 0 {
+	// or extraPreSQL acks). Never on a rebuild that kept history: its commit
+	// records the new model hash, and without it every later run would see
+	// the same change and rebuild again.
+	if rowsAffected == 0 && !keptHistory && opts.noDeleteOnMissingGroups && schemaEvolutionSQL == "" && auditSQL == "" && len(extraPreSQL) == 0 {
 		_ = r.sess.Exec("ROLLBACK")                          // undo the open detect txn (no DML ran)
 		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_changes") // IF EXISTS makes non-existence OK
 		_ = r.sess.Exec("DROP TABLE IF EXISTS scd2_deleted") // IF EXISTS makes non-existence OK
@@ -945,6 +1043,7 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		GitRepoURL:    r.gitInfo.RepoURL,
 	}
 	info.RebuildPending = opts.keepTarget
+	info.UniqueKey = model.UniqueKey
 	jsonBytes, err := json.Marshal(info)
 	if err != nil {
 		return rollbackOnErr(err, "marshal commit metadata")

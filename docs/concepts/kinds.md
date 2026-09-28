@@ -52,6 +52,8 @@ The tradeoff: tracked adds a `_content_hash` column and does full-state comparis
 
 SCD2 (Slowly Changing Dimension Type 2) keeps every version of a row. When a product's price changes, the old row gets a `valid_to_snapshot` and a new row is inserted with `is_current = true`. If you're doing dimensional modeling for BI, this is the standard technique.
 
+Changing the model keeps the history too: the rebuild closes the rows the change affects and adds new versions, instead of starting over. A changed `@unique_key` or a change of kind still starts over; see [SCD2 rebuilds](/reference/pipeline/run-types/#scd2-rebuilds).
+
 `@push` is not supported with scd2. To push current state to an external system, use `@kind: table` with `WHERE is_current = true` in a separate sync model.
 
 When the source is a lib, a 0-row fetch defaults to "no change" — current versions are preserved rather than closed. A lib that fully enumerates its source and treats an empty fetch as "everything is gone" must opt in to closing all current versions via `empty_result: "delete_missing"` in the fetch return; see [Fetch Contract](/reference/lib-functions/fetch-contract/#empty-fetches-and-tracked).

@@ -57,6 +57,7 @@ type CommitInfo struct {
 	RebuildPending bool `json:"rebuild_pending,omitempty"`
 
 	Kind          string `json:"kind,omitempty"`           // table/append/merge/scd2/partition
+	UniqueKey     string `json:"unique_key,omitempty"`     // scd2: the key its versions are diffed on
 	SourceFile    string `json:"source_file,omitempty"`    // models/staging/orders.sql
 	StartTime     string `json:"start_time,omitempty"`     // ISO8601 timestamp
 	EndTime       string `json:"end_time,omitempty"`       // ISO8601 timestamp
@@ -68,8 +69,8 @@ type CommitInfo struct {
 	Error string     `json:"error,omitempty"` // Error message if failed
 
 	// Git source control fields (Phase 4)
-	GitCommit  string `json:"git_commit,omitempty"`  // Current commit SHA
-	GitBranch  string `json:"git_branch,omitempty"`  // Current branch name
+	GitCommit  string `json:"git_commit,omitempty"`   // Current commit SHA
+	GitBranch  string `json:"git_branch,omitempty"`   // Current branch name
 	GitRepoURL string `json:"git_repo_url,omitempty"` // Remote repository URL
 }
 
@@ -373,4 +374,3 @@ func GetModelCommitInfo(sess *duckdb.Session, target string) (*CommitInfo, error
 
 	return &info, nil
 }
-
