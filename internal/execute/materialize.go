@@ -793,9 +793,11 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 	// An existing target gets the synthetic columns it lacks inside the write's
 	// transaction: the snapshot columns on a kind conversion (e.g. table →
 	// scd2), the time columns on a target built before they existed. Added
-	// time columns are filled from the snapshots that still exist.
+	// time columns are filled from the snapshots that still exist, once it is
+	// known that the rows stay; a history reset replaces them anyway.
+	var synthSQL, fillTimesSQL string
 	if tableExists {
-		synthSQL, err := r.addMissingSyntheticColumnsSQL(model.Target, scd2SyntheticColumns)
+		snapSQL, err := r.addMissingSyntheticColumnsSQL(model.Target, scd2SyntheticColumns)
 		if err != nil {
 			return 0, err
 		}
@@ -803,10 +805,10 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 		if err != nil {
 			return 0, err
 		}
+		synthSQL = prependSQL(snapSQL, timeSQL)
 		if timeSQL != "" {
-			timeSQL += ";\n" + sql.MustFormat("execute/scd2_backfill_times.sql", model.Target, escapeSQL(model.Target))
+			fillTimesSQL = sql.MustFormat("execute/scd2_backfill_times.sql", model.Target, escapeSQL(model.Target))
 		}
-		schemaEvolutionSQL = prependSQL(prependSQL(synthSQL, timeSQL), schemaEvolutionSQL)
 	}
 
 	var rowsAffected int64
@@ -901,6 +903,10 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			result.Warnings = append(result.Warnings, "scd2 history reset: "+reason)
 		}
 	}
+	if !isBackfill {
+		synthSQL = prependSQL(synthSQL, fillTimesSQL)
+	}
+	schemaEvolutionSQL = prependSQL(synthSQL, schemaEvolutionSQL)
 
 	if isBackfill {
 		// The stored versions cannot be diffed against the new result:

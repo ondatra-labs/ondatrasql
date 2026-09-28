@@ -181,6 +181,9 @@ SELECT id, upper(name) AS name, price FROM raw.src
 			if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE is_current IS NOT true"); got != "0" {
 				t.Errorf("closed versions after reset=%s, want 0", got)
 			}
+			if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE valid_from_at IS NULL OR valid_to_at IS NOT NULL"); got != "0" {
+				t.Errorf("versions after reset without valid_from_at, or with valid_to_at=%s, want 0", got)
+			}
 		})
 	}
 }
@@ -413,4 +416,41 @@ func runModelAsProcess(t *testing.T, p *testutil.Project, rel string) {
 		t.Fatalf("refresh snapshot: %v", err)
 	}
 	runModel(t, p, rel)
+}
+
+// TestSCD2_VersionTimestamps_GapLeavesNull pins the upgrade when the commit
+// that wrote a version has expired but the snapshot it started from has not,
+// as expiring by version list can leave. The first remaining commit of the
+// model is a later one, and dating the version by it would be wrong: the
+// version stays NULL instead.
+func TestSCD2_VersionTimestamps_GapLeavesNull(t *testing.T) {
+	p := scd2HistoryProject(t)
+	for _, q := range []string{
+		"ALTER TABLE dim.item DROP COLUMN valid_from_at",
+		"ALTER TABLE dim.item DROP COLUMN valid_to_at",
+	} {
+		if err := p.Sess.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	// The data change's versions (id 1 at price 11) start from start2; the
+	// commit that wrote them is the first dim.item commit after it.
+	start2 := queryVal(t, p, "SELECT valid_from_snapshot FROM dim.item WHERE id = 1 AND price = 11 AND name = 'a'")
+	write2 := queryVal(t, p, `SELECT min(snapshot_id) FROM snapshots()
+		WHERE lower(commit_extra_info->>'model') = 'dim.item' AND snapshot_id > `+start2)
+	if err := p.Sess.Exec("CALL ducklake_expire_snapshots('" + p.Sess.CatalogAlias() + "', versions => [" + write2 + "])"); err != nil {
+		t.Fatalf("expire snapshot %s: %v", write2, err)
+	}
+
+	runModelAsProcess(t, p, "dim/item.sql")
+
+	if got := queryVal(t, p, "SELECT COALESCE(CAST(valid_from_at AS VARCHAR), 'NULL') FROM dim.item WHERE id = 1 AND price = 11 AND name = 'a'"); got != "NULL" {
+		t.Errorf("version written by an expired commit got valid_from_at=%s, want NULL", got)
+	}
+	// The first write lies before the gap and is still dated. (The logic
+	// change's versions start from the expired snapshot itself, so they
+	// stay NULL too.)
+	if got := queryVal(t, p, "SELECT COUNT(*) FILTER (WHERE valid_from_at IS NULL) || '/' || COUNT(*) FROM dim.item WHERE valid_from_snapshot < "+start2); got != "0/3" {
+		t.Errorf("first-write versions without valid_from_at=%s, want 0/3", got)
+	}
 }
