@@ -661,16 +661,18 @@ func (r *Runner) scd2HistoryResetReason(model *parser.Model, tmpTable string) (s
 	if err != nil {
 		return "", fmt.Errorf("capture target schema for scd2 history check: %w", err)
 	}
+	// DuckDB resolves column names case-insensitively, and so does the
+	// unique_key validation: `@unique_key: ID` names the column `id`.
 	targetTypes := make(map[string]string, len(targetCols))
 	for _, c := range targetCols {
-		targetTypes[c.Name] = c.Type
+		targetTypes[strings.ToLower(c.Name)] = c.Type
 	}
 	for _, c := range scd2SyntheticColumns {
 		if _, ok := targetTypes[c.name]; !ok {
 			return "target was not built as scd2", nil
 		}
 	}
-	keyType, ok := targetTypes[model.UniqueKey]
+	keyType, ok := targetTypes[strings.ToLower(model.UniqueKey)]
 	if !ok {
 		return fmt.Sprintf("unique_key column %q is new", model.UniqueKey), nil
 	}
@@ -678,10 +680,18 @@ func (r *Runner) scd2HistoryResetReason(model *parser.Model, tmpTable string) (s
 	if err != nil {
 		return "", fmt.Errorf("capture result schema for scd2 history check: %w", err)
 	}
+	inResult := false
 	for _, c := range srcCols {
-		if c.Name == model.UniqueKey && c.Type != keyType {
+		if !strings.EqualFold(c.Name, model.UniqueKey) {
+			continue
+		}
+		inResult = true
+		if c.Type != keyType {
 			return fmt.Sprintf("unique_key column %q changed type from %s to %s", model.UniqueKey, keyType, c.Type), nil
 		}
+	}
+	if !inResult {
+		return fmt.Sprintf("unique_key column %q is not in the result", model.UniqueKey), nil
 	}
 
 	prev, err := backfill.GetModelCommitInfo(r.sess, model.Target)
@@ -692,9 +702,10 @@ func (r *Runner) scd2HistoryResetReason(model *parser.Model, tmpTable string) (s
 		if prev.Kind != "" && prev.Kind != "scd2" {
 			return fmt.Sprintf("kind changed from %s to scd2", prev.Kind), nil
 		}
-		// Commits written before unique_key was recorded leave it empty;
-		// the data check below still covers them.
-		if prev.UniqueKey != "" && prev.UniqueKey != model.UniqueKey {
+		// Commits written before unique_key was recorded leave it empty.
+		// The data check below covers them only partly: a change to another
+		// column that is also unique on the current versions goes unseen.
+		if prev.UniqueKey != "" && !strings.EqualFold(prev.UniqueKey, model.UniqueKey) {
 			return fmt.Sprintf("unique_key changed from %s to %s", prev.UniqueKey, model.UniqueKey), nil
 		}
 	}

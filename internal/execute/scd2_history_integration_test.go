@@ -124,6 +124,14 @@ SELECT id, name, price FROM raw.src
 			reason: "target was not built as scd2",
 		},
 		{
+			// A table rebuild keeps the scd2 columns it inherited, so only
+			// the previous commit's kind tells the target apart.
+			name:   "kind changed back from table",
+			before: std,
+			after:  std,
+			reason: "kind changed from table to scd2",
+		},
+		{
 			name:   "duplicate current keys",
 			src:    `SELECT * FROM (VALUES (1, 'a', 10), (1, 'x', 99), (2, 'b', 20)) t(id, name, price)`,
 			before: std,
@@ -153,6 +161,11 @@ SELECT id, upper(name) AS name, price FROM raw.src
 				runModel(t, p, "dim/item.sql")
 			}
 
+			if tc.name == "kind changed back from table" {
+				p.AddModel("dim/item.sql", "-- @kind: table\nSELECT id, name, price FROM raw.src\n")
+				runModel(t, p, "dim/item.sql")
+			}
+
 			p.AddModel("dim/item.sql", tc.after)
 			r := runModel(t, p, "dim/item.sql")
 			found := false
@@ -169,4 +182,99 @@ SELECT id, upper(name) AS name, price FROM raw.src
 			}
 		})
 	}
+}
+
+// scd2Project builds raw.src and dim.item, runs both, then changes id 1's
+// price so one closed version exists before the model changes.
+func scd2Project(t *testing.T, model string) *testutil.Project {
+	t.Helper()
+	p := testutil.NewProject(t)
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT * FROM (VALUES (1, 'a', 10), (2, 'b', 20)) t(id, name, price)
+`)
+	p.AddModel("dim/item.sql", model)
+	runModel(t, p, "raw/src.sql")
+	runModel(t, p, "dim/item.sql")
+	p.AddModel("raw/src.sql", `-- @kind: table
+SELECT * FROM (VALUES (1, 'a', 11), (2, 'b', 20)) t(id, name, price)
+`)
+	runModel(t, p, "raw/src.sql")
+	runModel(t, p, "dim/item.sql")
+	return p
+}
+
+// TestSCD2_Rebuild_KeyCaseInsensitive pins that @unique_key matches its
+// column case-insensitively, as DuckDB and the unique_key validation do. A
+// case-sensitive lookup reported the key column as new and reset the history
+// on every rebuild.
+func TestSCD2_Rebuild_KeyCaseInsensitive(t *testing.T) {
+	p := scd2Project(t, `-- @kind: scd2
+-- @unique_key: ID
+SELECT id, name, price FROM raw.src
+`)
+	p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: ID
+SELECT id, upper(name) AS name, price FROM raw.src
+`)
+	r := runModel(t, p, "dim/item.sql")
+	if hasHistoryResetWarning(r.Warnings) {
+		t.Fatalf("key differing only in case reset history: %v", r.Warnings)
+	}
+	if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE NOT is_current"); got != "3" {
+		t.Errorf("closed versions=%s, want 3 (1a10, 1a11, 2b20)", got)
+	}
+}
+
+// TestSCD2_Rebuild_SchemaChangesReachHistory pins what a kept history looks
+// like after a schema change, as documented under SCD2 rebuilds: an added
+// column is NULL in older versions, a dropped column leaves the whole
+// history, and a type change (drop and re-add) empties the column in every
+// closed version.
+func TestSCD2_Rebuild_SchemaChangesReachHistory(t *testing.T) {
+	const std = `-- @kind: scd2
+-- @unique_key: id
+SELECT id, name, price FROM raw.src
+`
+	t.Run("added column", func(t *testing.T) {
+		p := scd2Project(t, std)
+		p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT id, name, price, price * 2 AS dbl FROM raw.src
+`)
+		runModel(t, p, "dim/item.sql")
+		if got := queryVal(t, p, "SELECT COUNT(*) FILTER (WHERE dbl IS NULL) || '/' || COUNT(*) FROM dim.item WHERE NOT is_current"); got != "3/3" {
+			t.Errorf("closed versions with NULL dbl=%s, want 3/3", got)
+		}
+		if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE is_current AND dbl IS NOT NULL"); got != "2" {
+			t.Errorf("current versions with dbl=%s, want 2", got)
+		}
+	})
+	t.Run("dropped column", func(t *testing.T) {
+		p := scd2Project(t, std)
+		p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT id, name FROM raw.src
+`)
+		runModel(t, p, "dim/item.sql")
+		if hasColumn(t, p, "item", "price") {
+			t.Error("dropped column price still in dim.item")
+		}
+		if got := queryVal(t, p, "SELECT COUNT(*) FROM dim.item WHERE NOT is_current"); got != "1" {
+			t.Errorf("closed versions=%s, want 1 (history kept, nothing else changed)", got)
+		}
+	})
+	t.Run("type change", func(t *testing.T) {
+		p := scd2Project(t, std)
+		p.AddModel("dim/item.sql", `-- @kind: scd2
+-- @unique_key: id
+SELECT id, name, price::VARCHAR AS price FROM raw.src
+`)
+		runModel(t, p, "dim/item.sql")
+		if got := queryVal(t, p, "SELECT COUNT(*) FILTER (WHERE price IS NULL) || '/' || COUNT(*) FROM dim.item WHERE NOT is_current"); got != "3/3" {
+			t.Errorf("closed versions with NULL price=%s, want 3/3", got)
+		}
+		if got := queryVal(t, p, "SELECT string_agg(id || ':' || price, ',' ORDER BY id) FROM dim.item WHERE is_current"); got != "1:11,2:20" {
+			t.Errorf("current versions=%s, want 1:11,2:20", got)
+		}
+	})
 }
