@@ -838,7 +838,13 @@ func (r *Runner) materializeSCD2(model *parser.Model, tmpTable string, isBackfil
 			if err != nil {
 				return 0, fmt.Errorf("read previous commit for scd2 time columns: %w", err)
 			}
-			for _, c := range prevColumns(prev) {
+			cols := prevColumns(prev)
+			// Every commit records the model's own columns, the key at least.
+			// Without them there is no telling whose the column is.
+			if len(cols) == 0 {
+				return 0, fmt.Errorf("target %s has scd2 time columns but no recorded model columns to tell whether the model produced them; check the target and drop a column of the model's own named valid_from_at or valid_to_at", model.Target)
+			}
+			for _, c := range cols {
 				if held[strings.ToLower(c.Name)] {
 					return 0, fmt.Errorf("target %s holds a column %q the model produced before it was reserved for the scd2 version timestamps; rename or drop that column", model.Target, c.Name)
 				}
