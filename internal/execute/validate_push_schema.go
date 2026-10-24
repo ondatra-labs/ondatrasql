@@ -69,7 +69,7 @@ func validateStrictPushSchema(ast *duckast.AST, hasLibCalls bool) error {
 	// we still enforce projection rules on the leftmost branch — the
 	// output schema is determined by the leftmost SELECT.
 	if root.IsSetOpNode() {
-		left := root.SetOpLeft()
+		left := root.SetOpFirst()
 		if !left.IsNil() {
 			return validateSelectProjections(left, false /* fetchMode */)
 		}

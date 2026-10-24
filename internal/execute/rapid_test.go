@@ -146,7 +146,7 @@ func TestRapid_BuildCDCSubquery_HasExceptAndVersion(t *testing.T) {
 
 // --- buildEmptyCDCSubquery Properties ---
 
-// Property: Empty CDC subquery always has WHERE false (OPERATOR_CAST + BOOLEAN).
+// Property: Empty CDC subquery always has WHERE false (a BOOLEAN literal).
 func TestRapid_BuildEmptyCDCSubquery_HasWhereFalse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
@@ -162,11 +162,8 @@ func TestRapid_BuildEmptyCDCSubquery_HasWhereFalse(t *testing.T) {
 		bytes, _ := json.Marshal(node)
 		s := string(bytes)
 
-		if !strings.Contains(s, `"OPERATOR_CAST"`) {
-			t.Fatalf("missing OPERATOR_CAST in: %s", s)
-		}
-		if !strings.Contains(s, `"BOOLEAN"`) {
-			t.Fatalf("missing BOOLEAN in: %s", s)
+		if !strings.Contains(s, `"literal":{"kind":"BOOLEAN","text":"false"}`) {
+			t.Fatalf("missing BOOLEAN false literal in: %s", s)
 		}
 	})
 }

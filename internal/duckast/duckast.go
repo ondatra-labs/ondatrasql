@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // AST is a parsed DuckDB SQL statement tree.
@@ -260,6 +262,44 @@ func (n *Node) TableFunctionArgs() []*Node {
 	return fn.Children()
 }
 
+// Argument is one argument of a function call. Name is set for a named
+// argument (`f(x := 1)`) and empty for a positional one.
+type Argument struct {
+	Name string
+	Expr *Node
+}
+
+// Arguments returns the arguments of a FUNCTION or WINDOW node with their
+// names. DuckDB 2.0 lists them under `arguments` as {name, expression}
+// pairs; 1.5 had a bare `children` list, read here as unnamed arguments.
+func (n *Node) Arguments() []Argument {
+	if n.IsNil() {
+		return nil
+	}
+	if arr, ok := n.raw["arguments"].([]any); ok {
+		out := make([]Argument, 0, len(arr))
+		for _, item := range arr {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			expr, _ := m["expression"].(map[string]any)
+			if expr == nil {
+				continue
+			}
+			name, _ := m["name"].(string)
+			out = append(out, Argument{Name: name, Expr: &Node{raw: expr}})
+		}
+		return out
+	}
+	children := n.FieldList("children")
+	out := make([]Argument, 0, len(children))
+	for _, c := range children {
+		out = append(out, Argument{Expr: c})
+	}
+	return out
+}
+
 // ----- SELECT-shape accessors -----
 
 // SelectList returns the projection expressions for SELECT_NODE.
@@ -277,11 +317,32 @@ func (n *Node) Having() *Node { return n.Field("having") }
 // Qualify returns the QUALIFY expression, or nil.
 func (n *Node) Qualify() *Node { return n.Field("qualify") }
 
-// SetOpLeft returns the left side of a SET_OPERATION_NODE.
-func (n *Node) SetOpLeft() *Node { return n.Field("left") }
+// SetOpArms returns the operands of a SET_OPERATION_NODE in order.
+// DuckDB 2.0 lists them under `children` — a chain of the same operation,
+// `a UNION ALL b UNION ALL c`, is one node with three arms — and leaves
+// `left` and `right` null; 1.5 nested binary nodes under `left`/`right`.
+// Reading only `left`/`right` on a 2.0 tree finds no arms at all.
+func (n *Node) SetOpArms() []*Node {
+	if arms := n.FieldList("children"); len(arms) > 0 {
+		return arms
+	}
+	var arms []*Node
+	for _, side := range []*Node{n.Field("left"), n.Field("right")} {
+		if !side.IsNil() {
+			arms = append(arms, side)
+		}
+	}
+	return arms
+}
 
-// SetOpRight returns the right side of a SET_OPERATION_NODE.
-func (n *Node) SetOpRight() *Node { return n.Field("right") }
+// SetOpFirst returns the first arm of a SET_OPERATION_NODE, which names
+// the result's columns.
+func (n *Node) SetOpFirst() *Node {
+	if arms := n.SetOpArms(); len(arms) > 0 {
+		return arms[0]
+	}
+	return nil
+}
 
 // SetOpType returns the kind of set operation (UNION/INTERSECT/EXCEPT).
 func (n *Node) SetOpType() string { return n.String("setop_type") }
@@ -307,8 +368,13 @@ func (n *Node) CTEs() []CTE {
 	for _, entry := range entries {
 		name, _ := entry.raw["key"].(string)
 		value, _ := entry.raw["value"].(map[string]any)
-		query, _ := value["query"].(map[string]any)
-		body, _ := query["node"].(map[string]any)
+		// DuckDB 2.0 puts the body under `query_node`; 1.5 under
+		// `query.node`.
+		body, _ := value["query_node"].(map[string]any)
+		if body == nil {
+			query, _ := value["query"].(map[string]any)
+			body, _ = query["node"].(map[string]any)
+		}
 		if body != nil {
 			var aliases []string
 			if list, ok := value["aliases"].([]any); ok {
@@ -365,6 +431,32 @@ func (n *Node) SchemaName() string { return n.String("schema_name") }
 // CatalogName returns the catalog_name on a BASE_TABLE node.
 func (n *Node) CatalogName() string { return n.String("catalog_name") }
 
+// SetTableRef points a BASE_TABLE node at catalog.schema.table. DuckDB 2.0
+// emits the reference twice, as the separate name fields and as
+// `qualified_name.path`, and json_deserialize_sql reads only the path:
+// changing `catalog_name` alone leaves the rendered SQL unqualified.
+func (n *Node) SetTableRef(catalog, schema, table string) {
+	if n.IsNil() {
+		return
+	}
+	n.raw["catalog_name"] = catalog
+	n.raw["schema_name"] = schema
+	n.raw["table_name"] = table
+	n.raw["qualified_name"] = QualifiedName(catalog, schema, table)
+}
+
+// QualifiedName builds the `qualified_name` field of a 2.0 BASE_TABLE node
+// from its non-empty parts.
+func QualifiedName(parts ...string) map[string]any {
+	path := []any{}
+	for _, p := range parts {
+		if p != "" {
+			path = append(path, p)
+		}
+	}
+	return map[string]any{"path": path}
+}
+
 // FullTableName returns "schema.table" or just "table" if no schema.
 func (n *Node) FullTableName() string {
 	schema := n.SchemaName()
@@ -412,8 +504,136 @@ func (n *Node) FunctionName() string { return n.String("function_name") }
 // (`+`, `-`, etc.) rather than a named function call.
 func (n *Node) IsOperator() bool { return n.Bool("is_operator") }
 
-// Children returns the child expressions (function args, etc.).
-func (n *Node) Children() []*Node { return n.FieldList("children") }
+// Children returns the child expressions: the `children` of an operator or
+// conjunction, or the argument expressions of a function call, which
+// DuckDB 2.0 lists under `arguments` instead.
+func (n *Node) Children() []*Node {
+	if n.IsNil() {
+		return nil
+	}
+	if _, ok := n.raw["arguments"]; ok {
+		args := n.Arguments()
+		out := make([]*Node, 0, len(args))
+		for _, a := range args {
+			out = append(out, a.Expr)
+		}
+		return out
+	}
+	return n.FieldList("children")
+}
+
+// ConstantValue returns the Go value of a CONSTANT node when it is a plain
+// string, integer that fits int64, boolean or NULL; ok is false for
+// anything else (decimals, blobs, huge integers), which a caller has to
+// evaluate through DuckDB. DuckDB 2.0 reports a constant as its literal
+// text and kind, `literal: {kind, text}`; 1.5 as a typed `value`.
+func (n *Node) ConstantValue() (v any, ok bool) {
+	if n.IsNil() || n.Class() != "CONSTANT" {
+		return nil, false
+	}
+	if lit := n.Field("literal"); !lit.IsNil() {
+		text := lit.String("text")
+		switch lit.String("kind") {
+		case "STRING":
+			return text, true
+		case "BOOLEAN":
+			b, err := strconv.ParseBool(text)
+			return b, err == nil
+		case "NULL_LITERAL":
+			return nil, true
+		case "INTEGER":
+			// DuckDB accepts `1_000`; base 10 rather than base 0 so that a
+			// leading zero is not read as octal, as DuckDB does not.
+			i, err := strconv.ParseInt(strings.ReplaceAll(text, "_", ""), 10, 64)
+			if err != nil {
+				return nil, false
+			}
+			return i, true
+		}
+		return nil, false
+	}
+	val := n.Field("value")
+	if val.IsNil() {
+		return nil, false
+	}
+	if val.Bool("is_null") {
+		return nil, true
+	}
+	switch val.Field("type").String("id") {
+	case "VARCHAR", "BOOLEAN", "INTEGER", "BIGINT", "SMALLINT", "TINYINT":
+		v, exists := val.raw["value"]
+		return v, exists
+	}
+	return nil, false
+}
+
+// ConstantText returns the literal text of a CONSTANT node as written —
+// the 2.0 `literal.text`, or the 1.5 `value.value` rendered as a string —
+// and "" when there is none.
+func (n *Node) ConstantText() string {
+	if n.IsNil() {
+		return ""
+	}
+	if lit := n.Field("literal"); !lit.IsNil() {
+		return lit.String("text")
+	}
+	if val := n.Field("value"); !val.IsNil() {
+		if v, ok := val.raw["value"]; ok && v != nil {
+			return fmt.Sprint(v)
+		}
+	}
+	return ""
+}
+
+// ----- Types -----
+
+// TypeRef is the target type of a CAST, as written in the query.
+//
+// Name is the type name upper-cased, as the user wrote it or as DuckDB
+// spells the built-in form: `int4` is "INT4", `int[]` is "LIST",
+// `int[3]` is "ARRAY", `timestamp with time zone` is
+// "TIMESTAMP WITH TIME ZONE". Mapping aliases to canonical types is the
+// caller's business.
+//
+// Params are the constant type modifiers in order (`DECIMAL(10,2)` has
+// "10" and "2", `int[3]` has "3", an ENUM its members). Fields are the
+// nested types: the element of a LIST or ARRAY, the key and value of a
+// MAP, and the named members of a STRUCT or UNION.
+type TypeRef struct {
+	Name   string
+	Params []string
+	Fields []TypeField
+}
+
+// TypeField is one nested type of a TypeRef. Name is set for STRUCT and
+// UNION members.
+type TypeField struct {
+	Name string
+	Type *TypeRef
+}
+
+// CastType returns the target type of a CAST node, or nil when it has
+// none. It reads DuckDB 2.0's `type_expr`, a TYPE node whose children are
+// either nested TYPE nodes or constant modifiers. The 1.5 `cast_type`
+// shape is not read: nothing that still emits it is supported.
+func (n *Node) CastType() *TypeRef {
+	return typeRefOf(n.Field("type_expr"))
+}
+
+func typeRefOf(t *Node) *TypeRef {
+	if t.IsNil() || t.Class() != "TYPE" {
+		return nil
+	}
+	ref := &TypeRef{Name: strings.ToUpper(t.String("type_name"))}
+	for _, c := range t.FieldList("children") {
+		if c.Class() == "TYPE" {
+			ref.Fields = append(ref.Fields, TypeField{Name: c.Alias(), Type: typeRefOf(c)})
+			continue
+		}
+		ref.Params = append(ref.Params, c.ConstantText())
+	}
+	return ref
+}
 
 // Child returns the single child expression for SUBQUERY-class nodes
 // in IN-style comparisons (the LHS being tested).
