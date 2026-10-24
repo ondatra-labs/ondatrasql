@@ -14,6 +14,15 @@ stdout '1 BLOCKER'
 exec ondatrasql run staging.ok
 stdout 'staging.ok'
 
+# A macro is bound when DuckDB creates it, so an arrow in config/macros/
+# stops every run; validate reports it on the macro file.
+cp macro.sql config/macros/arrow_macro.sql
+! exec ondatrasql validate
+stdout 'config/macros/arrow_macro.sql'
+stdout 'BLOCKER parser.lambda_arrow\] a macro has a lambda written as `x -> \.\.\.`'
+! exec ondatrasql run staging.ok
+stderr 'Deprecated lambda arrow'
+
 # With the deprecated syntax switched back on in settings.sql, DuckDB binds
 # the arrow, and validate accepts it.
 cp settings.sql config/settings.sql
@@ -21,6 +30,8 @@ exec ondatrasql validate
 ! stdout 'parser.lambda_arrow'
 exec ondatrasql run staging.arrow
 stdout 'staging.arrow'
+exec ondatrasql run staging.ok
+stdout 'staging.ok'
 
 -- arrow.sql --
 -- @kind: table
@@ -30,3 +41,5 @@ SELECT list_transform([1, 2], x -> x + 1) AS l
 SELECT list_transform([1, 2], lambda x: x + 1) AS l, '{"a": 1}'::JSON -> '$.a' AS j
 -- settings.sql --
 SET lambda_syntax = 'ENABLE_SINGLE_ARROW';
+-- macro.sql --
+CREATE MACRO inc_all(l) AS list_transform(l, x -> x + 1);

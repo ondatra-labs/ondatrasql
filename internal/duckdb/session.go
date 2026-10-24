@@ -1063,12 +1063,32 @@ var macroPrefix = regexp.MustCompile(`(?im)(^\s*CREATE\s+(?:OR\s+REPLACE\s+)?MAC
 // Files may depend on each other in arbitrary chains (a.sql → b.sql → c.sql),
 // so loading iterates until all files succeed or no progress is made.
 func (s *Session) loadMacroDir(dirPath, catalogAlias string) error {
+	failed, lastErr, err := s.loadMacroDirFiles(dirPath, catalogAlias)
+	if err != nil {
+		return err
+	}
+	if len(failed) > 0 {
+		return lastErr
+	}
+	return nil
+}
+
+// LoadMacroDir loads the .sql files in dirPath as the runtime loads
+// config/macros/, and returns the error of every file that still fails once
+// no more progress is made. Used by validate to report a macro file that
+// would stop every run.
+func (s *Session) LoadMacroDir(dirPath, catalogAlias string) (map[string]error, error) {
+	failed, _, err := s.loadMacroDirFiles(dirPath, catalogAlias)
+	return failed, err
+}
+
+func (s *Session) loadMacroDirFiles(dirPath, catalogAlias string) (map[string]error, error, error) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // Directory missing is OK
+			return nil, nil, nil // Directory missing is OK
 		}
-		return fmt.Errorf("read macro dir %s: %w", filepath.Base(dirPath), err)
+		return nil, nil, fmt.Errorf("read macro dir %s: %w", filepath.Base(dirPath), err)
 	}
 
 	var pending []string
@@ -1083,20 +1103,22 @@ func (s *Session) loadMacroDir(dirPath, catalogAlias string) error {
 	// or no progress is made (meaning a real error, not a dependency issue).
 	var lastErr error
 	for len(pending) > 0 {
-		var failed []string
+		failed := map[string]error{}
+		var next []string
 		for _, name := range pending {
 			if err := s.loadMacroFile(filepath.Join(dirPath, name), catalogAlias); err != nil {
-				failed = append(failed, name)
+				failed[name] = err
+				next = append(next, name)
 				lastErr = err
 			}
 		}
-		if len(failed) == len(pending) {
-			// No progress — return the last error
-			return lastErr
+		if len(next) == len(pending) {
+			// No progress — report what is left
+			return failed, lastErr, nil
 		}
-		pending = failed
+		pending = next
 	}
-	return nil
+	return nil, nil, nil
 }
 
 // loadMacroFile reads a SQL file and loads it with memory. prefix on CREATE MACRO.

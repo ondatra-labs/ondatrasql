@@ -6,10 +6,14 @@ package execute
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
+	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 )
 
 // lambdaArgIndex maps each DuckDB function that takes a lambda to the
@@ -24,11 +28,15 @@ var lambdaArgIndex = map[string]int{
 // ArrowLambdaError reports a lambda written `x -> ...`. validate maps it to
 // the parser.lambda_arrow rule.
 type ArrowLambdaError struct {
-	// Function is the lambda-taking function, or "COLUMNS".
+	// Function is the lambda-taking function, "COLUMNS", or "" for a lambda
+	// in a macro body.
 	Function string
 }
 
 func (e *ArrowLambdaError) Error() string {
+	if e.Function == "" {
+		return "a macro has a lambda written as `x -> ...`, which DuckDB 2.0 rejects when the macro is created, so every run fails; write it as `lambda x: ...`"
+	}
 	param := "x"
 	if e.Function == "COLUMNS" {
 		param = "c"
@@ -47,15 +55,14 @@ func (e *ArrowLambdaError) Error() string {
 // decides by position. The arrow is a lambda only in the lambda argument of
 // a lambda-taking function and in COLUMNS(...); in any other argument —
 // list_transform's list, list_reduce's initial value — it is JSON.
-func validateNoArrowLambda(ast *duckast.AST) error {
-	var found error
+// Every arrow lambda in the model is reported, not just the first.
+func validateNoArrowLambda(ast *duckast.AST) []error {
+	var found []error
 	isArrow := func(n *duckast.Node) bool {
 		return n.Class() == "LAMBDA" && n.String("syntax_type") == "SINGLE_ARROW"
 	}
-	ast.Walk(func(n *duckast.Node) bool {
-		if found != nil {
-			return false
-		}
+	var visit func(n *duckast.Node) bool
+	visit = func(n *duckast.Node) bool {
 		switch {
 		case n.Class() == "FUNCTION":
 			at, ok := lambdaArgIndex[strings.ToLower(n.FunctionName())]
@@ -63,29 +70,94 @@ func validateNoArrowLambda(ast *duckast.AST) error {
 				break
 			}
 			if args := n.Children(); at < len(args) && isArrow(args[at]) {
-				found = &ArrowLambdaError{Function: n.FunctionName()}
+				found = append(found, &ArrowLambdaError{Function: n.FunctionName()})
 			}
-		case n.Class() == "STAR" && n.Bool("columns") && isArrow(n.Field("expr")):
-			found = &ArrowLambdaError{Function: "COLUMNS"}
+		case n.Class() == "STAR" && n.Bool("columns"):
+			// DuckDB 2.0 serializes COLUMNS(c -> ...) as a STAR whose expr
+			// is list_filter(*, <lambda>). Report it as COLUMNS, then look
+			// only inside the lambda, so the list_filter is not reported a
+			// second time.
+			expr := n.Field("expr")
+			lambda := expr
+			if expr.Class() == "FUNCTION" && strings.EqualFold(expr.FunctionName(), "list_filter") {
+				if args := expr.Children(); len(args) == 2 {
+					lambda = args[1]
+				}
+			}
+			if isArrow(lambda) {
+				found = append(found, &ArrowLambdaError{Function: "COLUMNS"})
+			}
+			if lambda != expr {
+				lambda.Walk(func(inner *duckast.Node) bool { return visit(inner) })
+				return false
+			}
 		}
-		return found == nil
-	})
+		return true
+	}
+	ast.Walk(visit)
 	return found
 }
 
-// lambdaSyntaxRe matches a SET or RESET of lambda_syntax.
-var lambdaSyntaxRe = regexp.MustCompile(`(?is)\b(?:(reset)\s+(?:(?:global|session|local)\s+)?lambda_syntax\b|lambda_syntax\s*(?:=|\bto\b)\s*'([^']*)')`)
+// ProjectLambdas is what a project's config says about arrow lambdas.
+type ProjectLambdas struct {
+	// SingleArrow is set when config/settings.sql leaves lambda_syntax at
+	// ENABLE_SINGLE_ARROW, under which DuckDB 2.0 still binds `x -> ...`.
+	SingleArrow bool
+	// Macros maps each file in config/macros/ that DuckDB rejects for an
+	// arrow lambda to the error. DuckDB 2.0 binds a macro body when the
+	// macro is created, so such a file stops every run at session start.
+	Macros map[string]error
+}
 
-// sqlCommentRe matches SQL line and block comments.
-var sqlCommentRe = regexp.MustCompile(`(?s)--[^\n]*|/\*.*?\*/`)
+// catalogAliasRe reads the DuckLake alias from catalog.sql's ATTACH.
+var catalogAliasRe = regexp.MustCompile(`(?is)\bATTACH\b.*?\bAS\s+"?([A-Za-z_][A-Za-z0-9_]*)"?`)
 
-// SingleArrowLambdasEnabled reports whether settings SQL (config/settings.sql)
-// leaves `SET lambda_syntax = 'ENABLE_SINGLE_ARROW'` in effect, under which
-// DuckDB 2.0 still binds `x -> ...` lambdas. The last SET or RESET wins.
-func SingleArrowLambdasEnabled(settingsSQL string) bool {
-	enabled := false
-	for _, m := range lambdaSyntaxRe.FindAllStringSubmatch(sqlCommentRe.ReplaceAllString(settingsSQL, " "), -1) {
-		enabled = m[1] == "" && strings.EqualFold(strings.TrimSpace(m[2]), "ENABLE_SINGLE_ARROW")
+// InspectProjectLambdas answers both questions the way the runtime would:
+// it runs config/settings.sql, env-expanded, in a scratch DuckDB session and
+// reads lambda_syntax back — so every spelling DuckDB accepts counts and a
+// commented-out or quoted-away SET does not — and then loads config/macros/
+// as InitWithCatalog does. The lake is not attached; an empty catalog under
+// its alias stands in for {{catalog}} references.
+func InspectProjectLambdas(configPath string) (ProjectLambdas, error) {
+	var out ProjectLambdas
+	sess, err := duckdb.NewSession(":memory:")
+	if err != nil {
+		return out, err
 	}
-	return enabled
+	defer func() { _ = sess.Close() }() // scratch session
+
+	if content, err := os.ReadFile(filepath.Join(configPath, "settings.sql")); err == nil && len(content) > 0 {
+		settings, unset := configenv.Expand(string(content))
+		if err := sess.Exec(settings); err != nil {
+			return out, configenv.Annotate(fmt.Errorf("load settings.sql: %w", err), unset)
+		}
+	}
+	syntax, err := sess.QueryValue("SELECT current_setting('lambda_syntax')")
+	if err != nil {
+		return out, fmt.Errorf("read lambda_syntax: %w", err)
+	}
+	out.SingleArrow = strings.EqualFold(syntax, "ENABLE_SINGLE_ARROW")
+
+	alias := "lake"
+	if content, err := os.ReadFile(filepath.Join(configPath, "catalog.sql")); err == nil {
+		if m := catalogAliasRe.FindStringSubmatch(string(content)); m != nil {
+			alias = m[1]
+		}
+	}
+	if err := sess.Exec("ATTACH ':memory:' AS " + duckdb.QuoteIdentifier(alias)); err != nil {
+		return out, fmt.Errorf("attach stand-in catalog: %w", err)
+	}
+	failed, err := sess.LoadMacroDir(filepath.Join(configPath, "macros"), alias)
+	if err != nil {
+		return out, err
+	}
+	for name, ferr := range failed {
+		if strings.Contains(ferr.Error(), "Deprecated lambda arrow") {
+			if out.Macros == nil {
+				out.Macros = map[string]error{}
+			}
+			out.Macros[name] = &ArrowLambdaError{}
+		}
+	}
+	return out, nil
 }

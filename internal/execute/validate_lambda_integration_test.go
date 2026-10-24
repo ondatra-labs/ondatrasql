@@ -7,7 +7,9 @@
 package execute
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -50,7 +52,7 @@ func TestValidateNoArrowLambda(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: parse AST: %v", tt.sql, err)
 		}
-		if got := validateNoArrowLambda(ast) != nil; got != tt.reject {
+		if got := len(validateNoArrowLambda(ast)) > 0; got != tt.reject {
 			t.Errorf("%s: rejected=%v, want %v", tt.sql, got, tt.reject)
 		}
 		// DuckDB's own verdict: the run fails on the deprecated arrow exactly
@@ -62,6 +64,27 @@ func TestValidateNoArrowLambda(t *testing.T) {
 		if arrowErr != tt.reject {
 			t.Errorf("%s: DuckDB run error = %v, but the case expects rejected=%v", tt.sql, runErr, tt.reject)
 		}
+	}
+}
+
+// Every arrow in a model is reported, each naming its function.
+func TestValidateNoArrowLambda_ReportsEveryArrow(t *testing.T) {
+	p := testutil.NewProject(t)
+	astJSON, err := lineage.GetAST(p.Sess, "SELECT list_transform([1], x -> x), list_filter([1], lambda y: y > 0), list_reduce([1], (a, b) -> a + b), COLUMNS(c -> true) FROM (SELECT 1 AS a)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast, err := duckast.Parse(astJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range validateNoArrowLambda(ast) {
+		got = append(got, e.(*ArrowLambdaError).Function)
+	}
+	sort.Strings(got)
+	if want := []string{"COLUMNS", "list_reduce", "list_transform"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("reported %v, want %v", got, want)
 	}
 }
 
@@ -91,26 +114,64 @@ func TestLambdaFunctions_MatchDuckDB(t *testing.T) {
 	}
 }
 
-func TestSingleArrowLambdasEnabled(t *testing.T) {
+// lambda_syntax is read back from DuckDB after running settings.sql, so every
+// spelling DuckDB accepts counts, and so does ${VAR} expansion.
+func TestInspectProjectLambdas_Settings(t *testing.T) {
+	t.Setenv("ONDATRA_TEST_LAMBDA_SYNTAX", "ENABLE_SINGLE_ARROW")
 	for settings, want := range map[string]bool{
 		"":                 false,
 		"SET threads = 4;": false,
-		"SET lambda_syntax = 'ENABLE_SINGLE_ARROW';":                       true,
-		"set GLOBAL lambda_syntax TO 'enable_single_arrow'":                true,
-		"SET lambda_syntax = 'DISABLE_SINGLE_ARROW';":                      false,
-		"-- SET lambda_syntax = 'ENABLE_SINGLE_ARROW';":                    false,
-		"SET lambda_syntax = 'ENABLE_SINGLE_ARROW';\nRESET lambda_syntax;": false,
+		"SET lambda_syntax = 'ENABLE_SINGLE_ARROW';":           true,
+		"SET lambda_syntax = ENABLE_SINGLE_ARROW;":             true,
+		`SET lambda_syntax = "ENABLE_SINGLE_ARROW";`:           true,
+		"SET GLOBAL lambda_syntax TO 'enable_single_arrow';":   true,
+		"PRAGMA lambda_syntax = 'ENABLE_SINGLE_ARROW';":        true,
+		"SET lambda_syntax = '${ONDATRA_TEST_LAMBDA_SYNTAX}';": true,
+		// A -- inside a string is not a comment.
+		"SET VARIABLE note = 'a -- b'; SET lambda_syntax = 'ENABLE_SINGLE_ARROW';": true,
+		"-- SET lambda_syntax = 'ENABLE_SINGLE_ARROW';":                                false,
+		"SET lambda_syntax = 'DISABLE_SINGLE_ARROW';":                                  false,
+		"SET lambda_syntax = 'ENABLE_SINGLE_ARROW';\nRESET lambda_syntax;":             false,
 	} {
-		if got := SingleArrowLambdasEnabled(settings); got != want {
-			t.Errorf("SingleArrowLambdasEnabled(%q) = %v, want %v", settings, got, want)
+		dir := t.TempDir()
+		testutil.WriteFile(t, dir, "settings.sql", settings)
+		got, err := InspectProjectLambdas(dir)
+		if err != nil {
+			t.Errorf("%q: %v", settings, err)
+			continue
+		}
+		if got.SingleArrow != want {
+			t.Errorf("%q: SingleArrow = %v, want %v", settings, got.SingleArrow, want)
 		}
 	}
-	// What the regex reads as enabled, DuckDB has to accept the arrow under.
-	p := testutil.NewProject(t)
-	if err := p.Sess.Exec("SET lambda_syntax = 'ENABLE_SINGLE_ARROW'"); err != nil {
+}
+
+// A macro with an arrow lambda fails when DuckDB 2.0 creates it, which stops
+// every run; one with the lambda keyword, or under ENABLE_SINGLE_ARROW, loads.
+func TestInspectProjectLambdas_Macros(t *testing.T) {
+	dir := t.TempDir()
+	testutil.WriteFile(t, dir, "catalog.sql", "ATTACH 'ducklake:sqlite:x.sqlite' AS mylake (DATA_PATH 'x');\n")
+	testutil.WriteFile(t, dir, "macros/arrow.sql", "CREATE MACRO inc_all(l) AS list_transform(l, x -> x + 1);\n")
+	testutil.WriteFile(t, dir, "macros/keyword.sql", "CREATE MACRO inc_all2(l) AS list_transform(l, lambda x: x + 1);\n")
+	testutil.WriteFile(t, dir, "macros/catalog_ref.sql", "CREATE MACRO n() AS TABLE SELECT 1 AS v FROM (SELECT list_transform([1], lambda x: x)) t;\n")
+	got, err := InspectProjectLambdas(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Sess.QueryValue("SELECT list_transform([1], x -> x + 1)"); err != nil {
-		t.Errorf("ENABLE_SINGLE_ARROW: the arrow still fails: %v", err)
+	if len(got.Macros) != 1 || got.Macros["arrow.sql"] == nil {
+		t.Errorf("Macros = %v, want only arrow.sql", got.Macros)
+	}
+	var arrow *ArrowLambdaError
+	if !errors.As(got.Macros["arrow.sql"], &arrow) {
+		t.Errorf("arrow.sql: %v is not an *ArrowLambdaError", got.Macros["arrow.sql"])
+	}
+
+	testutil.WriteFile(t, dir, "settings.sql", "SET lambda_syntax = 'ENABLE_SINGLE_ARROW';\n")
+	got, err = InspectProjectLambdas(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Macros) != 0 {
+		t.Errorf("under ENABLE_SINGLE_ARROW: Macros = %v, want none", got.Macros)
 	}
 }

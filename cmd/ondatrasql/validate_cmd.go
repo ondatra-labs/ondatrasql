@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/config"
@@ -346,12 +347,45 @@ func runValidatePipeline(cfg *config.Config, opts *validateOpts) (*validate.Repo
 		})
 	}
 
+	// Arrow lambdas: whether settings.sql switches the deprecated syntax back
+	// on, and which macro files DuckDB rejects for one. Both are answered by
+	// running the config as the runtime does, once per validate run.
+	var staticOpts execute.StaticOptions
+	lambdas, lambdasErr := execute.InspectProjectLambdas(cfg.ConfigPath)
+	if lambdasErr != nil {
+		// The runtime runs the same config first, so this fails the run.
+		report.AddFile(validate.FileResult{
+			Path:   "config",
+			Status: "fail",
+			Findings: []validate.Finding{validate.NewFinding("config", 0,
+				validate.RuleParserOther,
+				fmt.Sprintf("cannot load the project config to check lambdas: %v", lambdasErr))},
+		})
+	}
+	staticOpts.SingleArrowLambdas = lambdas.SingleArrow
+	if len(opts.paths) == 0 {
+		names := make([]string, 0, len(lambdas.Macros))
+		for name := range lambdas.Macros {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			rel := filepath.Join("config", "macros", name)
+			report.AddFile(validate.FileResult{
+				Path:     rel,
+				Status:   "fail",
+				Checks:   map[string]string{"parser": "fail"},
+				Findings: []validate.Finding{validate.NewFinding(rel, 0, validate.RuleParserLambdaArrow, lambdas.Macros[name].Error())},
+			})
+		}
+	}
+
 	models := make(map[string]*parser.Model)
 	// Track which file each target came from so duplicate-target
 	// collisions can be reported on both files.
 	targetSource := make(map[string]string)
 	for _, path := range files {
-		fr := validateFile(sess, reg, builtins, scanErrs, builtinsUnreliable, cfg.ProjectDir, path)
+		fr := validateFile(sess, reg, builtins, scanErrs, builtinsUnreliable, staticOpts, cfg.ProjectDir, path)
 		// Stash successfully-parsed models for the DAG pass.
 		if strings.HasSuffix(path, ".sql") && fr.Checks["parser"] == "ok" {
 			if model, err := parser.ParseModel(path, cfg.ProjectDir); err == nil {
@@ -926,7 +960,7 @@ func safeResolveSymlink(projectDir, path string) (string, error) {
 
 // validateFile runs all applicable validators against a single file and
 // returns a FileResult tagged with check statuses + findings.
-func validateFile(sess *duckdb.Session, reg *libregistry.Registry, builtins map[string]bool, scanErrs map[string]error, builtinsUnreliable bool, projectDir, path string) validate.FileResult {
+func validateFile(sess *duckdb.Session, reg *libregistry.Registry, builtins map[string]bool, scanErrs map[string]error, builtinsUnreliable bool, staticOpts execute.StaticOptions, projectDir, path string) validate.FileResult {
 	rel, _ := filepath.Rel(projectDir, path)
 	fr := validate.FileResult{
 		Path:   rel,
@@ -937,7 +971,7 @@ func validateFile(sess *duckdb.Session, reg *libregistry.Registry, builtins map[
 	if strings.HasSuffix(path, ".star") {
 		validateBlueprintFile(reg, &fr, projectDir, path)
 	} else {
-		validateModelFile(sess, reg, builtins, scanErrs, builtinsUnreliable, &fr, projectDir, path)
+		validateModelFile(sess, reg, builtins, scanErrs, builtinsUnreliable, staticOpts, &fr, projectDir, path)
 	}
 
 	if len(fr.Findings) > 0 {
@@ -947,7 +981,7 @@ func validateFile(sess *duckdb.Session, reg *libregistry.Registry, builtins map[
 }
 
 // validateModelFile runs the SQL model validators on a single model.
-func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins map[string]bool, scanErrs map[string]error, builtinsUnreliable bool, fr *validate.FileResult, projectDir, path string) {
+func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins map[string]bool, scanErrs map[string]error, builtinsUnreliable bool, staticOpts execute.StaticOptions, fr *validate.FileResult, projectDir, path string) {
 	model, err := parser.ParseModel(path, projectDir)
 	if err != nil {
 		fr.Checks["parser"] = "fail"
@@ -980,11 +1014,7 @@ func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins
 		return
 	}
 
-	var opts execute.StaticOptions
-	if settings, err := os.ReadFile(filepath.Join(projectDir, "config", "settings.sql")); err == nil {
-		opts.SingleArrowLambdas = execute.SingleArrowLambdasEnabled(string(settings))
-	}
-	results := execute.ValidateModelStatic(model, astJSON, calls, opts)
+	results := execute.ValidateModelStatic(model, astJSON, calls, staticOpts)
 	for _, r := range results {
 		fr.Checks[normalizeCheckName(r.Category)] = "fail"
 		fr.Findings = append(fr.Findings, mapStaticValidatorError(fr.Path, r))
@@ -1057,16 +1087,10 @@ func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins
 	// real typo across every model whenever extensions.sql or
 	// duckdb_functions() had a hiccup. The validate.* WARN findings
 	// already tell the user the run was degraded.
-	parsedAST, parseErr := duckast.Parse(astJSON)
-	if parseErr != nil {
-		// Surface the parse failure as a finding rather than silently
-		// turning the unknown-lib check into dead code: with a nil AST
-		// AllTableFunctionNames returns an empty slice, so typos like
-		// `FROM gam_repor()` would silently pass validation.
-		fr.Findings = append(fr.Findings, validate.NewFinding(fr.Path, 0,
-			validate.RuleValidateLineageExtractFailed,
-			fmt.Sprintf("AST parse failed; cross-AST unknown-lib check skipped: %v", parseErr)))
-	}
+	// A parse failure is already a BLOCKER from ValidateModelStatic, as it
+	// fails the run; with a nil AST the unknown-lib check below has nothing
+	// to check.
+	parsedAST, _ := duckast.Parse(astJSON)
 	for _, name := range libcall.AllTableFunctionNames(parsedAST) {
 		if reg.Get(name) != nil || builtins[name] {
 			continue
