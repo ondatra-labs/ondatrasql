@@ -191,10 +191,10 @@ func TestDuckDB2_ConstantString(t *testing.T) {
 		{"1000", true},
 		{"-5", true},
 		{"true", true},
-		{"", true}, // NULL
-		{"", false}, // 1.5 is a decimal: left to DuckDB
-		{"", false}, // does not fit BIGINT
-		{"", false}, // blob
+		{"", true},   // NULL
+		{"", false},  // 1.5 is a decimal: left to DuckDB
+		{"", false},  // does not fit BIGINT
+		{"", false},  // blob
 		{"10", true}, // 010 is ten, not octal eight
 	}
 	if len(list) != len(want) {
