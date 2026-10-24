@@ -100,6 +100,13 @@ bugcheck-static:
 		--include=*.sql --include=*.go internal cmd e2e \
 		| grep -vE '^\S*:[0-9]*:\s*(//|--)' \
 		|| (echo "bugcheck-static: lambda written as x -> ..., use lambda x: ... (see sql-lambda-arrow)"; exit 1)
+	@# ducklake-automatic-migration: an ATTACH with AUTOMATIC_MIGRATION. DuckDB
+	@# 2.0's ducklake opens a 1.5-created catalog (version 1.0) as is and keeps
+	@# it at 1.0, so 1.5 can still read it; AUTOMATIC_MIGRATION upgrades it in
+	@# place, after which 1.5 refuses to attach it at all. The catalog has to
+	@# stay readable by 1.5.
+	@! grep -rniE 'automatic_migration' --include=*.go --include=*.sql --include=*.txtar internal cmd e2e \
+		|| (echo "bugcheck-static: AUTOMATIC_MIGRATION would upgrade the catalog past 1.5 (see ducklake-automatic-migration)"; exit 1)
 	@echo "bugcheck-static: clean"
 
 build:

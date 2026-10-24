@@ -26,14 +26,19 @@ import (
 
 // setupPostgres starts a PostgreSQL container and returns a project directory
 // configured to use it as the DuckLake catalog backend.
-func setupPostgres(t *testing.T) (projectDir string, connStr string) {
+// requireDocker skips a Postgres test on a machine without Docker. Without
+// it testcontainers panics, which takes down every e2e test after this one.
+// In CI the container is required and a missing Docker stays a failure.
+func requireDocker(t *testing.T) {
 	t.Helper()
-	// Without Docker, testcontainers panics, which takes down every e2e test
-	// after this one. Skip on a machine without Docker; in CI the container
-	// is required and a missing Docker stays a failure.
 	if os.Getenv("CI") == "" {
 		testcontainers.SkipIfProviderIsNotHealthy(t)
 	}
+}
+
+func setupPostgres(t *testing.T) (projectDir string, connStr string) {
+	t.Helper()
+	requireDocker(t)
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,
@@ -253,6 +258,7 @@ func TestPostgres_Sandbox(t *testing.T) {
 // a cryptic pq error. After the fix, it produces the same friendly message
 // as the sqlite path (Bug S15): "sandbox needs an existing prod catalog..."
 func TestPostgres_SandboxMissingProdDB(t *testing.T) {
+	requireDocker(t)
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,
