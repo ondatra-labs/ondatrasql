@@ -69,7 +69,10 @@ def fetch(resource, page_size="", page=None):
 		"argsapi('items', size => 5)":           `no parameter named "size"`,
 		"argsapi('items', resource => 'other')": `"resource" is given more than once`,
 		"argsapi(page_size => 5, 'items')":      "positional argument 2 follows a named argument",
-		"argsapi('items', 5, 6)":                "passes 3 arguments but the blueprint declares only 2",
+		// limit is a keyword, so this does not parse: the run fails on the
+		// AST instead of falling back to the SQL text.
+		"argsapi('items', limit => 5)": "cannot read the model's AST",
+		"argsapi('items', 5, 6)":       "passes 3 arguments but the blueprint declares only 2",
 	} {
 		p.AddModel("raw/args.sql", "-- @kind: table\n-- @fetch\nSELECT q::VARCHAR AS q FROM "+sql+"\n")
 		_, err := runModelWithLibErr(t, p, "raw/args.sql")

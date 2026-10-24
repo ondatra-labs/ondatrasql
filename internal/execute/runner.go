@@ -418,23 +418,22 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 	// Auto-detect tables and column lineage from SQL (single AST query)
 	stepStart = time.Now()
 	astJSON, astErr := r.getAST(model.SQL)
-	if astErr != nil {
-		// Surface AST serialization failures so degraded lib-call /
-		// CDC / lineage paths are at least visible to the operator.
-		// Materialization itself still proceeds — DuckDB will surface
-		// a clearer error if the SQL is genuinely broken — but a
-		// transient json_serialize_sql hiccup would otherwise silently
-		// disable AST-driven validators and lineage capture.
-		result.Warnings = append(result.Warnings, fmt.Sprintf("AST serialize failed (lineage/CDC degraded): %v", astErr))
-	}
-
 	// Parse the AST once for cross-cutting validators and downstream uses.
-	// Parse failures are non-fatal here — DuckDB will surface a clearer
-	// error when the model actually executes. Validators tolerate nil AST.
-	parsedAST, parseErr := duckast.Parse(astJSON)
-	if parseErr != nil && astErr == nil {
-		// Don't double-report when the upstream serialise already failed.
-		result.Warnings = append(result.Warnings, fmt.Sprintf("AST parse failed (lineage/CDC degraded): %v", parseErr))
+	var parsedAST *duckast.AST
+	if astErr == nil {
+		parsedAST, astErr = duckast.Parse(astJSON)
+	}
+	if astErr != nil {
+		// Fatal, not a warning. Every model needs the AST: the LIMIT/OFFSET
+		// rule below applies to every kind, @fetch and @push validate their
+		// projections from it, and CDC reads the model's sources from it.
+		// With no AST each of those passed vacuously — the strict checks
+		// returned nil, and an append model with "no sources" skipped CDC and
+		// re-appended its whole source on every run.
+		err := fmt.Errorf("%s: cannot read the model's AST, which lineage, CDC and the strict checks need: %w", model.Target, astErr)
+		result.Errors = append(result.Errors, err.Error())
+		result.Duration = time.Since(start)
+		return result, err
 	}
 
 	// Cross-cutting parser rule: pipeline models must not contain LIMIT or
@@ -937,18 +936,38 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 				var rewriteASTErr error
 				astJSON, rewriteASTErr = r.getAST(state.Current())
 				if rewriteASTErr != nil {
-					// Post-rewrite AST drives lineage + CDC. A failure
-					// here silently strips column lineage from the
-					// downstream impact analysis — surface it.
-					result.Warnings = append(result.Warnings, fmt.Sprintf("post-rewrite AST serialize failed (lineage/CDC degraded): %v", rewriteASTErr))
+					// Post-rewrite AST drives lineage + CDC; without it the
+					// model would read as having no sources and skip CDC.
+					err := fmt.Errorf("%s: cannot read the AST after the lib-call rewrite: %w", model.Target, rewriteASTErr)
+					result.Errors = append(result.Errors, err.Error())
+					result.Duration = time.Since(start)
+					return result, err
 				}
 			}
 	}  // end if r.libRegistry != nil
 	// state.Rewritten() is now the post-lib-rewrite SQL — used as retry target
 	// when CDC must be reverted.
 
-	tables, _ := lineage.ExtractTablesFromAST(astJSON)
-	colLineage, _ := lineage.ExtractFromASTWithColumns(astJSON, lineage.SessionColumns(r.sess))
+	// The model's sources decide CDC. Failing to read them is never "no
+	// sources": that would skip CDC and append the whole source again.
+	tables, tablesErr := lineage.ExtractTablesFromAST(astJSON)
+	if tablesErr != nil {
+		err := fmt.Errorf("%s: cannot read the model's source tables: %w", model.Target, tablesErr)
+		result.Errors = append(result.Errors, err.Error())
+		result.Duration = time.Since(start)
+		return result, err
+	}
+	colLineage, colLineageErr := lineage.ExtractFromASTWithColumns(astJSON, lineage.SessionColumns(r.sess))
+	if colLineageErr != nil {
+		if model.Kind == "append" || model.Kind == "merge" {
+			// Column lineage tells CDC which joined sources are aggregated.
+			err := fmt.Errorf("%s: cannot read the model's column lineage, which CDC needs: %w", model.Target, colLineageErr)
+			result.Errors = append(result.Errors, err.Error())
+			result.Duration = time.Since(start)
+			return result, err
+		}
+		result.Warnings = append(result.Warnings, fmt.Sprintf("column lineage unavailable: %v", colLineageErr))
+	}
 
 	// Determine which tables need CDC:
 	// 1. Primary table (first FROM) always gets CDC
