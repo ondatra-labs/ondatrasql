@@ -14,8 +14,14 @@ package backfill
 // forcing a rebuild. Being wrong that way costs a needless rebuild; being
 // wrong the other way serves stale data.
 //
-// The 74 names were classified against duckdb_settings(). The embedded DuckDB
-// currently exposes 166 settings, so this covers a little under half of them.
+// The 70 names were classified against duckdb_settings(). The embedded DuckDB
+// currently exposes 167 settings, so this covers a little under half of them.
+// DuckDB 2.0 removed seven names that were listed under 1.5: the profiling
+// and HTTP-logging ones map to their 2.0 successors (custom_profiling_settings
+// to tracked_metrics, profiling_mode to profiling_renderer_settings,
+// enable_http_logging and http_logging_output to the general logger plus
+// redact_http_logs), and enable_caching_operators, enable_object_cache and
+// vacuum_rebuild_indexes are gone without one.
 // TestInertDuckDBSettings_ExistUpstream pins that every name here still exists
 // in the embedded build — a rename upstream would otherwise silently un-list a
 // setting and nobody would notice, because the fallback is the safe direction.
@@ -78,9 +84,7 @@ var inertDuckDBSettings = map[string]bool{
 	"disable_parquet_prefetching":  true,
 	"prefetch_all_parquet_files":   true,
 	"storage_block_prefetch":       true,
-	"enable_caching_operators":     true,
 	"enable_fsst_vectors":          true,
-	"enable_object_cache":          true,
 
 	// Checkpoint, WAL and write buffering: when data is flushed, not what it is.
 	"checkpoint_threshold":                true,
@@ -88,7 +92,6 @@ var inertDuckDBSettings = map[string]bool{
 	"wal_autocheckpoint_entries":          true,
 	"auto_checkpoint_skip_wal_threshold":  true,
 	"max_vacuum_tasks":                    true,
-	"vacuum_rebuild_indexes":              true,
 	"write_buffer_row_group_count":        true,
 	"write_buffer_row_group_memory_limit": true,
 	"partitioned_write_flush_threshold":   true,
@@ -97,29 +100,28 @@ var inertDuckDBSettings = map[string]bool{
 	"immediate_transaction_mode":          true,
 
 	// Profiling, logging and progress reporting: observability only.
-	"enable_profiling":          true,
-	"profiling_mode":            true,
-	"profiling_coverage":        true,
-	"profile_output":            true,
-	"profiling_output":          true,
-	"custom_profiling_settings": true,
-	"explain_output":            true,
-	"enable_progress_bar":       true,
-	"enable_progress_bar_print": true,
-	"progress_bar_time":         true,
-	"enable_logging":            true,
-	"logging_level":             true,
-	"logging_mode":              true,
-	"logging_storage":           true,
-	"enabled_log_types":         true,
-	"disabled_log_types":        true,
-	"log_query_path":            true,
-	"enable_http_logging":       true,
-	"http_logging_output":       true,
-	"duckdb_api":                true,
-	"custom_user_agent":         true,
-	"errors_as_json":            true,
-	"catalog_error_max_schemas": true,
+	"enable_profiling":            true,
+	"profiling_renderer_settings": true,
+	"profiling_coverage":          true,
+	"profile_output":              true,
+	"profiling_output":            true,
+	"tracked_metrics":             true,
+	"explain_output":              true,
+	"enable_progress_bar":         true,
+	"enable_progress_bar_print":   true,
+	"progress_bar_time":           true,
+	"enable_logging":              true,
+	"logging_level":               true,
+	"logging_mode":                true,
+	"logging_storage":             true,
+	"enabled_log_types":           true,
+	"disabled_log_types":          true,
+	"log_query_path":              true,
+	"redact_http_logs":            true,
+	"duckdb_api":                  true,
+	"custom_user_agent":           true,
+	"errors_as_json":              true,
+	"catalog_error_max_schemas":   true,
 
 	// Legacy no-ops: DuckDB documents these as ignored.
 	"user":                     true,
