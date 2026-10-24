@@ -735,8 +735,10 @@ func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 				}
 			}
 		}
+		// A set operation with no arms has columns nobody can name; report
+		// it as unknown rather than as a query that produces none.
 		if len(armCols) == 0 {
-			return nil
+			return unexpandedStar()
 		}
 		matchByName := strings.HasSuffix(n.SetOpType(), "_BY_NAME")
 		merged := armCols[0]
@@ -1477,13 +1479,7 @@ func findPrimaryBaseTable(stmt *duckast.Node, parentScope map[string]bool) *duck
 	}
 	// Descend through the first arm of each SET_OPERATION_NODE to the leftmost SELECT-shaped
 	// branch — the "primary" of `A UNION B` is whatever A's primary is.
-	n := stmt
-	for isSetOp(n) {
-		n = n.SetOpFirst()
-		if n.IsNil() {
-			return nil
-		}
-	}
+	n := stmt.FirstSelect()
 	if !n.IsSelectNode() {
 		return nil
 	}

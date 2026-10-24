@@ -21,6 +21,9 @@
 package libcall
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
@@ -39,9 +42,12 @@ type Call struct {
 	// Lib is the registry entry matched by FuncName. Never nil for
 	// values returned from Detect.
 	Lib *libregistry.LibFunc
-	// ArgNodes holds the raw AST argument expressions. Order matches
-	// declaration order in the SQL FROM clause.
-	ArgNodes []*duckast.Node
+	// Args holds the AST arguments in the order the SQL FROM clause passes
+	// them, each with its name when passed by name (`f(limit => 5)`).
+	// BindArgs maps them onto Lib.Args.
+	Args []duckast.Argument
+	// ArgsErr is set when the arguments could not be read from the AST.
+	ArgsErr error
 	// ASTNode is the TABLE_FUNCTION node itself. Used for AST rewriting
 	// during runtime materialization.
 	ASTNode *duckast.Node
@@ -71,11 +77,13 @@ func Detect(ast *duckast.AST, reg *libregistry.Registry) []Call {
 		if lf == nil || lf.IsSink {
 			return true
 		}
+		args, argsErr := n.TableFunctionArgs()
 		calls = append(calls, Call{
 			FuncName:  name,
 			CallIndex: callIndex,
 			Lib:       lf,
-			ArgNodes:  n.TableFunctionArgs(),
+			Args:      args,
+			ArgsErr:   argsErr,
 			ASTNode:   n,
 		})
 		callIndex++
@@ -170,4 +178,62 @@ func BuiltinTableFunctions(sess *duckdb.Session) (map[string]bool, error) {
 		}
 	}
 	return out, nil
+}
+
+// BindArgs maps the arguments of a lib call onto the parameter names the
+// blueprint declares in Lib.Args: positional arguments in order, named ones
+// (`f(limit => 5)`) by name, compared case-insensitively. It returns the
+// parameter name of each argument, index for index.
+//
+// An argument that cannot be bound is an error, never dropped: a name the
+// blueprint does not declare, a parameter given twice, more positional
+// arguments than parameters, or a positional argument after a named one.
+// Binding by position alone used to hand `f(limit => 5, 'k')` the 5 as the
+// first parameter, whatever it was called.
+func (c *Call) BindArgs() ([]string, error) {
+	if c.ArgsErr != nil {
+		return nil, c.ArgsErr
+	}
+	names := make([]string, len(c.Args))
+	for i, a := range c.Args {
+		names[i] = a.Name
+	}
+	return BindArgNames(c.FuncName, c.Lib.Args, names)
+}
+
+// BindArgNames is BindArgs over the argument names alone ("" for a
+// positional argument), for callers that read the arguments from SQL text.
+func BindArgNames(funcName string, params, names []string) ([]string, error) {
+	bound := make([]string, len(names))
+	taken := make(map[string]bool, len(params))
+	sawNamed := false
+	for i, name := range names {
+		if name == "" {
+			if sawNamed {
+				return nil, fmt.Errorf("%s: positional argument %d follows a named argument", funcName, i+1)
+			}
+			if i >= len(params) {
+				return nil, fmt.Errorf("%s: passes %d arguments but the blueprint declares only %d (%s)",
+					funcName, len(names), len(params), strings.Join(params, ", "))
+			}
+			bound[i] = params[i]
+		} else {
+			sawNamed = true
+			for _, p := range params {
+				if strings.EqualFold(p, name) {
+					bound[i] = p
+					break
+				}
+			}
+			if bound[i] == "" {
+				return nil, fmt.Errorf("%s: no parameter named %q; the blueprint declares %s",
+					funcName, name, strings.Join(params, ", "))
+			}
+		}
+		if taken[bound[i]] {
+			return nil, fmt.Errorf("%s: parameter %q is given more than once", funcName, bound[i])
+		}
+		taken[bound[i]] = true
+	}
+	return bound, nil
 }

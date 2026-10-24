@@ -1010,20 +1010,21 @@ func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins
 			"@fetch model must have exactly one lib function call in FROM"))
 	}
 
-	// Cross-AST modell × blueprint validation. Catches:
-	//   - Model passing MORE args than the blueprint declares (extra
+	// Cross-AST modell × blueprint validation. Catches arguments that
+	// cannot be bound to the blueprint's parameters (libcall.BindArgs):
+	//   - more positional args than the blueprint declares (extra
 	//     positional args have nowhere to go at runtime)
+	//   - a named arg the blueprint does not declare, a parameter given
+	//     twice, a positional arg after a named one
 	//
 	// We do NOT flag too-few args: blueprint functions routinely have
 	// default values (e.g. `options=""`) so omitting positional args is
 	// legitimate. Detecting which args are required would require
 	// tracking defaults per Starlark param — out of scope for v0.31.
-	for _, c := range calls {
-		if got, want := len(c.ArgNodes), len(c.Lib.Args); got > want {
+	for i := range calls {
+		if _, err := calls[i].BindArgs(); err != nil {
 			fr.Findings = append(fr.Findings, validate.NewFinding(fr.Path, 0,
-				validate.RuleCrossASTArgsMismatch,
-				fmt.Sprintf("model passes %d args to %s but blueprint declares only %d (%s)",
-					got, c.FuncName, want, strings.Join(c.Lib.Args, ", "))))
+				validate.RuleCrossASTArgsMismatch, err.Error()))
 		}
 	}
 

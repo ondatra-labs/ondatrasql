@@ -127,7 +127,7 @@ func TestWalk_VisitsEverything(t *testing.T) {
 	  "statements":[{"node":{
 	    "type":"SET_OPERATION_NODE",
 	    "setop_type":"UNION",
-	    "left":{
+	    "children":[{
 	      "type":"SELECT_NODE",
 	      "select_list":[],
 	      "from_table":{"type":"BASE_TABLE","schema_name":"raw","table_name":"left_tbl"},
@@ -142,8 +142,7 @@ func TestWalk_VisitsEverything(t *testing.T) {
 	          }}
 	        }
 	      }
-	    },
-	    "right":{
+	    },{
 	      "type":"SELECT_NODE",
 	      "from_table":{
 	        "type":"JOIN",
@@ -171,7 +170,7 @@ func TestWalk_VisitsEverything(t *testing.T) {
 	          }}
 	        }
 	      }]
-	    }
+	    }]
 	  }}]
 	}`
 	a, err := Parse(sql)

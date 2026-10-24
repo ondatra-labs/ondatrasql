@@ -25,7 +25,10 @@ func TestExtractTypedSelectColumns_CastTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse AST: %v", err)
 	}
-	cols := extractTypedSelectColumns(ast)
+	cols, err := extractTypedSelectColumns(ast)
+	if err != nil {
+		t.Fatalf("typed columns: %v", err)
+	}
 	if len(cols) != 3 {
 		t.Fatalf("got %d columns, want 3", len(cols))
 	}
@@ -70,7 +73,10 @@ func TestExtractTypedSelectColumns_RenameViaAlias(t *testing.T) {
 		t.Fatalf("get AST: %v", err)
 	}
 	ast, _ := duckast.Parse(astJSON)
-	cols := extractTypedSelectColumns(ast)
+	cols, err := extractTypedSelectColumns(ast)
+	if err != nil {
+		t.Fatalf("typed columns: %v", err)
+	}
 	if len(cols) != 2 {
 		t.Fatalf("got %d columns, want 2", len(cols))
 	}
@@ -94,7 +100,10 @@ func TestExtractTypedSelectColumns_AliasDoesNotOverride(t *testing.T) {
 		t.Fatalf("get AST: %v", err)
 	}
 	ast, _ := duckast.Parse(astJSON)
-	cols := extractTypedSelectColumns(ast)
+	cols, err := extractTypedSelectColumns(ast)
+	if err != nil {
+		t.Fatalf("typed columns: %v", err)
+	}
 	if len(cols) != 1 {
 		t.Fatalf("got %d columns, want 1", len(cols))
 	}
@@ -112,7 +121,10 @@ func TestExtractTypedSelectColumns_NoCast(t *testing.T) {
 
 	astJSON, _ := lineage.GetAST(p.Sess, "SELECT name, email FROM t")
 	ast, _ := duckast.Parse(astJSON)
-	cols := extractTypedSelectColumns(ast)
+	cols, err := extractTypedSelectColumns(ast)
+	if err != nil {
+		t.Fatalf("typed columns: %v", err)
+	}
 	if len(cols) != 2 {
 		t.Fatalf("got %d columns, want 2", len(cols))
 	}

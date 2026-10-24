@@ -47,7 +47,87 @@ func Parse(jsonStr string) (*AST, error) {
 	if err := dec.Decode(&root); err != nil {
 		return nil, fmt.Errorf("parse AST JSON: %w", err)
 	}
+	if err := checkShape(root); err != nil {
+		return nil, err
+	}
 	return &AST{raw: root}, nil
+}
+
+// checkShape rejects a tree that is not in the shape DuckDB 2.0 emits, so
+// that a reader never meets one. The accessors read only the 2.0 fields; on
+// a 1.5 tree they would find no function arguments, no set-operation arms
+// and no CTE bodies, and every consumer would carry on with nothing. A
+// malformed function argument is rejected here too: skipping it would shift
+// every later positional argument.
+func checkShape(v any) error {
+	switch x := v.(type) {
+	case map[string]any:
+		if err := checkNodeShape(x); err != nil {
+			return err
+		}
+		for _, child := range x {
+			if err := checkShape(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, item := range x {
+			if err := checkShape(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func checkNodeShape(m map[string]any) error {
+	not2 := func(what string) error {
+		return fmt.Errorf("AST is not in the DuckDB 2.0 json_serialize_sql shape: %s", what)
+	}
+	class, _ := m["class"].(string)
+	switch class {
+	case "FUNCTION", "WINDOW":
+		args, ok := m["arguments"].([]any)
+		if !ok {
+			return not2(class + " node without an arguments list")
+		}
+		for i, item := range args {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				return not2(fmt.Sprintf("%s argument %d is not an object", class, i))
+			}
+			if _, ok := entry["expression"].(map[string]any); !ok {
+				return not2(fmt.Sprintf("%s argument %d has no expression", class, i))
+			}
+			if name, present := entry["name"]; present {
+				if _, ok := name.(string); !ok {
+					return not2(fmt.Sprintf("%s argument %d has a non-string name", class, i))
+				}
+			}
+		}
+	case "CONSTANT":
+		if _, ok := m["literal"].(map[string]any); !ok {
+			return not2("CONSTANT node without a literal")
+		}
+	case "CAST":
+		if _, ok := m["type_expr"].(map[string]any); !ok {
+			return not2("CAST node without a type_expr")
+		}
+	}
+	if m["type"] == "SET_OPERATION_NODE" && (m["left"] != nil || m["right"] != nil) {
+		return not2("SET_OPERATION_NODE with left/right arms instead of children")
+	}
+	if cteMap, ok := m["cte_map"].(map[string]any); ok {
+		entries, _ := cteMap["map"].([]any)
+		for _, e := range entries {
+			entry, _ := e.(map[string]any)
+			value, _ := entry["value"].(map[string]any)
+			if _, ok := value["query_node"].(map[string]any); !ok {
+				return not2(fmt.Sprintf("CTE %v without a query_node", entry["key"]))
+			}
+		}
+	}
+	return nil
 }
 
 // Serialize re-marshals the AST back to JSON. Used by mutation callers
@@ -252,14 +332,14 @@ func (n *Node) TableFunctionName() string {
 	return fn.FunctionName()
 }
 
-// TableFunctionArgs returns the argument nodes for a TABLE_FUNCTION.
-// Each arg is a CONSTANT or FUNCTION expression node.
-func (n *Node) TableFunctionArgs() []*Node {
+// TableFunctionArgs returns the arguments of a TABLE_FUNCTION in order, with
+// the name of each named argument (`f(limit => 5)`).
+func (n *Node) TableFunctionArgs() ([]Argument, error) {
 	fn := n.Field("function")
 	if fn.IsNil() {
-		return nil
+		return nil, nil
 	}
-	return fn.Children()
+	return fn.Arguments()
 }
 
 // Argument is one argument of a function call. Name is set for a named
@@ -269,35 +349,27 @@ type Argument struct {
 	Expr *Node
 }
 
-// Arguments returns the arguments of a FUNCTION or WINDOW node with their
-// names. DuckDB 2.0 lists them under `arguments` as {name, expression}
-// pairs; 1.5 had a bare `children` list, read here as unnamed arguments.
-func (n *Node) Arguments() []Argument {
+// Arguments returns the arguments of a FUNCTION or WINDOW node in order,
+// each with its name if it was passed by name. DuckDB 2.0 lists them under
+// `arguments` as {name, expression} pairs. A malformed entry is an error
+// rather than skipped, since skipping it would shift every later argument;
+// Parse already rejects one, so this only fires on a hand-built node.
+func (n *Node) Arguments() ([]Argument, error) {
 	if n.IsNil() {
-		return nil
+		return nil, nil
 	}
-	if arr, ok := n.raw["arguments"].([]any); ok {
-		out := make([]Argument, 0, len(arr))
-		for _, item := range arr {
-			m, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			expr, _ := m["expression"].(map[string]any)
-			if expr == nil {
-				continue
-			}
-			name, _ := m["name"].(string)
-			out = append(out, Argument{Name: name, Expr: &Node{raw: expr}})
+	arr, _ := n.raw["arguments"].([]any)
+	out := make([]Argument, 0, len(arr))
+	for i, item := range arr {
+		m, _ := item.(map[string]any)
+		expr, _ := m["expression"].(map[string]any)
+		if expr == nil {
+			return nil, fmt.Errorf("argument %d of %s has no expression", i, n.FunctionName())
 		}
-		return out
+		name, _ := m["name"].(string)
+		out = append(out, Argument{Name: name, Expr: &Node{raw: expr}})
 	}
-	children := n.FieldList("children")
-	out := make([]Argument, 0, len(children))
-	for _, c := range children {
-		out = append(out, Argument{Expr: c})
-	}
-	return out
+	return out, nil
 }
 
 // ----- SELECT-shape accessors -----
@@ -317,31 +389,41 @@ func (n *Node) Having() *Node { return n.Field("having") }
 // Qualify returns the QUALIFY expression, or nil.
 func (n *Node) Qualify() *Node { return n.Field("qualify") }
 
-// SetOpArms returns the operands of a SET_OPERATION_NODE in order.
-// DuckDB 2.0 lists them under `children` — a chain of the same operation,
-// `a UNION ALL b UNION ALL c`, is one node with three arms — and leaves
-// `left` and `right` null; 1.5 nested binary nodes under `left`/`right`.
-// Reading only `left`/`right` on a 2.0 tree finds no arms at all.
+// SetOpArms returns the operands of a SET_OPERATION_NODE in order. DuckDB
+// 2.0 lists them under `children`: a chain of the same operation,
+// `a UNION ALL b UNION ALL c`, is one node with three arms, and `left` and
+// `right` are null. A RECURSIVE_CTE_NODE still has its anchor and recursive
+// part under `left` and `right`.
 func (n *Node) SetOpArms() []*Node {
-	if arms := n.FieldList("children"); len(arms) > 0 {
+	if n.NodeType() == "RECURSIVE_CTE_NODE" {
+		var arms []*Node
+		for _, side := range []*Node{n.Field("left"), n.Field("right")} {
+			if !side.IsNil() {
+				arms = append(arms, side)
+			}
+		}
 		return arms
 	}
-	var arms []*Node
-	for _, side := range []*Node{n.Field("left"), n.Field("right")} {
-		if !side.IsNil() {
-			arms = append(arms, side)
-		}
-	}
-	return arms
+	return n.FieldList("children")
 }
 
-// SetOpFirst returns the first arm of a SET_OPERATION_NODE, which names
-// the result's columns.
-func (n *Node) SetOpFirst() *Node {
-	if arms := n.SetOpArms(); len(arms) > 0 {
-		return arms[0]
+// FirstSelect returns the SELECT that names a query's columns: n itself
+// unless n is a set operation or recursive CTE, and otherwise the first arm,
+// descending through nested set operations. `(a UNION BY NAME b) UNION ALL c`
+// is a UNION ALL whose first arm is itself a set operation, with an empty
+// select list of its own. Returns nil when a set operation has no arms.
+func (n *Node) FirstSelect() *Node {
+	for n.IsSetOpNode() || n.NodeType() == "RECURSIVE_CTE_NODE" {
+		arms := n.SetOpArms()
+		if len(arms) == 0 {
+			return nil
+		}
+		n = arms[0]
 	}
-	return nil
+	if n.IsNil() {
+		return nil
+	}
+	return n
 }
 
 // SetOpType returns the kind of set operation (UNION/INTERSECT/EXCEPT).
@@ -368,13 +450,7 @@ func (n *Node) CTEs() []CTE {
 	for _, entry := range entries {
 		name, _ := entry.raw["key"].(string)
 		value, _ := entry.raw["value"].(map[string]any)
-		// DuckDB 2.0 puts the body under `query_node`; 1.5 under
-		// `query.node`.
 		body, _ := value["query_node"].(map[string]any)
-		if body == nil {
-			query, _ := value["query"].(map[string]any)
-			body, _ = query["node"].(map[string]any)
-		}
 		if body != nil {
 			var aliases []string
 			if list, ok := value["aliases"].([]any); ok {
@@ -506,13 +582,14 @@ func (n *Node) IsOperator() bool { return n.Bool("is_operator") }
 
 // Children returns the child expressions: the `children` of an operator or
 // conjunction, or the argument expressions of a function call, which
-// DuckDB 2.0 lists under `arguments` instead.
+// DuckDB 2.0 lists under `arguments` instead. Parse guarantees every
+// argument has an expression; use Arguments where position or name matters.
 func (n *Node) Children() []*Node {
 	if n.IsNil() {
 		return nil
 	}
 	if _, ok := n.raw["arguments"]; ok {
-		args := n.Arguments()
+		args, _ := n.Arguments()
 		out := make([]*Node, 0, len(args))
 		for _, a := range args {
 			out = append(out, a.Expr)
@@ -522,87 +599,62 @@ func (n *Node) Children() []*Node {
 	return n.FieldList("children")
 }
 
-// ConstantValue returns the Go value of a CONSTANT node when it is a plain
-// string, integer that fits int64, boolean or NULL; ok is false for
-// anything else (decimals, blobs, huge integers), which a caller has to
-// evaluate through DuckDB. DuckDB 2.0 reports a constant as its literal
-// text and kind, `literal: {kind, text}`; 1.5 as a typed `value`.
-func (n *Node) ConstantValue() (v any, ok bool) {
+// ConstantString returns a CONSTANT node's value as the string DuckDB gives
+// for CAST(<literal> AS VARCHAR), for the literal kinds where that is the
+// literal itself: a string, an integer that fits in BIGINT (`1_000` is
+// "1000", `010` is "10"), a boolean ("true"/"false") and NULL (""). ok is
+// false for every other kind (decimals, floats, huge integers, blobs); a
+// caller that needs those as text has to cast them through DuckDB.
+func (n *Node) ConstantString() (s string, ok bool) {
 	if n.IsNil() || n.Class() != "CONSTANT" {
-		return nil, false
+		return "", false
 	}
-	if lit := n.Field("literal"); !lit.IsNil() {
-		text := lit.String("text")
-		switch lit.String("kind") {
-		case "STRING":
-			return text, true
-		case "BOOLEAN":
-			b, err := strconv.ParseBool(text)
-			return b, err == nil
-		case "NULL_LITERAL":
-			return nil, true
-		case "INTEGER":
-			// DuckDB accepts `1_000`; base 10 rather than base 0 so that a
-			// leading zero is not read as octal, as DuckDB does not.
-			i, err := strconv.ParseInt(strings.ReplaceAll(text, "_", ""), 10, 64)
-			if err != nil {
-				return nil, false
-			}
-			return i, true
+	lit := n.Field("literal")
+	text := lit.String("text")
+	switch lit.String("kind") {
+	case "STRING":
+		return text, true
+	case "BOOLEAN":
+		b, err := strconv.ParseBool(text)
+		if err != nil {
+			return "", false
 		}
-		return nil, false
-	}
-	val := n.Field("value")
-	if val.IsNil() {
-		return nil, false
-	}
-	if val.Bool("is_null") {
-		return nil, true
-	}
-	switch val.Field("type").String("id") {
-	case "VARCHAR", "BOOLEAN", "INTEGER", "BIGINT", "SMALLINT", "TINYINT":
-		v, exists := val.raw["value"]
-		return v, exists
-	}
-	return nil, false
-}
-
-// ConstantText returns the literal text of a CONSTANT node as written —
-// the 2.0 `literal.text`, or the 1.5 `value.value` rendered as a string —
-// and "" when there is none.
-func (n *Node) ConstantText() string {
-	if n.IsNil() {
-		return ""
-	}
-	if lit := n.Field("literal"); !lit.IsNil() {
-		return lit.String("text")
-	}
-	if val := n.Field("value"); !val.IsNil() {
-		if v, ok := val.raw["value"]; ok && v != nil {
-			return fmt.Sprint(v)
+		return strconv.FormatBool(b), true
+	case "NULL_LITERAL":
+		return "", true
+	case "INTEGER":
+		// Base 10 rather than base 0 so that a leading zero is not read as
+		// octal, as DuckDB does not.
+		i, err := strconv.ParseInt(strings.ReplaceAll(text, "_", ""), 10, 64)
+		if err != nil {
+			return "", false
 		}
+		return strconv.FormatInt(i, 10), true
 	}
-	return ""
+	return "", false
 }
 
 // ----- Types -----
 
 // TypeRef is the target type of a CAST, as written in the query.
 //
-// Name is the type name upper-cased, as the user wrote it or as DuckDB
-// spells the built-in form: `int4` is "INT4", `int[]` is "LIST",
-// `int[3]` is "ARRAY", `timestamp with time zone` is
-// "TIMESTAMP WITH TIME ZONE". Mapping aliases to canonical types is the
-// caller's business.
+// Name is the type name as DuckDB reports it: its own spelling for the
+// forms it normalizes (`double precision` is "DOUBLE", `int[]` is "list",
+// `int[3]` is "array", `timestamp without time zone` is "TIMESTAMP"), the
+// user's spelling otherwise (`int4`, `myschema.mytype`). Compare it
+// case-insensitively. Catalog and Schema are set for a qualified name.
 //
-// Params are the constant type modifiers in order (`DECIMAL(10,2)` has
-// "10" and "2", `int[3]` has "3", an ENUM its members). Fields are the
-// nested types: the element of a LIST or ARRAY, the key and value of a
-// MAP, and the named members of a STRUCT or UNION.
+// Params are the type modifiers in order, as SQL literals: `DECIMAL(10,2)`
+// has "10" and "2", `int[3]` has "3", `GEOMETRY('OGC:CRS84')` has
+// "'OGC:CRS84'" with its quotes. Fields are the nested types: the element
+// of a LIST or ARRAY, the key and value of a MAP, and the named members of
+// a STRUCT or UNION.
 type TypeRef struct {
-	Name   string
-	Params []string
-	Fields []TypeField
+	Catalog string
+	Schema  string
+	Name    string
+	Params  []string
+	Fields  []TypeField
 }
 
 // TypeField is one nested type of a TypeRef. Name is set for STRUCT and
@@ -612,27 +664,59 @@ type TypeField struct {
 	Type *TypeRef
 }
 
-// CastType returns the target type of a CAST node, or nil when it has
-// none. It reads DuckDB 2.0's `type_expr`, a TYPE node whose children are
-// either nested TYPE nodes or constant modifiers. The 1.5 `cast_type`
-// shape is not read: nothing that still emits it is supported.
-func (n *Node) CastType() *TypeRef {
+// Qualified reports whether the type name carries a schema or catalog.
+func (t *TypeRef) Qualified() bool { return t.Catalog != "" || t.Schema != "" }
+
+// QualifiedName returns catalog.schema.name with the parts that are set.
+func (t *TypeRef) QualifiedName() string {
+	var parts []string
+	for _, p := range []string{t.Catalog, t.Schema, t.Name} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+// CastType returns the target type of a CAST node. DuckDB 2.0 puts it under
+// `type_expr`, a TYPE node whose children are nested TYPE nodes or constant
+// modifiers. A CAST without one, or a modifier that is not a constant, is an
+// error: falling back to some default type would silently retype a column.
+func (n *Node) CastType() (*TypeRef, error) {
+	if n.IsNil() || n.Class() != "CAST" {
+		return nil, fmt.Errorf("not a CAST node")
+	}
 	return typeRefOf(n.Field("type_expr"))
 }
 
-func typeRefOf(t *Node) *TypeRef {
+func typeRefOf(t *Node) (*TypeRef, error) {
 	if t.IsNil() || t.Class() != "TYPE" {
-		return nil
+		return nil, fmt.Errorf("CAST has no target type")
 	}
-	ref := &TypeRef{Name: strings.ToUpper(t.String("type_name"))}
+	ref := &TypeRef{Catalog: t.String("catalog"), Schema: t.String("schema"), Name: t.String("type_name")}
+	if ref.Name == "" {
+		return nil, fmt.Errorf("CAST target type has no name")
+	}
 	for _, c := range t.FieldList("children") {
-		if c.Class() == "TYPE" {
-			ref.Fields = append(ref.Fields, TypeField{Name: c.Alias(), Type: typeRefOf(c)})
-			continue
+		switch c.Class() {
+		case "TYPE":
+			field, err := typeRefOf(c)
+			if err != nil {
+				return nil, err
+			}
+			ref.Fields = append(ref.Fields, TypeField{Name: c.Alias(), Type: field})
+		case "CONSTANT":
+			lit := c.Field("literal")
+			text := lit.String("text")
+			if lit.String("kind") == "STRING" {
+				text = "'" + strings.ReplaceAll(text, "'", "''") + "'"
+			}
+			ref.Params = append(ref.Params, text)
+		default:
+			return nil, fmt.Errorf("type %s has a modifier that is not a constant (%s)", ref.QualifiedName(), c.Class())
 		}
-		ref.Params = append(ref.Params, c.ConstantText())
 	}
-	return ref
+	return ref, nil
 }
 
 // Child returns the single child expression for SUBQUERY-class nodes

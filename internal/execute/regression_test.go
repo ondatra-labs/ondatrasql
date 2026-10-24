@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/state"
 	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
@@ -282,8 +283,8 @@ func TestExtractArgsFromSQL_SecondOccurrence(t *testing.T) {
 
 	sql := "SELECT * FROM api_fetch('first') UNION ALL SELECT * FROM api_fetch('second')"
 
-	args0 := r.extractArgsFromSQL(sql, lib, 0)
-	args1 := r.extractArgsFromSQL(sql, lib, 1)
+	args0 := mustExtractArgs(t, r, sql, lib, 0)
+	args1 := mustExtractArgs(t, r, sql, lib, 1)
 
 	if args0["key"] != "first" {
 		t.Errorf("occurrence 0: key = %q, want 'first'", args0["key"])
@@ -301,7 +302,7 @@ func TestExtractArgsFromSQL_SkipsStringLiterals(t *testing.T) {
 	// Function name inside string should not be matched
 	sql := "SELECT * FROM t WHERE label = 'my_func(fake)' AND x = my_func('real')"
 
-	args := r.extractArgsFromSQL(sql, lib, 0)
+	args := mustExtractArgs(t, r, sql, lib, 0)
 	if args["val"] != "real" {
 		t.Errorf("should extract from real call, got %q", args["val"])
 	}
@@ -316,7 +317,7 @@ func TestExtractArgsFromSQL_ParensInStringArg(t *testing.T) {
 	// The argument contains parentheses inside a string literal
 	sql := "SELECT * FROM my_api('SELECT count(*) FROM t WHERE x IN (1,2)')"
 
-	args := r.extractArgsFromSQL(sql, lib, 0)
+	args := mustExtractArgs(t, r, sql, lib, 0)
 	want := "SELECT count(*) FROM t WHERE x IN (1,2)"
 	if args["query"] != want {
 		t.Errorf("got %q, want %q", args["query"], want)
@@ -331,9 +332,40 @@ func TestExtractArgsFromSQL_ClosingParenInString(t *testing.T) {
 
 	sql := "SELECT * FROM my_api('x)')"
 
-	args := r.extractArgsFromSQL(sql, lib, 0)
+	args := mustExtractArgs(t, r, sql, lib, 0)
 	if args["val"] != "x)" {
 		t.Errorf("got %q, want %q", args["val"], "x)")
+	}
+}
+
+func mustExtractArgs(t *testing.T, r *Runner, sql string, lib *libregistry.LibFunc, occurrence int) map[string]any {
+	t.Helper()
+	args, err := r.extractArgsFromSQL(sql, lib, occurrence)
+	if err != nil {
+		t.Fatalf("extractArgsFromSQL: %v", err)
+	}
+	return args
+}
+
+// The SQL-text fallback binds named arguments by name, as the AST path
+// does, and rejects what cannot be bound instead of dropping or shifting it.
+func TestExtractArgsFromSQL_NamedArguments(t *testing.T) {
+	t.Parallel()
+	r := &Runner{}
+	lib := &libregistry.LibFunc{Name: "my_api", Args: []string{"resource", "page_size", "flag"}}
+
+	args := mustExtractArgs(t, r, "SELECT * FROM my_api('items', flag => 'y', page_size := 5)", lib, 0)
+	if args["resource"] != "items" || args["page_size"] != "5" || args["flag"] != "y" {
+		t.Errorf("got %v, want resource=items page_size=5 flag=y", args)
+	}
+	for _, sql := range []string{
+		"SELECT * FROM my_api('items', size => 5)",
+		"SELECT * FROM my_api(page_size => 5, 'items')",
+		"SELECT * FROM my_api('a', 'b', 'c', 'd')",
+	} {
+		if args, err := r.extractArgsFromSQL(sql, lib, 0); err == nil {
+			t.Errorf("%s: got %v, want an error", sql, args)
+		}
 	}
 }
 
@@ -603,31 +635,25 @@ func TestRewriteLibCallsByString_NestedParens(t *testing.T) {
 
 func TestExtractTypedSelectColumns_NilAST(t *testing.T) {
 	t.Parallel()
-	cols := extractTypedSelectColumns(nil)
-	if cols != nil {
+	cols, err := extractTypedSelectColumns(nil)
+	if err != nil || cols != nil {
 		t.Errorf("expected nil for nil AST, got %v", cols)
 	}
 }
 
-// v0.30.0: normalizeType returns the DuckDB-native canonical type name as
-// a string. Width/precision distinctions (TINYINT vs BIGINT, FLOAT vs
-// DOUBLE, TIMESTAMP_NS vs TIMESTAMPTZ) are preserved — no collapse to
-// "integer" / "float" / "timestamp" + side-channel fields.
-func TestNormalizeType(t *testing.T) {
+// v0.30.0: canonicalDuckType returns the DuckDB-native canonical type name.
+// Width/precision distinctions (TINYINT vs BIGINT, FLOAT vs DOUBLE,
+// TIMESTAMP_NS vs TIMESTAMPTZ) are preserved — no collapse to "integer" /
+// "float" / "timestamp" + side-channel fields.
+func TestCanonicalDuckType(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		duckdb string
 		want   string
 	}{
-		// DECIMAL: precision/scale folded into the type syntax.
-		{"DECIMAL", "DECIMAL(18,3)"},
-		{"DECIMAL(18,2)", "DECIMAL(18,2)"},
-		{"NUMERIC(10,4)", "DECIMAL(10,4)"},
-		// Floats — distinct.
 		{"DOUBLE", "DOUBLE"},
 		{"FLOAT", "FLOAT"},
 		{"REAL", "FLOAT"},
-		// Integer width preserved.
 		{"INTEGER", "INTEGER"},
 		{"BIGINT", "BIGINT"},
 		{"INT8", "BIGINT"},
@@ -642,7 +668,6 @@ func TestNormalizeType(t *testing.T) {
 		{"TEXT", "VARCHAR"},
 		{"DATE", "DATE"},
 		{"TIME", "TIME"},
-		// Timestamp variants distinguished.
 		{"TIMESTAMP", "TIMESTAMP"},
 		{"TIMESTAMPTZ", "TIMESTAMPTZ"},
 		{"TIMESTAMP_NS", "TIMESTAMP_NS"},
@@ -650,40 +675,47 @@ func TestNormalizeType(t *testing.T) {
 		{"TIMESTAMP_S", "TIMESTAMP_S"},
 		{"UUID", "UUID"},
 		{"BLOB", "BLOB"},
-		// Composite keywords without structure info — return the bare keyword.
-		{"LIST", "LIST"},
-		{"MAP", "MAP"},
-		{"STRUCT", "STRUCT"},
 		{"BIT", "BIT"},
-		// Unknown → VARCHAR fallback.
-		{"UNKNOWN_TYPE", "VARCHAR"},
+		{"int4", "INTEGER"},
+		{"varint", "BIGNUM"},
+		{"GEOMETRY", "GEOMETRY"},
 	}
 	for _, tt := range tests {
-		got, ok := normalizeType(tt.duckdb).(string)
-		if !ok {
-			t.Errorf("normalizeType(%q) returned non-string %v", tt.duckdb, normalizeType(tt.duckdb))
-			continue
+		got, ok := canonicalDuckType(tt.duckdb)
+		if !ok || got != tt.want {
+			t.Errorf("canonicalDuckType(%q) = (%q, %v), want (%q, true)", tt.duckdb, got, ok, tt.want)
 		}
-		if got != tt.want {
-			t.Errorf("normalizeType(%q) = %q, want %q", tt.duckdb, got, tt.want)
+	}
+	// Composite keywords, DECIMAL and names DuckDB does not build in are
+	// not scalar built-ins: their callers handle them, and an unknown name
+	// must never turn into VARCHAR here.
+	for _, name := range []string{"LIST", "MAP", "STRUCT", "DECIMAL", "UNKNOWN_TYPE", "mytype"} {
+		if got, ok := canonicalDuckType(name); ok {
+			t.Errorf("canonicalDuckType(%q) = %q, want not a built-in", name, got)
 		}
 	}
 }
 
-func TestNormalizeType_MalformedDecimal(t *testing.T) {
+func TestDecimalSpec(t *testing.T) {
 	t.Parallel()
-	// Should not panic on malformed input — defaults to DECIMAL(18,3).
-	if got := normalizeType("DECIMAL(18,2"); got != "DECIMAL(18,2)" && got != "DECIMAL(18,3)" {
-		// Either accept the parsed precision (18,2 from the open paren) or
-		// fall back to the default. Both are acceptable; what matters is
-		// no panic and the result is a DECIMAL string.
-		if s, ok := got.(string); !ok || !strings.HasPrefix(s, "DECIMAL(") {
-			t.Errorf("malformed DECIMAL: got %v", got)
+	for _, tt := range []struct {
+		params []string
+		want   string
+	}{
+		{nil, "DECIMAL(18,3)"},
+		{[]string{"5"}, "DECIMAL(5,0)"},
+		{[]string{"10", "2"}, "DECIMAL(10,2)"},
+	} {
+		got, err := decimalSpec(&duckast.TypeRef{Name: "DECIMAL", Params: tt.params})
+		if err != nil || got != tt.want {
+			t.Errorf("decimalSpec(%v) = (%q, %v), want %q", tt.params, got, err, tt.want)
 		}
 	}
-	if got := normalizeType("DECIMAL("); got != "DECIMAL(18,3)" {
-		if s, ok := got.(string); !ok || !strings.HasPrefix(s, "DECIMAL(") {
-			t.Errorf("DECIMAL(: got %v", got)
+	// A modifier that is not an integer, or one too many, is an error
+	// rather than DECIMAL(18,3) or DECIMAL(,2).
+	for _, params := range [][]string{{"1.5", "2"}, {"", "2"}, {"'x'"}, {"1", "2", "3"}} {
+		if got, err := decimalSpec(&duckast.TypeRef{Name: "DECIMAL", Params: params}); err == nil {
+			t.Errorf("decimalSpec(%v) = %q, want an error", params, got)
 		}
 	}
 }

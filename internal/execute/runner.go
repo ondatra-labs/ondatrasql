@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/lineage"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
@@ -632,7 +634,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						}
 						var typedCols []any
 						if call.Lib.DynamicColumns {
-							typedCols = extractTypedSelectColumns(parsedAST)
+							var typedErr error
+							if typedCols, typedErr = extractTypedSelectColumns(parsedAST); typedErr != nil {
+								return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, typedErr)
+							}
 						}
 						kwargs = buildLibCallKwargs(call.Lib, args, cols, typedCols)
 					} else {
@@ -641,7 +646,10 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						// Track occurrence per function name for multiple calls.
 						occ := argOccurrence[call.FuncName]
 						argOccurrence[call.FuncName]++
-						kwargs = r.extractArgsFromSQL(model.SQL, call.Lib, occ)
+						var argsErr error
+						if kwargs, argsErr = r.extractArgsFromSQL(model.SQL, call.Lib, occ); argsErr != nil {
+							return nil, fmt.Errorf("lib %s args: %w", call.FuncName, argsErr)
+						}
 					}
 
 					// Inject target name so fetch() can query existing state
@@ -650,7 +658,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					// Inject typed columns for SQL-fallback path (AST path
 					// already has them via buildLibCallKwargs)
 					if _, hasColumns := kwargs["columns"]; !hasColumns && call.Lib.DynamicColumns {
-						if typedCols := extractTypedSelectColumns(parsedAST); typedCols != nil {
+						typedCols, typedErr := extractTypedSelectColumns(parsedAST)
+						if typedErr != nil {
+							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, typedErr)
+						}
+						if typedCols != nil {
 							kwargs["columns"] = typedCols
 						}
 					}
@@ -836,7 +848,11 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 					if call.ASTNode != nil {
 						alias = call.ASTNode.Alias()
 					}
-					if shape := extractColShapeForLib(parsedAST, alias, singleLibSource); len(shape) > 0 {
+					shape, shapeErr := extractColShapeForLib(parsedAST, alias, singleLibSource)
+					if shapeErr != nil {
+						return nil, fmt.Errorf("lib %s stub columns: %w", call.FuncName, shapeErr)
+					}
+					if len(shape) > 0 {
 						var colDefs []string
 						for _, c := range shape {
 							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.name), c.sqlType))
@@ -2080,7 +2096,7 @@ func escapeSQL(s string) string {
 // extractArgsFromSQL parses lib function args from raw SQL text.
 // occurrence selects which match to extract (0-based) when the same
 // function appears multiple times in the query.
-func (r *Runner) extractArgsFromSQL(sql string, lib *libregistry.LibFunc, occurrence int) map[string]any {
+func (r *Runner) extractArgsFromSQL(sql string, lib *libregistry.LibFunc, occurrence int) (map[string]any, error) {
 	kwargs := make(map[string]any)
 
 	// Find the N-th "func_name(" in SQL (skipping strings/comments)
@@ -2092,7 +2108,7 @@ func (r *Runner) extractArgsFromSQL(sql string, lib *libregistry.LibFunc, occurr
 	for n := 0; n <= occurrence; n++ {
 		i := strings.Index(lower[searchFrom:], pattern)
 		if i < 0 {
-			return kwargs
+			return kwargs, nil
 		}
 		idx = searchFrom + i
 		searchFrom = idx + len(pattern)
@@ -2110,25 +2126,43 @@ func (r *Runner) extractArgsFromSQL(sql string, lib *libregistry.LibFunc, occurr
 
 	argsStr := strings.TrimSpace(sql[start:end])
 	if argsStr == "" {
-		return kwargs
+		return kwargs, nil
 	}
 
 	// Split by comma, respecting parentheses and quoted strings.
 	// Handles cases like: func('a,b'), func(json('{"x":1}'))
+	// A named argument, `name => value` or `name := value`, binds by name
+	// under the same rules as the AST path (libcall.BindArgNames).
 	parts := splitArgsRespectingNesting(argsStr)
+	names := make([]string, len(parts))
+	values := make([]string, len(parts))
 	for i, part := range parts {
 		part = strings.TrimSpace(part)
+		if m := namedArgRe.FindStringSubmatch(part); m != nil {
+			names[i] = m[1]
+			part = strings.TrimSpace(m[2])
+		}
 		// Remove surrounding quotes
 		if len(part) >= 2 && ((part[0] == '\'' && part[len(part)-1] == '\'') || (part[0] == '"' && part[len(part)-1] == '"')) {
 			part = part[1 : len(part)-1]
 		}
-		if i < len(lib.Args) {
-			kwargs[lib.Args[i]] = part
-		}
+		values[i] = part
 	}
-
-	return kwargs
+	params, err := libcall.BindArgNames(lib.Name, lib.Args, names)
+	if err != nil {
+		return nil, err
+	}
+	for i, p := range params {
+		kwargs[p] = values[i]
+	}
+	return kwargs, nil
 }
+
+// namedArgRe matches a named argument in SQL text: an identifier followed by
+// `=>` or `:=`.
+var namedArgRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(?:=>|:=)\s*(.*)$`)
+
+
 
 // splitArgsRespectingNesting splits a comma-separated argument string while
 // respecting parentheses nesting and quoted strings. This correctly handles
