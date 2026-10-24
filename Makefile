@@ -106,6 +106,7 @@ bugcheck-static:
 	@# place, after which 1.5 refuses to attach it at all. The catalog has to
 	@# stay readable by 1.5.
 	@! grep -rniE 'automatic_migration' --include=*.go --include=*.sql --include=*.txtar internal cmd e2e \
+		| grep -vE '^\S*:[0-9]*:\s*(//|--|#)' \
 		|| (echo "bugcheck-static: AUTOMATIC_MIGRATION would upgrade the catalog past 1.5 (see ducklake-automatic-migration)"; exit 1)
 	@echo "bugcheck-static: clean"
 
