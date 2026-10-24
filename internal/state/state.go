@@ -30,6 +30,7 @@ import (
 	duckdb "github.com/duckdb/duckdb-go/v2"
 
 	"github.com/ondatra-labs/ondatrasql/internal/configenv"
+	session "github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/redact"
 	sqlfiles "github.com/ondatra-labs/ondatrasql/internal/sql"
 )
@@ -105,7 +106,11 @@ func Open(configPath string) (*State, error) {
 		if _, err := execer.ExecContext(context.Background(), "USE state", nil); err != nil {
 			return fmt.Errorf("use state catalog: %w", err)
 		}
-		return nil
+		// The state tables are native DuckDB tables that see DELETEs, which
+		// is where DuckDB 2.0.0's late_materialization overflows a heap
+		// buffer (internal/duckdb/latemat.go). Applied after state.sql, so
+		// a disabled_optimizers set there is added to, not lost.
+		return session.DisableLateMaterialization(context.Background(), execer)
 	}
 
 	connector, err := duckdb.NewConnector(":memory:", connInitFn)

@@ -84,6 +84,17 @@ func NewSession(dbFile string) (*Session, error) {
 		conn: conn,
 	}
 
+	// DuckDB 2.0.0 late_materialization heap-buffer-overflow: see latemat.go.
+	s.mu.Lock()
+	err = s.disableLateMaterializationLocked(context.Background())
+	s.mu.Unlock()
+	if err != nil {
+		if closeErr := s.Close(); closeErr != nil {
+			return nil, fmt.Errorf("%w (also: session.Close: %v)", err, closeErr)
+		}
+		return nil, err
+	}
+
 	// Disable progress bar
 	if err := s.Exec("SET enable_progress_bar = false"); err != nil {
 		if closeErr := s.Close(); closeErr != nil {
@@ -384,6 +395,11 @@ func (s *Session) execContext(ctx context.Context, sqlStr string) error {
 		return errors.New("session closed")
 	}
 	_, err := s.conn.ExecContext(ctx, sqlStr)
+	if err == nil && touchesDisabledOptimizers(sqlStr) {
+		// User SQL replaced or reset the disabled optimizers; add
+		// late_materialization back (see latemat.go).
+		err = s.disableLateMaterializationLocked(ctx)
+	}
 	return err
 }
 
