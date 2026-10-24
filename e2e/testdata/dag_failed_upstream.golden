@@ -3,7 +3,7 @@ exec_error: create temp table: Catalog Error: Table with name nonexistent_table_
 Did you mean "pg_constraint"?
 
 LINE 1: CREATE TEMP TABLE tmp_raw_source AS SELECT * FROM nonexistent_table_xyz
-                                                          ^
+                                                          ^^^^^^^^^^^^^^^^^^^^^
 ---
 target: staging.derived
 kind: table
