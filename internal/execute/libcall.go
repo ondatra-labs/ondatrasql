@@ -397,17 +397,17 @@ var builtinTypes = map[string]string{
 	"VARCHAR": "VARCHAR", "CHAR": "VARCHAR", "BPCHAR": "VARCHAR",
 	"TEXT": "VARCHAR", "STRING": "VARCHAR", "NVARCHAR": "VARCHAR",
 	// Other primitives
-	"JSON":    "JSON",
-	"UUID":    "UUID",
-	"GUID":    "UUID",
-	"BLOB":    "BLOB",
-	"BYTEA":   "BLOB",
-	"BINARY":  "BLOB",
+	"JSON":      "JSON",
+	"UUID":      "UUID",
+	"GUID":      "UUID",
+	"BLOB":      "BLOB",
+	"BYTEA":     "BLOB",
+	"BINARY":    "BLOB",
 	"VARBINARY": "BLOB",
-	"BIT":     "BIT",
+	"BIT":       "BIT",
 	"BITSTRING": "BIT",
-	"GEOMETRY": "GEOMETRY",
-	"VARIANT": "VARIANT",
+	"GEOMETRY":  "GEOMETRY",
+	"VARIANT":   "VARIANT",
 }
 
 // canonicalDuckType returns the canonical spelling of a DuckDB built-in

@@ -40,18 +40,18 @@ const (
 
 // Result contains the outcome of running a model.
 type Result struct {
-	Target         string
-	Kind           string
-	RunType        string // "incremental", "backfill", "full", or "skip"
-	RunReason      string // Human-readable reason for the run_type decision
-	RowsAffected   int64
-	Duration       time.Duration
-	Errors         []string
-	Warnings       []string
-	Trace          []TraceStep `json:"trace,omitempty"`
-	SyncSucceeded  int64       `json:"sync_succeeded,omitempty"`
-	SyncFailed     int64       `json:"sync_failed,omitempty"`
-	lastTraceEnd   time.Time   // internal: when last trace was recorded
+	Target        string
+	Kind          string
+	RunType       string // "incremental", "backfill", "full", or "skip"
+	RunReason     string // Human-readable reason for the run_type decision
+	RowsAffected  int64
+	Duration      time.Duration
+	Errors        []string
+	Warnings      []string
+	Trace         []TraceStep `json:"trace,omitempty"`
+	SyncSucceeded int64       `json:"sync_succeeded,omitempty"`
+	SyncFailed    int64       `json:"sync_failed,omitempty"`
+	lastTraceEnd  time.Time   // internal: when last trace was recorded
 }
 
 // Runner executes SQL models.
@@ -272,7 +272,6 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 		return nil, fmt.Errorf("starlark script models (.star) are no longer supported — use SQL models with lib/ blueprints instead")
 	}
 
-
 	// Trace: Calculate SQL hash (in-memory, should be fast)
 	var stepStart time.Time
 	stepStart = time.Now()
@@ -443,8 +442,8 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	// Detect and execute lib function calls in FROM clause (e.g. FROM gam_fetch(...))
 	var libCalls []LibCall
-	var hasInferredStubs bool        // true when 0-row lib stubs were created from AST/column inference
-	var trackedOpts trackedRunOpts   // populated when tracked + lib + all-empty + no_change semantics
+	var hasInferredStubs bool      // true when 0-row lib stubs were created from AST/column inference
+	var trackedOpts trackedRunOpts // populated when tracked + lib + all-empty + no_change semantics
 	// Ensure all lib-call state-store stores are cleaned up on any exit path.
 	// Claims that were not explicitly acked are nacked (returned to queue).
 	// The acked flag is set in the success path after materialize.
@@ -589,361 +588,361 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 	if r.libRegistry != nil && !r.libRegistry.Empty() {
 		if len(libCalls) > 0 {
-				// Validate supported_kinds for fetch
-				for _, c := range libCalls {
-					if len(c.Lib.SupportedKinds) > 0 {
-						allowed := false
-						for _, k := range c.Lib.SupportedKinds {
-							if k == model.Kind {
-								allowed = true
-								break
-							}
-						}
-						if !allowed {
-							return nil, fmt.Errorf("lib %s does not support @kind: %s (supported: %v)", c.FuncName, model.Kind, c.Lib.SupportedKinds)
+			// Validate supported_kinds for fetch
+			for _, c := range libCalls {
+				if len(c.Lib.SupportedKinds) > 0 {
+					allowed := false
+					for _, k := range c.Lib.SupportedKinds {
+						if k == model.Kind {
+							allowed = true
+							break
 						}
 					}
-				}
-
-				// Mark model as having lib calls so materialize knows
-				// tmpTable contains all rows (not CDC-filtered)
-				model.Source = libCalls[0].FuncName
-
-				singleLibSource := len(libCalls) == 1
-				argOccurrence := make(map[string]int) // track per-function occurrence for arg extraction
-				for i := range libCalls {
-					call := &libCalls[i]
-
-					var kwargs map[string]any
-
-					if call.ASTNode != nil {
-						// AST-based detection: evaluate args from AST nodes
-						args, evalErr := r.evaluateArgs(call)
-						if evalErr != nil {
-							return nil, fmt.Errorf("lib %s args: %w", call.FuncName, evalErr)
-						}
-						callAlias := ""
-						if call.ASTNode != nil {
-							callAlias = call.ASTNode.Alias()
-						}
-						cols, matchErr := matchColumns(parsedAST, call.Lib, callAlias, singleLibSource)
-						if matchErr != nil {
-							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, matchErr)
-						}
-						var typedCols []any
-						if call.Lib.DynamicColumns {
-							var typedErr error
-							if typedCols, typedErr = extractTypedSelectColumns(parsedAST); typedErr != nil {
-								return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, typedErr)
-							}
-						}
-						kwargs = buildLibCallKwargs(call.Lib, args, cols, typedCols)
-					} else {
-						// SQL-based detection (macro expansion hid the TABLE_FUNCTION node).
-						// Extract args from raw SQL: parse "func_name('arg1', 'arg2')" manually.
-						// Track occurrence per function name for multiple calls.
-						occ := argOccurrence[call.FuncName]
-						argOccurrence[call.FuncName]++
-						var argsErr error
-						if kwargs, argsErr = r.extractArgsFromSQL(model.SQL, call.Lib, occ); argsErr != nil {
-							return nil, fmt.Errorf("lib %s args: %w", call.FuncName, argsErr)
-						}
+					if !allowed {
+						return nil, fmt.Errorf("lib %s does not support @kind: %s (supported: %v)", c.FuncName, model.Kind, c.Lib.SupportedKinds)
 					}
-
-					// Inject target name so fetch() can query existing state
-					kwargs["target"] = model.Target
-
-					// Inject typed columns for SQL-fallback path (AST path
-					// already has them via buildLibCallKwargs)
-					if _, hasColumns := kwargs["columns"]; !hasColumns && call.Lib.DynamicColumns {
-						typedCols, typedErr := extractTypedSelectColumns(parsedAST)
-						if typedErr != nil {
-							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, typedErr)
-						}
-						if typedCols != nil {
-							kwargs["columns"] = typedCols
-						}
-					}
-
-					// Inject incremental state as kwargs.
-					//
-					// Fail closed on read failure — pre-R7 the code logged a
-					// warning and fell through to synthetic
-					// is_backfill=true/empty cursor, which silently produced
-					// wrong rows (a fetch that should have been incremental
-					// would have re-pulled everything OR pulled nothing
-					// depending on the lib's defaults). A fetch with
-					// corrupted state is never the right answer; it must
-					// halt and surface the error so the operator can
-					// inspect catalog state.
-					incrState, incrErr := backfill.GetIncrementalState(
-						r.sess, model.Target, model.Incremental, model.IncrementalInitial)
-					if incrErr != nil {
-						result.Errors = append(result.Errors, fmt.Sprintf("lib %s incremental state: %v", call.FuncName, incrErr))
-						return result, fmt.Errorf("lib %s incremental state for %s: %w", call.FuncName, model.Target, incrErr)
-					}
-					if incrState != nil && needsBackfill {
-						incrState.IsBackfill = true
-						incrState.LastValue = incrState.InitialValue
-					}
-					if incrState != nil {
-						kwargs["is_backfill"] = incrState.IsBackfill
-						kwargs["last_value"] = incrState.LastValue
-						kwargs["last_run"] = incrState.LastRun
-						kwargs["cursor"] = incrState.Cursor
-						kwargs["initial_value"] = incrState.InitialValue
-					} else {
-						// GetIncrementalState returned (nil, nil) — no
-						// existing target table, so first-run backfill
-						// semantics with empty cursor is the correct
-						// initial state, NOT a fallback for an error path.
-						kwargs["is_backfill"] = true
-						kwargs["last_value"] = ""
-						kwargs["last_run"] = ""
-						kwargs["cursor"] = ""
-						kwargs["initial_value"] = ""
-					}
-
-					// libTarget names this call's staging table and temp table.
-					// It carries the model target so two models calling the
-					// same lib never share staging: a model's failed run leaves
-					// its rows there for its own retry, not for the next model.
-					libCallName := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
-					libTarget := model.Target + "/" + libCallName
-
-					rt := script.NewRuntime(r.sess, nil, r.projectDir)
-					if r.projectDir != "" && model.Kind != "table" {
-						st, err := r.getStateStore()
-						if err != nil {
-							return nil, err
-						}
-						rt.SetStateStore(st)
-						// Before v0.42.2 staging was keyed by the lib call
-						// alone. Rows left there cannot be assigned to a model
-						// safely, so they are reported rather than picked up.
-						if n, claimed, err := script.LegacyStagingRows(st, libCallName); err != nil {
-							result.Warnings = append(result.Warnings, fmt.Sprintf("check legacy staging for %s: %v", call.FuncName, err))
-						} else if n > 0 {
-							result.Warnings = append(result.Warnings, fmt.Sprintf(
-								"legacy staging table \"fetch:%s\" holds %d rows (%d claimed by an interrupted run) from before v0.42.2; staging is now per model, so they are no longer retried and may belong to any model calling %s. Inspect them in the state database, then DROP TABLE \"fetch:%s\" to clear this warning",
-								libCallName, n, claimed, call.FuncName, libCallName))
-						}
-					}
-
-					var scriptResult *script.Result
-					var runErr error
-					if call.Lib.APIConfig != nil {
-						httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.stateDB())
-						if call.Lib.FetchMode == "async" {
-							// Async fetch: submit() → check() → fetch_result()
-							pollInterval := 5 * time.Second
-							pollTimeout := 5 * time.Minute
-							pollBackoff := 1
-							// Reject zero/negative durations — pre-R8 a
-							// blueprint that set fetch_poll_interval="0s"
-							// (or a malformed value that parsed but landed
-							// negative) would either busy-spin in
-							// time.After(0) or trigger immediate timeout
-							// before the first poll. Fail closed instead.
-							if call.Lib.APIConfig.FetchPollInterval != "" {
-								d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollInterval)
-								if err != nil {
-									return nil, fmt.Errorf("lib %s fetch_poll_interval %q: %w", call.FuncName, call.Lib.APIConfig.FetchPollInterval, err)
-								}
-								if d <= 0 {
-									return nil, fmt.Errorf("lib %s fetch_poll_interval must be > 0 (got %v)", call.FuncName, d)
-								}
-								pollInterval = d
-							}
-							if call.Lib.APIConfig.FetchPollTimeout != "" {
-								d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollTimeout)
-								if err != nil {
-									return nil, fmt.Errorf("lib %s fetch_poll_timeout %q: %w", call.FuncName, call.Lib.APIConfig.FetchPollTimeout, err)
-								}
-								if d <= 0 {
-									return nil, fmt.Errorf("lib %s fetch_poll_timeout must be > 0 (got %v)", call.FuncName, d)
-								}
-								pollTimeout = d
-							}
-							if call.Lib.APIConfig.FetchPollBackoff > 0 {
-								pollBackoff = call.Lib.APIConfig.FetchPollBackoff
-							}
-							scriptResult, runErr = rt.RunSourceAsync(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, pollInterval, pollTimeout, pollBackoff, httpCfg)
-						} else {
-							// Sync fetch: paginated path (page_size=0 means single call)
-							scriptResult, runErr = rt.RunSourcePaginated(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
-						}
-					} else {
-						// Legacy TABLE dict: use save.row() contract
-						scriptResult, runErr = rt.RunSource(ctx, libTarget, call.FuncName, kwargs)
-					}
-					if runErr != nil {
-						// Check for clean abort
-						var abortErr *script.AbortError
-						if errors.As(runErr, &abortErr) {
-							result.RowsAffected = 0
-							result.Duration = time.Since(start)
-							return result, nil
-						}
-						return nil, fmt.Errorf("lib %s: %w", call.FuncName, runErr)
-					}
-
-					// Create temp table from collected rows
-					if err := scriptResult.CreateTempTable(); err != nil {
-						return nil, fmt.Errorf("lib %s temp table: %w", call.FuncName, err)
-					}
-					call.TempTable = scriptResult.TempTable
-					call.ScriptResult = scriptResult
-					r.trace(result, "lib."+call.FuncName, stepStart, "ok")
-					stepStart = time.Now()
-				}
-
-				// Tracked/scd2 + lib + all 0-row returns + every lib's
-				// empty_result is "no_change" (the default) → tell materialize
-				// to suppress the delete-on-missing branch so target rows are
-				// preserved (tracked: missing groups; scd2: missing current
-				// versions). The rest of the pipeline (stubs, rewrite, schema
-				// evolution, audits, materialize) still runs so that SQL-only
-				// changes (new columns, audit changes) are applied.
-				trackedOpts.noDeleteOnMissingGroups = (model.Kind == "tracked" || model.Kind == "scd2") && allLibsReturnedNoChange(libCalls)
-
-				// For lib calls that returned 0 rows, create empty stub
-				// temp tables using the input-shape columns the query
-				// references for each specific lib call — not the output
-				// projection from SELECT. This ensures columns used in
-				// JOIN ON, WHERE, LATERAL, etc. are present in the stub.
-				for i := range libCalls {
-					call := &libCalls[i]
-					if call.TempTable != "" {
-						continue // already has data
-					}
-					stubName := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
-
-					// 1. Static-column libs: use declared columns
-					if len(call.Lib.Columns) > 0 {
-						var colDefs []string
-						for _, c := range call.Lib.Columns {
-							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.Name), c.Type))
-						}
-						_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
-						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
-							return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
-						}
-						call.TempTable = stubName
-						hasInferredStubs = true
-						continue
-					}
-
-					// 2. Dynamic-column libs: build the stub from the model
-					//    SQL's column shape — typed from explicit casts in
-					//    the SELECT projection (validated upstream), plus
-					//    input-only refs (JOIN ON, WHERE, etc) as VARCHAR.
-					//    SQL is the schema authority for lib-backed models;
-					//    target-type lookups and VARCHAR-on-projection
-					//    fallbacks are no longer needed because every
-					//    projected column is already cast.
-					alias := ""
-					if call.ASTNode != nil {
-						alias = call.ASTNode.Alias()
-					}
-					shape, shapeErr := extractColShapeForLib(parsedAST, alias, singleLibSource)
-					if shapeErr != nil {
-						return nil, fmt.Errorf("lib %s stub columns: %w", call.FuncName, shapeErr)
-					}
-					if len(shape) > 0 {
-						var colDefs []string
-						for _, c := range shape {
-							colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.name), c.sqlType))
-						}
-						_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
-						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
-							return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
-						}
-						call.TempTable = stubName
-						hasInferredStubs = true
-						continue
-					}
-
-					// 3. SQL didn't reference any columns belonging to this
-					//    lib (e.g. `SELECT *` against a single lib source).
-					//    Fall back to cloning the existing target.
-					targetExists, existsErr := r.tableExistsCheck(model.Target)
-					if existsErr != nil {
-						return nil, fmt.Errorf("check target exists for empty-lib fallback: %w", existsErr)
-					}
-					if targetExists {
-						_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
-						if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", stubName, model.Target)); err != nil {
-							return nil, fmt.Errorf("create empty lib stub from target %s: %w", model.Target, err)
-						}
-						call.TempTable = stubName
-						hasInferredStubs = true
-						continue
-					}
-
-					// 4. No SQL shape, no target — first run, skip.
-					ackLibClaims()
-					result.RowsAffected = 0
-					result.RunType = "skip"
-					result.Warnings = append(result.Warnings, "lib returned 0 rows on first run — target table not created (will be created when data arrives)")
-					result.Duration = time.Since(start)
-					return result, nil
-				}
-
-				// Rewrite SQL: replace lib function calls with temp table references
-				// Check if AST-based rewrite is possible. API dict libs use
-				// macros which DuckDB expands and reconstructs -- AST rewrite
-				// produces the original SQL, not the rewritten version. Use
-				// string-based rewrite for those.
-				hasASTNodes := false
-				for _, c := range libCalls {
-					if c.ASTNode != nil && c.Lib.APIConfig == nil {
-						hasASTNodes = true
-						break
-					}
-				}
-				if hasASTNodes {
-					// AST-based rewrite (legacy TABLE libs)
-					rewriteLibCalls(parsedAST, libCalls)
-					modified, serErr := parsedAST.Serialize()
-					if serErr != nil {
-						return nil, fmt.Errorf("serialize rewritten AST: %w", serErr)
-					}
-					rewrittenSQL, desErr := r.deserializeAST(modified)
-					if desErr != nil {
-						return nil, fmt.Errorf("deserialize rewritten AST: %w", desErr)
-					}
-					state.Promote(rewrittenSQL)
-				}
-
-				// String-based rewrite for API dict libs (macro-expanded, not
-				// visible in AST). Also handles the case where AST-based rewrite
-				// handled some calls but API dict calls remain unrewritten.
-				{
-					var stringCalls []LibCall
-					for _, c := range libCalls {
-						if c.TempTable != "" && (c.ASTNode == nil || c.Lib.APIConfig != nil) {
-							stringCalls = append(stringCalls, c)
-						}
-					}
-					if len(stringCalls) > 0 {
-						state.Promote(rewriteLibCallsByString(state.Current(), stringCalls))
-					}
-				}
-
-				// Re-parse AST for lineage/CDC (now references temp tables, not lib functions)
-				var rewriteASTErr error
-				astJSON, rewriteASTErr = r.getAST(state.Current())
-				if rewriteASTErr != nil {
-					// Post-rewrite AST drives lineage + CDC; without it the
-					// model would read as having no sources and skip CDC.
-					err := fmt.Errorf("%s: cannot read the AST after the lib-call rewrite: %w", model.Target, rewriteASTErr)
-					result.Errors = append(result.Errors, err.Error())
-					result.Duration = time.Since(start)
-					return result, err
 				}
 			}
-	}  // end if r.libRegistry != nil
+
+			// Mark model as having lib calls so materialize knows
+			// tmpTable contains all rows (not CDC-filtered)
+			model.Source = libCalls[0].FuncName
+
+			singleLibSource := len(libCalls) == 1
+			argOccurrence := make(map[string]int) // track per-function occurrence for arg extraction
+			for i := range libCalls {
+				call := &libCalls[i]
+
+				var kwargs map[string]any
+
+				if call.ASTNode != nil {
+					// AST-based detection: evaluate args from AST nodes
+					args, evalErr := r.evaluateArgs(call)
+					if evalErr != nil {
+						return nil, fmt.Errorf("lib %s args: %w", call.FuncName, evalErr)
+					}
+					callAlias := ""
+					if call.ASTNode != nil {
+						callAlias = call.ASTNode.Alias()
+					}
+					cols, matchErr := matchColumns(parsedAST, call.Lib, callAlias, singleLibSource)
+					if matchErr != nil {
+						return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, matchErr)
+					}
+					var typedCols []any
+					if call.Lib.DynamicColumns {
+						var typedErr error
+						if typedCols, typedErr = extractTypedSelectColumns(parsedAST); typedErr != nil {
+							return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, typedErr)
+						}
+					}
+					kwargs = buildLibCallKwargs(call.Lib, args, cols, typedCols)
+				} else {
+					// SQL-based detection (macro expansion hid the TABLE_FUNCTION node).
+					// Extract args from raw SQL: parse "func_name('arg1', 'arg2')" manually.
+					// Track occurrence per function name for multiple calls.
+					occ := argOccurrence[call.FuncName]
+					argOccurrence[call.FuncName]++
+					var argsErr error
+					if kwargs, argsErr = r.extractArgsFromSQL(model.SQL, call.Lib, occ); argsErr != nil {
+						return nil, fmt.Errorf("lib %s args: %w", call.FuncName, argsErr)
+					}
+				}
+
+				// Inject target name so fetch() can query existing state
+				kwargs["target"] = model.Target
+
+				// Inject typed columns for SQL-fallback path (AST path
+				// already has them via buildLibCallKwargs)
+				if _, hasColumns := kwargs["columns"]; !hasColumns && call.Lib.DynamicColumns {
+					typedCols, typedErr := extractTypedSelectColumns(parsedAST)
+					if typedErr != nil {
+						return nil, fmt.Errorf("lib %s columns: %w", call.FuncName, typedErr)
+					}
+					if typedCols != nil {
+						kwargs["columns"] = typedCols
+					}
+				}
+
+				// Inject incremental state as kwargs.
+				//
+				// Fail closed on read failure — pre-R7 the code logged a
+				// warning and fell through to synthetic
+				// is_backfill=true/empty cursor, which silently produced
+				// wrong rows (a fetch that should have been incremental
+				// would have re-pulled everything OR pulled nothing
+				// depending on the lib's defaults). A fetch with
+				// corrupted state is never the right answer; it must
+				// halt and surface the error so the operator can
+				// inspect catalog state.
+				incrState, incrErr := backfill.GetIncrementalState(
+					r.sess, model.Target, model.Incremental, model.IncrementalInitial)
+				if incrErr != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("lib %s incremental state: %v", call.FuncName, incrErr))
+					return result, fmt.Errorf("lib %s incremental state for %s: %w", call.FuncName, model.Target, incrErr)
+				}
+				if incrState != nil && needsBackfill {
+					incrState.IsBackfill = true
+					incrState.LastValue = incrState.InitialValue
+				}
+				if incrState != nil {
+					kwargs["is_backfill"] = incrState.IsBackfill
+					kwargs["last_value"] = incrState.LastValue
+					kwargs["last_run"] = incrState.LastRun
+					kwargs["cursor"] = incrState.Cursor
+					kwargs["initial_value"] = incrState.InitialValue
+				} else {
+					// GetIncrementalState returned (nil, nil) — no
+					// existing target table, so first-run backfill
+					// semantics with empty cursor is the correct
+					// initial state, NOT a fallback for an error path.
+					kwargs["is_backfill"] = true
+					kwargs["last_value"] = ""
+					kwargs["last_run"] = ""
+					kwargs["cursor"] = ""
+					kwargs["initial_value"] = ""
+				}
+
+				// libTarget names this call's staging table and temp table.
+				// It carries the model target so two models calling the
+				// same lib never share staging: a model's failed run leaves
+				// its rows there for its own retry, not for the next model.
+				libCallName := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
+				libTarget := model.Target + "/" + libCallName
+
+				rt := script.NewRuntime(r.sess, nil, r.projectDir)
+				if r.projectDir != "" && model.Kind != "table" {
+					st, err := r.getStateStore()
+					if err != nil {
+						return nil, err
+					}
+					rt.SetStateStore(st)
+					// Before v0.42.2 staging was keyed by the lib call
+					// alone. Rows left there cannot be assigned to a model
+					// safely, so they are reported rather than picked up.
+					if n, claimed, err := script.LegacyStagingRows(st, libCallName); err != nil {
+						result.Warnings = append(result.Warnings, fmt.Sprintf("check legacy staging for %s: %v", call.FuncName, err))
+					} else if n > 0 {
+						result.Warnings = append(result.Warnings, fmt.Sprintf(
+							"legacy staging table \"fetch:%s\" holds %d rows (%d claimed by an interrupted run) from before v0.42.2; staging is now per model, so they are no longer retried and may belong to any model calling %s. Inspect them in the state database, then DROP TABLE \"fetch:%s\" to clear this warning",
+							libCallName, n, claimed, call.FuncName, libCallName))
+					}
+				}
+
+				var scriptResult *script.Result
+				var runErr error
+				if call.Lib.APIConfig != nil {
+					httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.stateDB())
+					if call.Lib.FetchMode == "async" {
+						// Async fetch: submit() → check() → fetch_result()
+						pollInterval := 5 * time.Second
+						pollTimeout := 5 * time.Minute
+						pollBackoff := 1
+						// Reject zero/negative durations — pre-R8 a
+						// blueprint that set fetch_poll_interval="0s"
+						// (or a malformed value that parsed but landed
+						// negative) would either busy-spin in
+						// time.After(0) or trigger immediate timeout
+						// before the first poll. Fail closed instead.
+						if call.Lib.APIConfig.FetchPollInterval != "" {
+							d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollInterval)
+							if err != nil {
+								return nil, fmt.Errorf("lib %s fetch_poll_interval %q: %w", call.FuncName, call.Lib.APIConfig.FetchPollInterval, err)
+							}
+							if d <= 0 {
+								return nil, fmt.Errorf("lib %s fetch_poll_interval must be > 0 (got %v)", call.FuncName, d)
+							}
+							pollInterval = d
+						}
+						if call.Lib.APIConfig.FetchPollTimeout != "" {
+							d, err := time.ParseDuration(call.Lib.APIConfig.FetchPollTimeout)
+							if err != nil {
+								return nil, fmt.Errorf("lib %s fetch_poll_timeout %q: %w", call.FuncName, call.Lib.APIConfig.FetchPollTimeout, err)
+							}
+							if d <= 0 {
+								return nil, fmt.Errorf("lib %s fetch_poll_timeout must be > 0 (got %v)", call.FuncName, d)
+							}
+							pollTimeout = d
+						}
+						if call.Lib.APIConfig.FetchPollBackoff > 0 {
+							pollBackoff = call.Lib.APIConfig.FetchPollBackoff
+						}
+						scriptResult, runErr = rt.RunSourceAsync(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, pollInterval, pollTimeout, pollBackoff, httpCfg)
+					} else {
+						// Sync fetch: paginated path (page_size=0 means single call)
+						scriptResult, runErr = rt.RunSourcePaginated(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
+					}
+				} else {
+					// Legacy TABLE dict: use save.row() contract
+					scriptResult, runErr = rt.RunSource(ctx, libTarget, call.FuncName, kwargs)
+				}
+				if runErr != nil {
+					// Check for clean abort
+					var abortErr *script.AbortError
+					if errors.As(runErr, &abortErr) {
+						result.RowsAffected = 0
+						result.Duration = time.Since(start)
+						return result, nil
+					}
+					return nil, fmt.Errorf("lib %s: %w", call.FuncName, runErr)
+				}
+
+				// Create temp table from collected rows
+				if err := scriptResult.CreateTempTable(); err != nil {
+					return nil, fmt.Errorf("lib %s temp table: %w", call.FuncName, err)
+				}
+				call.TempTable = scriptResult.TempTable
+				call.ScriptResult = scriptResult
+				r.trace(result, "lib."+call.FuncName, stepStart, "ok")
+				stepStart = time.Now()
+			}
+
+			// Tracked/scd2 + lib + all 0-row returns + every lib's
+			// empty_result is "no_change" (the default) → tell materialize
+			// to suppress the delete-on-missing branch so target rows are
+			// preserved (tracked: missing groups; scd2: missing current
+			// versions). The rest of the pipeline (stubs, rewrite, schema
+			// evolution, audits, materialize) still runs so that SQL-only
+			// changes (new columns, audit changes) are applied.
+			trackedOpts.noDeleteOnMissingGroups = (model.Kind == "tracked" || model.Kind == "scd2") && allLibsReturnedNoChange(libCalls)
+
+			// For lib calls that returned 0 rows, create empty stub
+			// temp tables using the input-shape columns the query
+			// references for each specific lib call — not the output
+			// projection from SELECT. This ensures columns used in
+			// JOIN ON, WHERE, LATERAL, etc. are present in the stub.
+			for i := range libCalls {
+				call := &libCalls[i]
+				if call.TempTable != "" {
+					continue // already has data
+				}
+				stubName := fmt.Sprintf("_lib_%s_%d", call.FuncName, call.CallIndex)
+
+				// 1. Static-column libs: use declared columns
+				if len(call.Lib.Columns) > 0 {
+					var colDefs []string
+					for _, c := range call.Lib.Columns {
+						colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.Name), c.Type))
+					}
+					_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
+					if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
+						return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
+					}
+					call.TempTable = stubName
+					hasInferredStubs = true
+					continue
+				}
+
+				// 2. Dynamic-column libs: build the stub from the model
+				//    SQL's column shape — typed from explicit casts in
+				//    the SELECT projection (validated upstream), plus
+				//    input-only refs (JOIN ON, WHERE, etc) as VARCHAR.
+				//    SQL is the schema authority for lib-backed models;
+				//    target-type lookups and VARCHAR-on-projection
+				//    fallbacks are no longer needed because every
+				//    projected column is already cast.
+				alias := ""
+				if call.ASTNode != nil {
+					alias = call.ASTNode.Alias()
+				}
+				shape, shapeErr := extractColShapeForLib(parsedAST, alias, singleLibSource)
+				if shapeErr != nil {
+					return nil, fmt.Errorf("lib %s stub columns: %w", call.FuncName, shapeErr)
+				}
+				if len(shape) > 0 {
+					var colDefs []string
+					for _, c := range shape {
+						colDefs = append(colDefs, fmt.Sprintf("%s %s", duckdb.QuoteIdentifier(c.name), c.sqlType))
+					}
+					_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
+					if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s (%s)", stubName, strings.Join(colDefs, ", "))); err != nil {
+						return nil, fmt.Errorf("create empty lib stub %s: %w", stubName, err)
+					}
+					call.TempTable = stubName
+					hasInferredStubs = true
+					continue
+				}
+
+				// 3. SQL didn't reference any columns belonging to this
+				//    lib (e.g. `SELECT *` against a single lib source).
+				//    Fall back to cloning the existing target.
+				targetExists, existsErr := r.tableExistsCheck(model.Target)
+				if existsErr != nil {
+					return nil, fmt.Errorf("check target exists for empty-lib fallback: %w", existsErr)
+				}
+				if targetExists {
+					_ = r.sess.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", stubName)) // IF EXISTS makes non-existence OK; real catalog errors break next CREATE more visibly
+					if err := r.sess.Exec(fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT * FROM %s WHERE false", stubName, model.Target)); err != nil {
+						return nil, fmt.Errorf("create empty lib stub from target %s: %w", model.Target, err)
+					}
+					call.TempTable = stubName
+					hasInferredStubs = true
+					continue
+				}
+
+				// 4. No SQL shape, no target — first run, skip.
+				ackLibClaims()
+				result.RowsAffected = 0
+				result.RunType = "skip"
+				result.Warnings = append(result.Warnings, "lib returned 0 rows on first run — target table not created (will be created when data arrives)")
+				result.Duration = time.Since(start)
+				return result, nil
+			}
+
+			// Rewrite SQL: replace lib function calls with temp table references
+			// Check if AST-based rewrite is possible. API dict libs use
+			// macros which DuckDB expands and reconstructs -- AST rewrite
+			// produces the original SQL, not the rewritten version. Use
+			// string-based rewrite for those.
+			hasASTNodes := false
+			for _, c := range libCalls {
+				if c.ASTNode != nil && c.Lib.APIConfig == nil {
+					hasASTNodes = true
+					break
+				}
+			}
+			if hasASTNodes {
+				// AST-based rewrite (legacy TABLE libs)
+				rewriteLibCalls(parsedAST, libCalls)
+				modified, serErr := parsedAST.Serialize()
+				if serErr != nil {
+					return nil, fmt.Errorf("serialize rewritten AST: %w", serErr)
+				}
+				rewrittenSQL, desErr := r.deserializeAST(modified)
+				if desErr != nil {
+					return nil, fmt.Errorf("deserialize rewritten AST: %w", desErr)
+				}
+				state.Promote(rewrittenSQL)
+			}
+
+			// String-based rewrite for API dict libs (macro-expanded, not
+			// visible in AST). Also handles the case where AST-based rewrite
+			// handled some calls but API dict calls remain unrewritten.
+			{
+				var stringCalls []LibCall
+				for _, c := range libCalls {
+					if c.TempTable != "" && (c.ASTNode == nil || c.Lib.APIConfig != nil) {
+						stringCalls = append(stringCalls, c)
+					}
+				}
+				if len(stringCalls) > 0 {
+					state.Promote(rewriteLibCallsByString(state.Current(), stringCalls))
+				}
+			}
+
+			// Re-parse AST for lineage/CDC (now references temp tables, not lib functions)
+			var rewriteASTErr error
+			astJSON, rewriteASTErr = r.getAST(state.Current())
+			if rewriteASTErr != nil {
+				// Post-rewrite AST drives lineage + CDC; without it the
+				// model would read as having no sources and skip CDC.
+				err := fmt.Errorf("%s: cannot read the AST after the lib-call rewrite: %w", model.Target, rewriteASTErr)
+				result.Errors = append(result.Errors, err.Error())
+				result.Duration = time.Since(start)
+				return result, err
+			}
+		}
+	} // end if r.libRegistry != nil
 	// state.Rewritten() is now the post-lib-rewrite SQL — used as retry target
 	// when CDC must be reverted.
 
@@ -2288,7 +2287,6 @@ func (r *Runner) ensureUniqueKeyNotNull(tmpTable, uniqueKey string) error {
 //   - had no rename detection
 //   - on destructive changes, just warned instead of applying ALTER
 //     (breaking the DuckLake snapshot chain)
-//
 func (r *Runner) detectSchemaEvolution(
 	model *parser.Model,
 	tmpTable string,
