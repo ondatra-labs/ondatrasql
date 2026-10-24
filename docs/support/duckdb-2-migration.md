@@ -16,7 +16,7 @@ Binder Error: Deprecated lambda arrow (->) detected.
 
 Rewrite `list_transform(xs, x -> x + 1)` as `list_transform(xs, lambda x: x + 1)`, and `COLUMNS(c -> c LIKE 'a%')` as `COLUMNS(lambda c: c LIKE 'a%')`. `ondatrasql validate` reports every arrow lambda in a model as [`parser.lambda_arrow`](/reference/pipeline/validate-rules/). The JSON operator `j -> '$.a'` is unaffected.
 
-Macros count too. DuckDB 2.0 binds a macro's body when it creates the macro, so an arrow lambda in a file under `config/macros/` fails session start, and with it every run and every command that opens the project. `ondatrasql validate` reports it on the macro file.
+Macros count too. DuckDB 2.0 binds a macro's body when it creates the macro, so an arrow lambda in a file under `config/macros/` fails session start, and with it every run. `ondatrasql validate` reports it on the macro file.
 
 To keep the old syntax for now, put `SET lambda_syntax = 'ENABLE_SINGLE_ARROW';` in [`config/settings.sql`](/reference/configuration/config-settings/); validate then accepts the arrow too, in models and macros. DuckDB plans to remove that switch in a later release.
 

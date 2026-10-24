@@ -129,9 +129,9 @@ func TestInspectProjectLambdas_Settings(t *testing.T) {
 		"SET lambda_syntax = '${ONDATRA_TEST_LAMBDA_SYNTAX}';": true,
 		// A -- inside a string is not a comment.
 		"SET VARIABLE note = 'a -- b'; SET lambda_syntax = 'ENABLE_SINGLE_ARROW';": true,
-		"-- SET lambda_syntax = 'ENABLE_SINGLE_ARROW';":                                false,
-		"SET lambda_syntax = 'DISABLE_SINGLE_ARROW';":                                  false,
-		"SET lambda_syntax = 'ENABLE_SINGLE_ARROW';\nRESET lambda_syntax;":             false,
+		"-- SET lambda_syntax = 'ENABLE_SINGLE_ARROW';":                            false,
+		"SET lambda_syntax = 'DISABLE_SINGLE_ARROW';":                              false,
+		"SET lambda_syntax = 'ENABLE_SINGLE_ARROW';\nRESET lambda_syntax;":         false,
 	} {
 		dir := t.TempDir()
 		testutil.WriteFile(t, dir, "settings.sql", settings)
