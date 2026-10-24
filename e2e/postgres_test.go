@@ -24,18 +24,39 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
-// setupPostgres starts a PostgreSQL container and returns a project directory
-// configured to use it as the DuckLake catalog backend.
-// requireDocker skips a Postgres test on a machine without Docker. Without
-// it testcontainers panics, which takes down every e2e test after this one.
-// In CI the container is required and a missing Docker stays a failure.
+// requireDocker stops a Postgres test cleanly on a machine without Docker,
+// where testcontainers would otherwise panic and take down every e2e test
+// after it. Locally the test is skipped. On GitHub Actions (or any CI) the
+// container is required, so a missing Docker fails the test with the reason
+// instead of skipping it.
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if os.Getenv("CI") == "" {
-		testcontainers.SkipIfProviderIsNotHealthy(t)
+	if err := dockerHealth(); err != nil {
+		if os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("CI") != "" {
+			t.Fatalf("Docker is required in CI for the Postgres tests: %v", err)
+		}
+		t.Skipf("Docker is not available: %v", err)
 	}
 }
 
+// dockerHealth reports why testcontainers cannot reach Docker, turning its
+// panic into an error.
+func dockerHealth() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
+	provider, err := testcontainers.ProviderDocker.GetProvider()
+	if err != nil {
+		return err
+	}
+	defer provider.Close()
+	return provider.Health(context.Background())
+}
+
+// setupPostgres starts a PostgreSQL container and returns a project directory
+// configured to use it as the DuckLake catalog backend.
 func setupPostgres(t *testing.T) (projectDir string, connStr string) {
 	t.Helper()
 	requireDocker(t)
