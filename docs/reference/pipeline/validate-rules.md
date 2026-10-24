@@ -17,13 +17,13 @@ Each finding of [`ondatrasql validate`](/reference/pipeline/cli/#validate) carri
 | `parser.invalid_partitioned_by` | BLOCKER | `@partitioned_by` is malformed |
 | `parser.missing_directive` | BLOCKER | A directive the model needs is missing, such as `@fetch` on a model with a lib call |
 | `parser.duplicate_target` | BLOCKER | Two models materialize the same target |
-| `parser.lambda_arrow` | BLOCKER | A lambda is written `x -> ...`; DuckDB 2.0 rejects it when the query runs. Write `lambda x: ...` |
+| `parser.lambda_arrow` | BLOCKER | A lambda is written `x -> ...`, in a model or in a macro under `config/macros/`; DuckDB 2.0 rejects it when the query runs or the macro is created. Write `lambda x: ...`. Not reported when `config/settings.sql` sets `lambda_syntax` to `ENABLE_SINGLE_ARROW` |
 | `parser.unterminated_block_comment` | BLOCKER | A `/*` in the header has no closing `*/` |
 | `parser.deprecated_sink` | BLOCKER | The removed `@sink` directive |
 | `parser.deprecated_script` | BLOCKER | The removed `@script` directive |
 | `parser.deprecated_sink_detect_deletes` | BLOCKER | The removed `@sink_detect_deletes` directive |
 | `parser.deprecated_sink_delete_threshold` | BLOCKER | The removed `@sink_delete_threshold` directive |
-| `parser.other` | BLOCKER | Any other parse failure, including SQL DuckDB cannot serialize |
+| `parser.other` | BLOCKER | Any other parse failure: SQL DuckDB cannot serialize (such as a top-level or dynamic `PIVOT`), source tables or, for append and merge, column lineage that cannot be read, or lib-call arguments that cannot be read from the AST (reported as `cross_ast.args_mismatch` before DuckDB 2.0) |
 | `strict_fetch.cast_required` | BLOCKER | A `@fetch` projection is not cast |
 | `strict_fetch.alias_required` | BLOCKER | A `@fetch` cast has no alias |
 | `strict_fetch.where_clause_disallowed` | BLOCKER | A `@fetch` model has a WHERE clause |
