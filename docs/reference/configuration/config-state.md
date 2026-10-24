@@ -90,15 +90,13 @@ ATTACH 'quack://state.example.com:9494' AS state
     (TYPE quack, TOKEN '${ONDATRA_QUACK_TOKEN}');
 ```
 
-**Currently blocked.** `ATTACH`, `CREATE TABLE` and `INSERT` work, but the write operations the state store depends on do not:
+**Currently blocked.** On DuckDB 2.0 (quack extension `f96420ed46`), `ATTACH`, `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE` and `INSERT OR REPLACE` all work when written as literal SQL — the three that failed on DuckDB 1.5.4 (`Can only update base table`, `Can only delete from base table`, `GetStorageInfo not implemented yet`) no longer do. What still fails is a prepared statement with parameters: the values are not passed on to the server, so every query the state store binds parameters to fails.
 
 | Operation | Error |
 |---|---|
-| `UPDATE` | `Binder Error: Can only update base table` |
-| `DELETE` | `Binder Error: Can only delete from base table` |
-| `INSERT OR REPLACE` | `Not implemented Error: GetStorageInfo not implemented yet` |
+| any statement with `?` parameters, e.g. `UPDATE sync_inflight SET … WHERE claim_id = ?` | `Invalid Input Error: Values were not provided for the following parameters: 1` |
 
-Verified against DuckDB 1.5.4. Track the [duckdb-quack issue tracker](https://github.com/duckdb/duckdb-quack/issues); a production-ready Quack is expected alongside DuckDB 2.0. Until then, use Postgres for shared state.
+`ondatrasql run` against a Quack state server creates the state tables and runs models, but the push inflight check and the state GC fail with that error on every run. Verified against DuckDB 2.0.0 with a local `quack_serve`. Track the [duckdb-quack issue tracker](https://github.com/duckdb/duckdb-quack/issues). Until then, use Postgres for shared state.
 
 ## See also
 
