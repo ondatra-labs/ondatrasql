@@ -40,7 +40,15 @@ type StaticValidationResult struct {
 // rather than re-detecting inside each validator.
 //
 // Order mirrors runner.Run() so behavior matches at validate vs run time.
-func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall.Call) []StaticValidationResult {
+// StaticOptions carries project settings that change what the static
+// validators accept.
+type StaticOptions struct {
+	// SingleArrowLambdas is set when config/settings.sql enables DuckDB's
+	// deprecated `x -> ...` lambda syntax (SingleArrowLambdasEnabled).
+	SingleArrowLambdas bool
+}
+
+func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall.Call, opts StaticOptions) []StaticValidationResult {
 	var out []StaticValidationResult
 
 	if astJSON == "" {
@@ -62,8 +70,10 @@ func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall
 		out = append(out, StaticValidationResult{Category: "read_only", Err: err})
 	}
 
-	if err := validateNoArrowLambda(parsedAST); err != nil {
-		out = append(out, StaticValidationResult{Category: "parser", Err: err})
+	if !opts.SingleArrowLambdas {
+		if err := validateNoArrowLambda(parsedAST); err != nil {
+			out = append(out, StaticValidationResult{Category: "parser", Err: err})
+		}
 	}
 
 	if model.Fetch {

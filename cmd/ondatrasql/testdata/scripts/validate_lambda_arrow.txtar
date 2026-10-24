@@ -14,9 +14,19 @@ stdout '1 BLOCKER'
 exec ondatrasql run staging.ok
 stdout 'staging.ok'
 
+# With the deprecated syntax switched back on in settings.sql, DuckDB binds
+# the arrow, and validate accepts it.
+cp settings.sql config/settings.sql
+exec ondatrasql validate
+! stdout 'parser.lambda_arrow'
+exec ondatrasql run staging.arrow
+stdout 'staging.arrow'
+
 -- arrow.sql --
 -- @kind: table
 SELECT list_transform([1, 2], x -> x + 1) AS l
 -- ok.sql --
 -- @kind: table
 SELECT list_transform([1, 2], lambda x: x + 1) AS l, '{"a": 1}'::JSON -> '$.a' AS j
+-- settings.sql --
+SET lambda_syntax = 'ENABLE_SINGLE_ARROW';

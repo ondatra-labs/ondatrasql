@@ -980,7 +980,11 @@ func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins
 		return
 	}
 
-	results := execute.ValidateModelStatic(model, astJSON, calls)
+	var opts execute.StaticOptions
+	if settings, err := os.ReadFile(filepath.Join(projectDir, "config", "settings.sql")); err == nil {
+		opts.SingleArrowLambdas = execute.SingleArrowLambdasEnabled(string(settings))
+	}
+	results := execute.ValidateModelStatic(model, astJSON, calls, opts)
 	for _, r := range results {
 		fr.Checks[normalizeCheckName(r.Category)] = "fail"
 		fr.Findings = append(fr.Findings, mapStaticValidatorError(fr.Path, r))
@@ -1022,6 +1026,14 @@ func validateModelFile(sess *duckdb.Session, reg *libregistry.Registry, builtins
 	// legitimate. Detecting which args are required would require
 	// tracking defaults per Starlark param — out of scope for v0.31.
 	for i := range calls {
+		if calls[i].ArgsErr != nil {
+			// The arguments could not be read from the AST at all: an AST
+			// problem, not a mismatch with the blueprint.
+			fr.Findings = append(fr.Findings, validate.NewFinding(fr.Path, 0,
+				validate.RuleParserOther,
+				fmt.Sprintf("cannot read the arguments of %s from the AST: %v", calls[i].FuncName, calls[i].ArgsErr)))
+			continue
+		}
 		if _, err := calls[i].BindArgs(); err != nil {
 			fr.Findings = append(fr.Findings, validate.NewFinding(fr.Path, 0,
 				validate.RuleCrossASTArgsMismatch, err.Error()))
@@ -1194,7 +1206,8 @@ func mapStaticValidatorError(path string, r execute.StaticValidationResult) vali
 		id = readOnlyRuleFromMessage(msg)
 	case "parser":
 		id = validate.RuleParserOther
-		if strings.Contains(msg, "lambda x:") || strings.Contains(msg, "lambda c:") {
+		var arrow *execute.ArrowLambdaError
+		if errors.As(r.Err, &arrow) {
 			id = validate.RuleParserLambdaArrow
 		}
 	default:

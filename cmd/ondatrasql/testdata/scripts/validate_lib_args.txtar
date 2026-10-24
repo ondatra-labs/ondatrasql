@@ -1,0 +1,46 @@
+# Lib-call arguments bind to the blueprint's args: positional in order, named
+# by name. validate reports every argument that cannot be bound.
+exec ondatrasql init
+mkdir models/raw
+cp api.star lib/api.star
+cp ok.sql models/raw/ok.sql
+cp unknown.sql models/raw/unknown.sql
+cp twice.sql models/raw/twice.sql
+cp after.sql models/raw/after.sql
+cp many.sql models/raw/many.sql
+
+! exec ondatrasql validate
+stdout 'cross_ast.args_mismatch\] api: no parameter named "size"; the blueprint declares resource, page_size'
+stdout 'cross_ast.args_mismatch\] api: parameter "resource" is given more than once'
+stdout 'cross_ast.args_mismatch\] api: positional argument 2 follows a named argument'
+stdout 'cross_ast.args_mismatch\] api: passes 3 arguments but the blueprint declares only 2 \(resource, page_size\)'
+stdout '4 BLOCKER'
+
+-- api.star --
+API = {
+    "base_url": "https://example.com",
+    "fetch": {"args": ["resource", "page_size"]},
+}
+
+def fetch(resource, page_size="", page=None):
+    return {"rows": [], "next": None}
+-- ok.sql --
+-- @kind: table
+-- @fetch
+SELECT id::BIGINT AS id FROM api('items', page_size => 5)
+-- unknown.sql --
+-- @kind: table
+-- @fetch
+SELECT id::BIGINT AS id FROM api('items', size => 5)
+-- twice.sql --
+-- @kind: table
+-- @fetch
+SELECT id::BIGINT AS id FROM api('items', resource => 'other')
+-- after.sql --
+-- @kind: table
+-- @fetch
+SELECT id::BIGINT AS id FROM api(page_size => 5, 'items')
+-- many.sql --
+-- @kind: table
+-- @fetch
+SELECT id::BIGINT AS id FROM api('items', 5, 6)
