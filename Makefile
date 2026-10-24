@@ -93,12 +93,18 @@ bugcheck-static:
 	@# DuckDB 2.0 rejects it at bind time ("Deprecated lambda arrow (->)
 	@# detected"), so an embedded query that still uses it fails only when it
 	@# runs — the sandbox scd2 diff did, in front of the user. Write
-	@# `lambda x: x + 1`. A lambda sits in argument position, after `(` or `,`
-	@# or at the start of a continued line; the JSON operator `j -> '$$.a'`
-	@# is followed by a quote and is left alone.
-	@! grep -rnE "(^|[(,])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*|\([A-Za-z_][A-Za-z0-9_, ]*\))[[:space:]]*->[[:space:]]*[^>'\"[:space:]]" \
-		--include=*.sql --include=*.go internal cmd e2e \
-		| grep -vE '^\S*:[0-9]*:\s*(//|--)' \
+	@# `lambda x: x + 1`. The JSON operator is spelled the same, so a match
+	@# needs the shape of a lambda: an argument position (after `(` or `,`, or
+	@# a continued line), a parameter or parameter list, and that parameter
+	@# used again before the next `,` or `)`. `j -> '$$.a'`, `j -> 0` and
+	@# `j -> path_col` are JSON and do not match. perl for the
+	@# back-reference, which neither BSD grep -E nor ugrep has. Tests and
+	@# testdata use the arrow on purpose; ondatrasql validate covers models
+	@# (parser.lambda_arrow).
+	@! grep -rlE --include=*.sql --include=*.go -e '->' internal cmd e2e \
+		| grep -vE '_test\.go$$|/testdata/' \
+		| xargs perl -ne 'next if m{^\s*(//|--)}; print "$$ARGV:$$.: $$_" if m{(?:^|[(,])\s*([A-Za-z_]\w*)\s*->(?!>)(?!\s*[\x27"])(?=[^,)]*\b\1\b)} || m{(?:^|[(,])\s*\(\s*([A-Za-z_]\w*)[^)]*\)\s*->(?=[^,)]*\b\1\b)}; close ARGV if eof' \
+		| grep . \
 		|| (echo "bugcheck-static: lambda written as x -> ..., use lambda x: ... (see sql-lambda-arrow)"; exit 1)
 	@# ducklake-automatic-migration: an ATTACH with AUTOMATIC_MIGRATION. DuckDB
 	@# 2.0's ducklake opens a 1.5-created catalog (version 1.0) as is and keeps

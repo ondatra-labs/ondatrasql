@@ -1194,6 +1194,9 @@ func mapStaticValidatorError(path string, r execute.StaticValidationResult) vali
 		id = readOnlyRuleFromMessage(msg)
 	case "parser":
 		id = validate.RuleParserOther
+		if strings.Contains(msg, "lambda x:") || strings.Contains(msg, "lambda c:") {
+			id = validate.RuleParserLambdaArrow
+		}
 	default:
 		id = validate.RuleParserOther
 	}

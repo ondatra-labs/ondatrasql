@@ -1,0 +1,22 @@
+# A lambda written `x -> ...` passes json_serialize_sql but DuckDB 2.0
+# rejects it when the query binds. validate reports it; the JSON arrow and
+# the `lambda x:` form are fine.
+exec ondatrasql init
+mkdir models/staging
+cp arrow.sql models/staging/arrow.sql
+cp ok.sql models/staging/ok.sql
+
+! exec ondatrasql validate
+stdout 'BLOCKER parser.lambda_arrow\] list_transform\(\.\.\.\) has a lambda written as `x -> \.\.\.`'
+stdout 'write it as `lambda x: \.\.\.`'
+stdout '1 BLOCKER'
+
+exec ondatrasql run staging.ok
+stdout 'staging.ok'
+
+-- arrow.sql --
+-- @kind: table
+SELECT list_transform([1, 2], x -> x + 1) AS l
+-- ok.sql --
+-- @kind: table
+SELECT list_transform([1, 2], lambda x: x + 1) AS l, '{"a": 1}'::JSON -> '$.a' AS j

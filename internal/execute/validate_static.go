@@ -62,6 +62,10 @@ func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall
 		out = append(out, StaticValidationResult{Category: "read_only", Err: err})
 	}
 
+	if err := validateNoArrowLambda(parsedAST); err != nil {
+		out = append(out, StaticValidationResult{Category: "parser", Err: err})
+	}
+
 	if model.Fetch {
 		if err := validateStrictLibSchema(parsedAST); err != nil {
 			out = append(out, StaticValidationResult{Category: "strict_fetch", Err: err})

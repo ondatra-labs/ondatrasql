@@ -32,6 +32,10 @@ const (
 	RuleParserMissingDirective    RuleID = "parser.missing_directive"
 	RuleParserOther               RuleID = "parser.other"
 	RuleParserDuplicateTarget     RuleID = "parser.duplicate_target"
+	// parser.lambda_arrow fires on a lambda written `x -> ...`, which
+	// json_serialize_sql accepts but DuckDB 2.0 rejects when it binds the
+	// query. Write `lambda x: ...`.
+	RuleParserLambdaArrow RuleID = "parser.lambda_arrow"
 	// parser.unterminated_block_comment fires when a `/*` in the
 	// header has no closing `*/`. Pre-R11 this surfaced via the
 	// generic parser.other category, so clients couldn't filter on
