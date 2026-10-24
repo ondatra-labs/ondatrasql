@@ -101,12 +101,14 @@ bugcheck-static:
 	@# back-reference, which neither BSD grep -E nor ugrep has. Tests and
 	@# testdata use the arrow on purpose; ondatrasql validate covers models
 	@# (parser.lambda_arrow).
-	@# The scan's own exit status is checked: without that, a missing perl
-	@# left the pipeline with no output, which read as clean.
+	@# The scan runs under pipefail, so a failure in any stage fails the
+	@# gate: without that, a missing perl left the pipeline with no output,
+	@# which read as clean. grep's "no match" (exit 1) is not a failure.
 	@command -v perl >/dev/null 2>&1 \
 		|| { echo "bugcheck-static: perl is required for sql-lambda-arrow"; exit 1; }
-	@hits=$$(grep -rlE --include=*.sql --include=*.go -e '->' internal cmd e2e \
-		| grep -vE '_test\.go$$|/testdata/' \
+	@hits=$$(set -o pipefail; \
+		{ grep -rlE --include=*.sql --include=*.go -e '->' internal cmd e2e || [ $$? -eq 1 ]; } \
+		| { grep -vE '_test\.go$$|/testdata/' || [ $$? -eq 1 ]; } \
 		| xargs perl -ne 'next if m{^\s*(//|--)}; print "$$ARGV:$$.: $$_" if m{(?:^|[(,])\s*([A-Za-z_]\w*)\s*->(?!>)(?!\s*[\x27"])(?=[^,)]*\b\1\b)} || m{(?:^|[(,])\s*\(\s*([A-Za-z_]\w*)[^)]*\)\s*->(?=[^,)]*\b\1\b)}; close ARGV if eof') \
 		|| { echo "bugcheck-static: sql-lambda-arrow scan failed"; exit 1; }; \
 	if [ -n "$$hits" ]; then \
