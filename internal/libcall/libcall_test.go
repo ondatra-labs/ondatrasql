@@ -73,7 +73,7 @@ func mustParseAST(t *testing.T, j string) *duckast.AST {
 
 // sampleASTNoTableFunc is a minimal serialized AST for "SELECT 1" — no
 // TABLE_FUNCTION nodes. Captured from json_serialize_sql for stability.
-const sampleASTNoTableFunc = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"CONSTANT","type":"VALUE_CONSTANT","alias":"","query_location":7,"value":{"type":{"id":"INTEGER","type_info":null},"is_null":false,"value":1}}],"from_table":{"type":"EMPTY","alias":"","sample":null,"input_aliases":[],"column_name_alias":[],"query_location":18446744073709551615},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null}}]}`
+const sampleASTNoTableFunc = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"CONSTANT","type":"VALUE_CONSTANT","alias":"","query_location":7,"literal":{"kind":"INTEGER","text":"1"}}],"from_table":{"type":"EMPTY","alias":"","sample":null,"input_aliases":[],"column_name_alias":[],"query_location":18446744073709551615},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null}}]}`
 
 // TestAllTableFunctionNames_NilAST pins safe behavior for nil input.
 // Critical because callers in validate may have nil AST when SQL parsing

@@ -53,7 +53,7 @@ Everything in OndatraSQL that talks to state uses unqualified table names (`sync
 
 DuckDB takes a process-level file lock on `state.duckdb`. Only one ondatrasql process can have it open at a time. Inside that process, push goroutines hammer state in parallel — DuckDB's MVCC handles the contention internally.
 
-For multi-process or multi-pod deployments, you need a backend without a filesystem lock. **Postgres works today** — attach it in `state.sql` and no Go code changes. Quack (a DuckDB-served state catalog) is the other intended path but is currently blocked: `UPDATE`, `DELETE` and upsert all fail over a Quack `ATTACH`. See [config/state.sql](/reference/configuration/config-state/) for both.
+For multi-process or multi-pod deployments, you need a backend without a filesystem lock. **Postgres works today** — attach it in `state.sql` and no Go code changes. Quack (a DuckDB-served state catalog) is the other intended path but is currently blocked: on DuckDB 2.0 a statement with `?` parameters fails over a Quack `ATTACH`, and the state store binds parameters throughout. See [config/state.sql](/reference/configuration/config-state/) for both.
 
 Note that removing the lock is not the same as supporting concurrent workers on the *same* pipeline. The fetch-staging claim is unscoped, and startup recovery resets claims it finds in flight, so two workers on one pipeline will claim each other's rows. Run one worker per pipeline, and give each pipeline its own state database or schema.
 

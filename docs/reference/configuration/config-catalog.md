@@ -59,6 +59,28 @@ If a variable the file uses is not set, it expands to an empty string, and the e
 MySQL is supported by DuckLake but not by OndatraSQL. Sandbox, CDC, and run-type detection are tested for SQLite, DuckDB, and PostgreSQL only.
 {{< /callout >}}
 
+## DuckLake version and DuckDB 1.5
+
+A DuckLake catalog records the format version it was created with, and compatibility only runs one way:
+
+| Catalog | Created by | DuckDB 2.0 (OndatraSQL) | DuckDB 1.5 |
+|---|---|---|---|
+| DuckLake 1.0 | DuckDB 1.5, or 2.0 with `DUCKLAKE_VERSION '1.0'` | Reads and writes it, and leaves it at 1.0 | Reads and writes it |
+| DuckLake 1.1 | DuckDB 2.0 by default, including `ondatrasql init` | Reads and writes it | Refuses to attach it (`catalog version mismatch`) |
+
+An existing catalog keeps its version: running OndatraSQL on DuckDB 2.0 against a catalog made under 1.5 does not upgrade it, so tools still on 1.5 can keep reading it. A new catalog gets the current DuckLake format, which 1.5 cannot read.
+
+To create a new catalog that 1.5 can read, ask for the older format when it is first attached:
+
+```sql
+ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake
+    (DATA_PATH 'ducklake.sqlite.files', DUCKLAKE_VERSION '1.0');
+```
+
+The option only matters on the attach that creates the catalog, and an attach that asks for 1.0 fails on a catalog that is already 1.1 (`Cannot downgrade a DuckLake catalog`).
+
+Do not add `AUTOMATIC_MIGRATION` to the ATTACH. It upgrades the catalog in place to the newest format, there is no way back, and from then on DuckDB 1.5 cannot attach it.
+
 ## PostgreSQL Architecture
 
 {{< pg-arch >}}

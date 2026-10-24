@@ -150,8 +150,7 @@ func TestASTCDC_EmptyCDC(t *testing.T) {
 		"SELECT * FROM staging.orders",
 		[]string{"staging.orders"})
 
-	// DuckDB deserializes WHERE false as CAST('f' AS BOOLEAN)
-	if !strings.Contains(result, "CAST('f' AS BOOLEAN)") && !strings.Contains(strings.ToLower(result), "false") {
+	if !strings.Contains(result, "WHERE false") {
 		t.Errorf("expected WHERE false in empty CDC, got: %s", result)
 	}
 }
@@ -166,10 +165,10 @@ func TestASTCDC_EmptyCDC_MultipleTables(t *testing.T) {
 		"SELECT * FROM staging.orders JOIN staging.products ON true",
 		[]string{"staging.orders", "staging.products"})
 
-	// Both tables should get WHERE false (DuckDB renders as CAST('f' AS BOOLEAN))
-	castCount := strings.Count(result, "CAST('f' AS BOOLEAN)")
-	if castCount < 2 {
-		t.Errorf("expected 2x WHERE false for 2 tables, got %d in: %s", castCount, result)
+	// Both tables should get WHERE false
+	falseCount := strings.Count(result, "WHERE false")
+	if falseCount < 2 {
+		t.Errorf("expected 2x WHERE false for 2 tables, got %d in: %s", falseCount, result)
 	}
 }
 

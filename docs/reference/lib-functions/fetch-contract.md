@@ -96,8 +96,10 @@ columns = [
 | `tags::VARCHAR[]` | `["VARCHAR"]` |
 | `person::STRUCT(name VARCHAR, age INTEGER)` | `{"name": "VARCHAR", "age": "INTEGER"}` |
 | `m::MAP(VARCHAR, INTEGER)` | `"MAP(VARCHAR, INTEGER)"` |
+| `g::GEOMETRY('OGC:CRS84')` | `"GEOMETRY('OGC:CRS84')"` |
+| `x::myschema.mytype` | `"myschema.mytype"` |
 
-Width and precision distinctions are preserved (`TINYINT` vs `BIGINT`, `FLOAT` vs `DOUBLE`, `TIMESTAMP_NS` vs `TIMESTAMPTZ`) — the column dict carries enough information to round-trip back to the same DuckDB type.
+Width and precision distinctions are preserved (`TINYINT` vs `BIGINT`, `FLOAT` vs `DOUBLE`, `TIMESTAMP_NS` vs `TIMESTAMPTZ`) — the column dict carries enough information to round-trip back to the same DuckDB type. Aliases map to the canonical name (`int4` → `"INTEGER"`, `double precision` → `"DOUBLE"`, `varint` → `"BIGNUM"`). A type DuckDB does not build in — a user-defined or extension type — is passed as written, qualifier included. A cast whose type cannot be read, such as `DECIMAL` with a modifier that is not an integer, fails the run with the type named rather than becoming `VARCHAR`.
 
 The `name` field is the **cast source column reference**, not the SQL alias. For
 

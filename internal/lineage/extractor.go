@@ -433,8 +433,9 @@ func (e *Extractor) traceExprWithType(expr *duckast.Node, info aliasInfo) []Sour
 				restore := e.pushCTEScope(inner)
 				defer restore()
 				if isSetOp(inner) {
-					visit(inner.SetOpLeft())
-					visit(inner.SetOpRight())
+					for _, arm := range inner.SetOpArms() {
+						visit(arm)
+					}
 					return
 				}
 				innerInfo := collectAliases(inner.FromTable())
@@ -703,8 +704,8 @@ func classifyFunction(funcName string, isOperator bool) TransformationType {
 
 // extractMainQuery extracts lineage from the main query (after CTE resolution).
 func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
-	// Set operation node: output schema from LEFT, each output column has
-	// sources from BOTH sides (positionally aligned).
+	// Set operation node: output schema from the first arm, each output column has
+	// sources from every arm (positionally aligned).
 	if isSetOp(n) {
 		// Each arm may carry its own WITH — `(WITH x AS (...) SELECT * FROM x)
 		// UNION ALL ...` — which is in scope for that arm only.
@@ -716,46 +717,33 @@ func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 			defer restore()
 			return e.extractMainQuery(side)
 		}
-		leftCols, rightCols := arm(n.SetOpLeft()), arm(n.SetOpRight())
+		// A chain of the same operation is one node with every arm in
+		// order, so the arms fold left to right: `a UNION b UNION c` is
+		// (a UNION b) UNION c.
+		arms := n.SetOpArms()
+		armCols := make([][]ColumnLineage, len(arms))
+		for i, side := range arms {
+			armCols[i] = arm(side)
+		}
 		// An arm whose star could not be expanded has no positional columns
-		// to merge. Keeping the other arm's columns would present sources
+		// to merge. Keeping the other arms' columns would present sources
 		// that silently leave that arm out, so the whole result is unknown.
-		for _, cols := range [][]ColumnLineage{leftCols, rightCols} {
+		for _, cols := range armCols {
 			for _, c := range cols {
 				if isPlaceholder(c) {
 					return unexpandedStar()
 				}
 			}
 		}
-		// UNION BY NAME matches columns by name, not position: the output is
-		// the left side's columns followed by any the right side adds.
-		if strings.HasSuffix(n.SetOpType(), "_BY_NAME") {
-			merged := make([]ColumnLineage, 0, len(leftCols)+len(rightCols))
-			index := make(map[string]int, len(leftCols))
-			for _, lc := range leftCols {
-				index[strings.ToLower(lc.Column)] = len(merged)
-				merged = append(merged, ColumnLineage{Column: lc.Column, Sources: append([]SourceColumn{}, lc.Sources...)})
-			}
-			for _, rc := range rightCols {
-				if at, ok := index[strings.ToLower(rc.Column)]; ok {
-					merged[at].Sources = append(merged[at].Sources, rc.Sources...)
-					continue
-				}
-				index[strings.ToLower(rc.Column)] = len(merged)
-				merged = append(merged, ColumnLineage{Column: rc.Column, Sources: append([]SourceColumn{}, rc.Sources...)})
-			}
-			return merged
+		// A set operation with no arms has columns nobody can name; report
+		// it as unknown rather than as a query that produces none.
+		if len(armCols) == 0 {
+			return unexpandedStar()
 		}
-		var merged []ColumnLineage
-		for i, lc := range leftCols {
-			combined := ColumnLineage{
-				Column:  lc.Column,
-				Sources: append([]SourceColumn{}, lc.Sources...),
-			}
-			if i < len(rightCols) {
-				combined.Sources = append(combined.Sources, rightCols[i].Sources...)
-			}
-			merged = append(merged, combined)
+		matchByName := strings.HasSuffix(n.SetOpType(), "_BY_NAME")
+		merged := armCols[0]
+		for _, next := range armCols[1:] {
+			merged = mergeSetOpArm(merged, next, matchByName)
 		}
 		return merged
 	}
@@ -773,6 +761,43 @@ func (e *Extractor) extractMainQuery(n *duckast.Node) []ColumnLineage {
 		})
 	}
 	return result
+}
+
+// mergeSetOpArm combines the columns of a set operation's result so far
+// with those of its next arm. UNION BY NAME matches columns by name, not
+// position: the output is the left side's columns followed by any the
+// right side adds. Every other set operation aligns them by position and
+// takes the left side's names.
+func mergeSetOpArm(leftCols, rightCols []ColumnLineage, byName bool) []ColumnLineage {
+	if byName {
+		merged := make([]ColumnLineage, 0, len(leftCols)+len(rightCols))
+		index := make(map[string]int, len(leftCols))
+		for _, lc := range leftCols {
+			index[strings.ToLower(lc.Column)] = len(merged)
+			merged = append(merged, ColumnLineage{Column: lc.Column, Sources: append([]SourceColumn{}, lc.Sources...)})
+		}
+		for _, rc := range rightCols {
+			if at, ok := index[strings.ToLower(rc.Column)]; ok {
+				merged[at].Sources = append(merged[at].Sources, rc.Sources...)
+				continue
+			}
+			index[strings.ToLower(rc.Column)] = len(merged)
+			merged = append(merged, ColumnLineage{Column: rc.Column, Sources: append([]SourceColumn{}, rc.Sources...)})
+		}
+		return merged
+	}
+	var merged []ColumnLineage
+	for i, lc := range leftCols {
+		combined := ColumnLineage{
+			Column:  lc.Column,
+			Sources: append([]SourceColumn{}, lc.Sources...),
+		}
+		if i < len(rightCols) {
+			combined.Sources = append(combined.Sources, rightCols[i].Sources...)
+		}
+		merged = append(merged, combined)
+	}
+	return merged
 }
 
 // starColumn is one column a star expands to, with the relation that
@@ -1452,15 +1477,9 @@ func findPrimaryBaseTable(stmt *duckast.Node, parentScope map[string]bool) *duck
 	if stmt.IsNil() {
 		return nil
 	}
-	// Descend SET_OPERATION_NODE.left chain to the leftmost SELECT-shaped
+	// Descend through the first arm of each SET_OPERATION_NODE to the leftmost SELECT-shaped
 	// branch — the "primary" of `A UNION B` is whatever A's primary is.
-	n := stmt
-	for isSetOp(n) {
-		n = n.SetOpLeft()
-		if n.IsNil() {
-			return nil
-		}
-	}
+	n := stmt.FirstSelect()
 	if !n.IsSelectNode() {
 		return nil
 	}

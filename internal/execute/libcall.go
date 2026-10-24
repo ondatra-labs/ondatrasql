@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
+	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
@@ -182,56 +184,81 @@ func stripStringsAndComments(sql string) string {
 }
 
 // evaluateArgs evaluates each argument expression from a TABLE_FUNCTION AST node
-// by serializing it to SQL and executing SELECT <expr>. This handles string literals,
-// glob('*.pdf'), getvariable('x'), env-expanded '${VAR}', and any DuckDB expression.
-func (r *Runner) evaluateArgs(call *LibCall) ([]any, error) {
-	args := make([]any, len(call.ArgNodes))
-	for i, argNode := range call.ArgNodes {
-		val, err := r.evaluateSingleArg(argNode)
+// and returns it under the blueprint parameter it binds to (see
+// libcall.Call.BindArgs). This handles string literals, glob('*.pdf'),
+// getvariable('x'), env-expanded '${VAR}', and any DuckDB expression.
+//
+// Every value is a string, whatever the literal kind: blueprints receive
+// their args as strings (docs/reference/lib-functions/api-dict.md) and build
+// on that, as in "limit=" + limit. NULL is "".
+func (r *Runner) evaluateArgs(call *LibCall) (map[string]any, error) {
+	params, err := call.BindArgs()
+	if err != nil {
+		return nil, err
+	}
+	args := make(map[string]any, len(call.Args))
+	for i, arg := range call.Args {
+		val, err := r.evaluateSingleArg(arg.Expr)
 		if err != nil {
 			return nil, fmt.Errorf("arg %d of %s: %w", i, call.FuncName, err)
 		}
-		args[i] = val
+		args[params[i]] = val
 	}
 	return args, nil
 }
 
-// evaluateSingleArg serializes an AST expression node back to SQL and evaluates it.
-func (r *Runner) evaluateSingleArg(node *duckast.Node) (any, error) {
+// evaluateSingleArg returns an argument expression's value as the string
+// DuckDB renders for CAST(<expr> AS VARCHAR).
+func (r *Runner) evaluateSingleArg(node *duckast.Node) (string, error) {
 	if node == nil || node.IsNil() {
-		return nil, nil
+		return "", nil
 	}
 
-	// For simple string constants, extract directly from AST (avoid round-trip)
-	if node.Class() == "CONSTANT" {
-		raw := node.Raw()
-		if valMap, ok := raw["value"].(map[string]any); ok {
-			if v, exists := valMap["value"]; exists {
-				return v, nil
-			}
-		}
+	// Strings, integers, booleans and NULL: the literal is the answer, no
+	// round-trip needed.
+	if v, ok := node.ConstantString(); ok {
+		return v, nil
 	}
+	return r.evaluateArgViaDuckDB(node)
+}
 
-	// For complex expressions (glob, getvariable, etc.), serialize and evaluate via DuckDB
-	// Wrap the expression in a minimal SELECT to get the AST shape json_deserialize_sql expects
-	exprAST := buildSelectExprAST(node)
+// evaluateArgViaDuckDB handles everything else (decimals, floats, huge
+// integers, blobs, glob, getvariable, ...): it serializes the expression,
+// casts it to VARCHAR and evaluates it via DuckDB.
+func (r *Runner) evaluateArgViaDuckDB(node *duckast.Node) (string, error) {
+	exprAST := buildSelectExprAST(castToVarchar(node))
 	b, err := json.Marshal(exprAST)
 	if err != nil {
-		return nil, fmt.Errorf("serialize arg: %w", err)
+		return "", fmt.Errorf("serialize arg: %w", err)
 	}
 	serialized := string(b)
 
 	sql, err := r.deserializeAST(serialized)
 	if err != nil {
-		return nil, fmt.Errorf("deserialize arg: %w", err)
+		return "", fmt.Errorf("deserialize arg: %w", err)
 	}
 
-	// sql is "SELECT <expr>" — execute it
+	// sql is "SELECT CAST(<expr> AS VARCHAR)" — execute it
 	result, err := r.sess.QueryValue(sql)
 	if err != nil {
-		return nil, fmt.Errorf("evaluate: %w", err)
+		return "", fmt.Errorf("evaluate: %w", err)
 	}
 	return result, nil
+}
+
+// castToVarchar wraps an expression node in CAST(... AS VARCHAR), in the
+// DuckDB 2.0 AST shape.
+func castToVarchar(expr *duckast.Node) *duckast.Node {
+	return duckast.NewNode(map[string]any{
+		"class": "CAST", "type": "OPERATOR_CAST", "alias": "",
+		"query_location": 0, "try_cast": false,
+		"child": expr.Raw(),
+		"type_expr": map[string]any{
+			"class": "TYPE", "type": "TYPE", "alias": "", "query_location": 0,
+			"catalog": "", "schema": "", "type_name": "VARCHAR", "children": []any{},
+			"qualified_name": duckast.QualifiedName("VARCHAR"),
+		},
+	})
 }
 
 // buildSelectExprAST wraps an expression node in a minimal SELECT AST
@@ -248,11 +275,11 @@ func buildSelectExprAST(exprNode *duckast.Node) map[string]any {
 					"select_list": []any{
 						exprNode.Raw(),
 					},
-					"from_table":          nil,
-					"where_clause":        nil,
-					"group_expressions":   []any{},
-					"group_sets":          []any{},
-					"aggregate_handling":  "STANDARD_HANDLING",
+					"from_table":         nil,
+					"where_clause":       nil,
+					"group_expressions":  []any{},
+					"group_sets":         []any{},
+					"aggregate_handling": "STANDARD_HANDLING",
 					"having":             nil,
 					"sample":             nil,
 					"qualify":            nil,
@@ -316,120 +343,135 @@ func matchColumns(ast *duckast.AST, lib *libregistry.LibFunc, alias string, sing
 	return cols, nil
 }
 
-// canonicalDuckType maps a DuckDB type name (and its many aliases) to its
-// canonical DuckDB-native syntax. The canonical name is what surfaces in
-// the column dict's `type` field for primitive types; blueprints can pass
-// it back into DuckDB (json_transform, CAST, etc.) without translation.
+// builtinTypes maps every DuckDB built-in scalar type name and alias,
+// upper-cased, to the canonical DuckDB-native spelling that surfaces in the
+// column dict's `type` field. Blueprints can pass it back into DuckDB
+// (json_transform, CAST, etc.) without translation.
 //
 // Information-preserving: integer width (TINYINT/SMALLINT/INTEGER/BIGINT/
 // HUGEINT and unsigned variants), float precision (FLOAT vs DOUBLE), and
 // timestamp variants are kept distinct. The previous design collapsed all
 // of these to "integer" / "float" / "timestamp" + side-channel fields,
 // losing width/precision in the column dict.
-func canonicalDuckType(duckdbType string) string {
-	upper := strings.ToUpper(strings.TrimSpace(duckdbType))
+//
+// TestBuiltinTypes_CoverDuckDBTypes pins that every name duckdb_types()
+// lists is here, so a type DuckDB adds or renames fails that test instead of
+// reaching a model as an unknown name. Composite keywords (LIST, STRUCT,
+// MAP, UNION, ARRAY, ENUM) and DECIMAL are handled by their callers.
+var builtinTypes = map[string]string{
+	// Signed integers
+	"TINYINT": "TINYINT", "INT1": "TINYINT",
+	"SMALLINT": "SMALLINT", "INT2": "SMALLINT", "INT16": "SMALLINT", "SHORT": "SMALLINT",
+	"INTEGER": "INTEGER", "INT": "INTEGER", "INT4": "INTEGER", "INT32": "INTEGER", "SIGNED": "INTEGER", "INTEGRAL": "INTEGER",
+	"BIGINT": "BIGINT", "INT8": "BIGINT", "INT64": "BIGINT", "LONG": "BIGINT", "OID": "BIGINT",
+	"HUGEINT": "HUGEINT", "INT128": "HUGEINT",
+	"BIGNUM": "BIGNUM", "VARINT": "BIGNUM",
+	// Unsigned integers
+	"UTINYINT": "UTINYINT", "UINT8": "UTINYINT",
+	"USMALLINT": "USMALLINT", "UINT16": "USMALLINT",
+	"UINTEGER": "UINTEGER", "UINT32": "UINTEGER",
+	"UBIGINT": "UBIGINT", "UINT64": "UBIGINT",
+	"UHUGEINT": "UHUGEINT", "UINT128": "UHUGEINT",
+	// Floats
+	"FLOAT": "FLOAT", "FLOAT4": "FLOAT", "REAL": "FLOAT",
+	"DOUBLE": "DOUBLE", "FLOAT8": "DOUBLE",
+	// Boolean
+	"BOOLEAN": "BOOLEAN", "BOOL": "BOOLEAN", "LOGICAL": "BOOLEAN",
+	// Temporal — variants kept distinct (DuckDB-native names)
+	"DATE":                     "DATE",
+	"TIME":                     "TIME",
+	"TIMETZ":                   "TIMETZ",
+	"TIME WITH TIME ZONE":      "TIMETZ",
+	"TIME_NS":                  "TIME_NS",
+	"TIMESTAMP":                "TIMESTAMP",
+	"DATETIME":                 "TIMESTAMP",
+	"TIMESTAMP_US":             "TIMESTAMP",
+	"TIMESTAMPTZ":              "TIMESTAMPTZ",
+	"TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ",
+	"TIMESTAMPTZ_NS":           "TIMESTAMPTZ_NS",
+	"TIMESTAMP_NS":             "TIMESTAMP_NS",
+	"TIMESTAMP_MS":             "TIMESTAMP_MS",
+	"TIMESTAMP_S":              "TIMESTAMP_S",
+	"INTERVAL":                 "INTERVAL",
+	// Text
+	"VARCHAR": "VARCHAR", "CHAR": "VARCHAR", "BPCHAR": "VARCHAR",
+	"TEXT": "VARCHAR", "STRING": "VARCHAR", "NVARCHAR": "VARCHAR",
+	// Other primitives
+	"JSON":      "JSON",
+	"UUID":      "UUID",
+	"GUID":      "UUID",
+	"BLOB":      "BLOB",
+	"BYTEA":     "BLOB",
+	"BINARY":    "BLOB",
+	"VARBINARY": "BLOB",
+	"BIT":       "BIT",
+	"BITSTRING": "BIT",
+	"GEOMETRY":  "GEOMETRY",
+	"VARIANT":   "VARIANT",
+}
 
-	// DECIMAL(p,s) / NUMERIC(p,s) — DECIMAL is canonical, precision/scale stay in the syntax
-	if strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC") {
-		if idx := strings.Index(upper, "("); idx >= 0 {
-			endIdx := strings.Index(upper, ")")
-			if endIdx < 0 {
-				endIdx = len(upper)
+// canonicalDuckType returns the canonical spelling of a DuckDB built-in
+// scalar type name or alias. ok is false for any other name: a composite
+// keyword, or a user-defined or extension type.
+func canonicalDuckType(name string) (string, bool) {
+	c, ok := builtinTypes[strings.ToUpper(strings.TrimSpace(name))]
+	return c, ok
+}
+
+// withModifiers appends a type's modifiers in DuckDB syntax:
+// GEOMETRY('OGC:CRS84'), BIT(8). VARCHAR's length is dropped, as DuckDB
+// ignores it.
+func withModifiers(name string, params []string) string {
+	if len(params) == 0 || name == "VARCHAR" {
+		return name
+	}
+	return name + "(" + strings.Join(params, ", ") + ")"
+}
+
+// builtinWithModifiers renders a built-in type with its modifiers the way
+// DuckDB binds it. FLOAT(p) is SQL's precision in bits: up to 24 it is FLOAT,
+// up to 53 DOUBLE, so FLOAT(53) binds as DOUBLE. A character type drops its
+// length, which DuckDB ignores. Any other modifier is kept, and DuckDB
+// rejects one a type does not take when the stub or the cast binds.
+func builtinWithModifiers(canon string, params []string) string {
+	if canon == "FLOAT" && len(params) == 1 {
+		if p, err := strconv.Atoi(params[0]); err == nil {
+			switch {
+			case p >= 1 && p <= 24:
+				return "FLOAT"
+			case p >= 25 && p <= 53:
+				return "DOUBLE"
 			}
-			inner := upper[idx+1 : endIdx]
-			parts := strings.Split(inner, ",")
-			precision := strings.TrimSpace(parts[0])
-			if precision == "" {
-				return "DECIMAL(18,3)"
-			}
-			if len(parts) >= 2 {
-				return "DECIMAL(" + precision + "," + strings.TrimSpace(parts[1]) + ")"
-			}
-			return "DECIMAL(" + precision + ",0)"
 		}
-		// Bare DECIMAL — DuckDB defaults; expose as DECIMAL(18,3) explicitly.
-		return "DECIMAL(18,3)"
 	}
-
-	// Aliases → canonical DuckDB syntax. Width/precision distinctions are
-	// preserved (no collapse to "integer" / "float").
-	canonical := map[string]string{
-		// Signed integers
-		"TINYINT": "TINYINT", "INT1": "TINYINT",
-		"SMALLINT": "SMALLINT", "INT2": "SMALLINT", "INT16": "SMALLINT", "SHORT": "SMALLINT",
-		"INTEGER": "INTEGER", "INT": "INTEGER", "INT4": "INTEGER", "INT32": "INTEGER", "SIGNED": "INTEGER",
-		"BIGINT": "BIGINT", "INT8": "BIGINT", "INT64": "BIGINT", "LONG": "BIGINT",
-		"HUGEINT": "HUGEINT", "INT128": "HUGEINT",
-		// Unsigned integers
-		"UTINYINT": "UTINYINT", "UINT8": "UTINYINT",
-		"USMALLINT": "USMALLINT", "UINT16": "USMALLINT",
-		"UINTEGER": "UINTEGER", "UINT32": "UINTEGER",
-		"UBIGINT": "UBIGINT", "UINT64": "UBIGINT",
-		"UHUGEINT": "UHUGEINT", "UINT128": "UHUGEINT",
-		// Floats
-		"FLOAT": "FLOAT", "FLOAT4": "FLOAT", "REAL": "FLOAT",
-		"DOUBLE": "DOUBLE", "FLOAT8": "DOUBLE",
-		// Boolean
-		"BOOLEAN": "BOOLEAN", "BOOL": "BOOLEAN", "LOGICAL": "BOOLEAN",
-		// Temporal — variants kept distinct (DuckDB-native names)
-		"DATE":                            "DATE",
-		"TIME":                            "TIME",
-		"TIMETZ":                          "TIMETZ",
-		"TIME WITH TIME ZONE":             "TIMETZ",
-		"TIME_NS":                         "TIME_NS",
-		"TIMESTAMP":                       "TIMESTAMP",
-		"DATETIME":                        "TIMESTAMP",
-		"TIMESTAMP_US":                    "TIMESTAMP",
-		"TIMESTAMPTZ":                     "TIMESTAMPTZ",
-		"TIMESTAMP WITH TIME ZONE":        "TIMESTAMPTZ",
-		"TIMESTAMP_NS":                    "TIMESTAMP_NS",
-		"TIMESTAMP_MS":                    "TIMESTAMP_MS",
-		"TIMESTAMP_S":                     "TIMESTAMP_S",
-		"INTERVAL":                        "INTERVAL",
-		// Text
-		"VARCHAR": "VARCHAR", "CHAR": "VARCHAR", "BPCHAR": "VARCHAR",
-		"TEXT": "VARCHAR", "STRING": "VARCHAR", "NVARCHAR": "VARCHAR",
-		// Other primitives
-		"JSON": "JSON",
-		"UUID": "UUID",
-		"BLOB": "BLOB", "BYTEA": "BLOB", "BINARY": "BLOB", "VARBINARY": "BLOB",
-		"BIT": "BIT", "BITSTRING": "BIT",
-		"ENUM": "VARCHAR", // ENUM materialized values are strings
-	}
-
-	if c, ok := canonical[upper]; ok {
-		return c
-	}
-
-	// Unrecognized → VARCHAR (catch-all primitive in DuckDB).
-	return "VARCHAR"
+	return withModifiers(canon, params)
 }
 
-// normalizeType maps a DuckDB type name to a DuckDB-native type value
-// suitable for a column dict's `type` field. For primitives this is just
-// the canonical type name as a string. Composite types (LIST, STRUCT,
-// MAP, UNION) reach this path only when extracted by name without
-// structure info — return the bare keyword string and let
-// normalizeTypeFromAST handle the structured variant.
-func normalizeType(duckdbType string) any {
-	upper := strings.ToUpper(strings.TrimSpace(duckdbType))
-	switch upper {
-	case "LIST", "ARRAY":
-		return "LIST"
-	case "MAP":
-		return "MAP"
-	case "STRUCT", "ROW":
-		return "STRUCT"
-	case "UNION":
-		return "UNION"
-	case "VARIANT":
-		return "VARIANT"
+// decimalSpec renders a DECIMAL/NUMERIC cast target with DuckDB's defaults
+// made explicit: bare DECIMAL is DECIMAL(18,3) and DECIMAL(p) has scale 0.
+// A modifier that is not an integer, or more than two, is an error rather
+// than a guess.
+func decimalSpec(t *duckast.TypeRef) (string, error) {
+	width, scale := "18", "3"
+	switch len(t.Params) {
+	case 0:
+	case 1:
+		width, scale = t.Params[0], "0"
+	case 2:
+		width, scale = t.Params[0], t.Params[1]
+	default:
+		return "", fmt.Errorf("type %s(%s) takes at most a width and a scale", t.Name, strings.Join(t.Params, ", "))
 	}
-	return canonicalDuckType(duckdbType)
+	for _, p := range []string{width, scale} {
+		if _, err := strconv.Atoi(p); err != nil {
+			return "", fmt.Errorf("type %s(%s): modifiers must be integers", t.Name, strings.Join(t.Params, ", "))
+		}
+	}
+	return "DECIMAL(" + width + "," + scale + ")", nil
 }
 
-// normalizeTypeFromAST extracts a DuckDB-native type from a cast_type AST
-// node. The shape mirrors DuckDB's `json_structure` output:
+// normalizeTypeFromAST extracts a DuckDB-native type from a cast's target
+// type. The shape mirrors DuckDB's `json_structure` output:
 //
 //	primitive  → DuckDB-syntax string ("VARCHAR", "BIGINT", "DECIMAL(18,3)", "TIMESTAMPTZ")
 //	LIST       → []any with one element: [<inner type>]
@@ -438,101 +480,86 @@ func normalizeType(duckdbType string) any {
 //
 // Composite types nest naturally — LIST of STRUCT becomes
 // `[{"f1": "VARCHAR", "f2": ["BIGINT"]}]`.
-func normalizeTypeFromAST(castType *duckast.Node) any {
-	if castType == nil {
-		return "VARCHAR"
+//
+// A name that is not a built-in — a user-defined or extension type such as
+// `myschema.mytype` — is returned as written, qualifier included: it names
+// a real type for the blueprint to pass back, and DuckDB rejects it there if
+// it does not exist. Nothing here falls back to VARCHAR: a missing target
+// type or a malformed composite is an error naming the type.
+func normalizeTypeFromAST(t *duckast.TypeRef) (any, error) {
+	if t == nil {
+		return nil, fmt.Errorf("cast has no target type")
+	}
+	if t.Qualified() {
+		return withModifiers(t.QualifiedName(), t.Params), nil
 	}
 
-	id := castType.String("id")
-	typeInfo := castType.Field("type_info")
-
-	switch id {
+	switch strings.ToUpper(t.Name) {
 	case "LIST", "ARRAY":
-		if typeInfo != nil {
-			childType := typeInfo.Field("child_type")
-			if childType != nil {
-				return []any{normalizeTypeFromAST(childType)}
-			}
+		if len(t.Fields) != 1 {
+			return nil, fmt.Errorf("type %s has %d element types, want 1", t.Name, len(t.Fields))
 		}
-		return []any{"VARCHAR"}
+		elem, err := normalizeTypeFromAST(t.Fields[0].Type)
+		if err != nil {
+			return nil, err
+		}
+		return []any{elem}, nil
 
-	case "STRUCT":
+	case "STRUCT", "ROW":
 		fields := map[string]any{}
-		if typeInfo != nil {
-			for _, ct := range typeInfo.FieldList("child_types") {
-				fieldName := ct.String("first")
-				fieldType := ct.Field("second")
-				if fieldName != "" {
-					fields[fieldName] = normalizeTypeFromAST(fieldType)
-				}
+		for _, f := range t.Fields {
+			if f.Name == "" {
+				return nil, fmt.Errorf("type %s has a member without a name", t.Name)
 			}
+			ft, err := normalizeTypeFromAST(f.Type)
+			if err != nil {
+				return nil, err
+			}
+			fields[f.Name] = ft
 		}
-		return fields
+		return fields, nil
 
 	case "MAP":
-		// DuckDB stores MAP as LIST(STRUCT(key, value)). Reconstruct the
-		// MAP(K, V) syntax string from the wrapped struct.
-		key := "VARCHAR"
-		value := "VARCHAR"
-		if typeInfo != nil {
-			if childType := typeInfo.Field("child_type"); childType != nil {
-				if structInfo := childType.Field("type_info"); structInfo != nil {
-					for _, ct := range structInfo.FieldList("child_types") {
-						name := ct.String("first")
-						typeNode := ct.Field("second")
-						switch name {
-						case "key":
-							key = duckTypeToString(normalizeTypeFromAST(typeNode))
-						case "value":
-							value = duckTypeToString(normalizeTypeFromAST(typeNode))
-						}
-					}
-				}
-			}
+		if len(t.Fields) != 2 {
+			return nil, fmt.Errorf("type MAP has %d types, want a key and a value", len(t.Fields))
 		}
-		return "MAP(" + key + ", " + value + ")"
+		var kv [2]string
+		for i, f := range t.Fields {
+			ft, err := normalizeTypeFromAST(f.Type)
+			if err != nil {
+				return nil, err
+			}
+			kv[i] = duckTypeToString(ft)
+		}
+		return "MAP(" + kv[0] + ", " + kv[1] + ")", nil
 
 	case "UNION":
 		var members []string
-		if typeInfo != nil {
-			for _, ct := range typeInfo.FieldList("child_types") {
-				memberName := ct.String("first")
-				memberType := ct.Field("second")
-				memberStr := duckTypeToString(normalizeTypeFromAST(memberType))
-				if memberName != "" {
-					members = append(members, memberName+" "+memberStr)
-				} else {
-					members = append(members, memberStr)
-				}
+		for _, f := range t.Fields {
+			ft, err := normalizeTypeFromAST(f.Type)
+			if err != nil {
+				return nil, err
+			}
+			memberStr := duckTypeToString(ft)
+			if f.Name != "" {
+				members = append(members, f.Name+" "+memberStr)
+			} else {
+				members = append(members, memberStr)
 			}
 		}
-		return "UNION(" + strings.Join(members, ", ") + ")"
+		return "UNION(" + strings.Join(members, ", ") + ")", nil
 
-	case "DECIMAL", "NUMERIC":
-		precision := "18"
-		scale := "3"
-		if typeInfo != nil {
-			if w := typeInfo.String("width"); w != "" {
-				precision = w
-			}
-			if s := typeInfo.String("scale"); s != "" {
-				scale = s
-			}
-		}
-		return "DECIMAL(" + precision + "," + scale + ")"
+	case "DECIMAL", "NUMERIC", "DEC":
+		return decimalSpec(t)
 
-	case "UNBOUND":
-		// User-defined types (JSON, etc.) — name lives in type_info.
-		if typeInfo != nil {
-			if name := typeInfo.String("name"); name != "" {
-				return normalizeType(name)
-			}
-		}
-		return "VARCHAR"
-
-	default:
-		return normalizeType(id)
+	case "ENUM":
+		return "VARCHAR", nil // ENUM materialized values are strings
 	}
+
+	if canon, ok := canonicalDuckType(t.Name); ok {
+		return builtinWithModifiers(canon, t.Params), nil
+	}
+	return withModifiers(t.Name, t.Params), nil
 }
 
 // duckTypeToString flattens a possibly-composite type back to a single
@@ -565,19 +592,19 @@ func duckTypeToString(t any) string {
 
 // extractTypedSelectColumns extracts column names and normalized types from the SELECT list.
 // Returns []map[string]any where each entry has "name", "type", and optional extra fields.
-func extractTypedSelectColumns(ast *duckast.AST) []any {
+func extractTypedSelectColumns(ast *duckast.AST) ([]any, error) {
 	if ast == nil {
-		return nil
+		return nil, nil
 	}
 	stmts := ast.Statements()
 	if len(stmts) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Statements() already unwraps the "node" field
 	selectNode := stmts[0]
 	selectList := selectNode.SelectList()
 	if len(selectList) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var result []any
@@ -593,8 +620,13 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 			// it is intentionally NOT mirrored here so that blueprints
 			// can rename columns at projection time without changing
 			// what they fetch.
-			castType := item.Field("cast_type")
-			typeValue = normalizeTypeFromAST(castType)
+			castType, err := item.CastType()
+			if err == nil {
+				typeValue, err = normalizeTypeFromAST(castType)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("projection %q: %w", projectionDisplayName(item), err)
+			}
 			child := item.Field("child")
 			if child != nil && child.Class() == "COLUMN_REF" {
 				names := child.ColumnNames()
@@ -622,7 +654,7 @@ func extractTypedSelectColumns(ast *duckast.AST) []any {
 			})
 		}
 	}
-	return result
+	return result, nil
 }
 
 // extractAllColumnNames walks the entire AST and collects all COLUMN_REF names.
@@ -695,7 +727,6 @@ func extractColumnsForLib(ast *duckast.AST, alias string, singleSource bool) []s
 
 	return names
 }
-
 
 // validateStrictLibSchema enforces the strict-schema contract on `@fetch`
 // models: SQL is the complete schema source. Every output column must be
@@ -986,9 +1017,9 @@ type colShape struct {
 //
 // Returns empty if the SQL doesn't reference any columns belonging to this
 // lib (e.g. `SELECT *` against a single lib source — falls back to caller).
-func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) []colShape {
+func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) ([]colShape, error) {
 	if ast == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Step 1: typed projection — walk SELECT list, capture (name → sqlType)
@@ -999,7 +1030,10 @@ func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) []
 	stmts := ast.Statements()
 	if len(stmts) > 0 {
 		for _, item := range stmts[0].SelectList() {
-			name, sqlType, sourceAlias := projectionNameTypeAndAlias(item)
+			name, sqlType, sourceAlias, err := projectionNameTypeAndAlias(item)
+			if err != nil {
+				return nil, err
+			}
 			if name == "" {
 				continue
 			}
@@ -1020,7 +1054,7 @@ func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) []
 	// Step 2: all refs for this lib (projection + JOIN ON + WHERE + ...)
 	refCols := extractColumnsForLib(ast, alias, singleSource)
 	if len(refCols) == 0 && len(projTypes) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Step 3: union — refs determine which columns appear, projTypes
@@ -1053,7 +1087,7 @@ func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) []
 	}
 
 	sort.Slice(shape, func(i, j int) bool { return shape[i].name < shape[j].name })
-	return shape
+	return shape, nil
 }
 
 // projectionNameTypeAndAlias extracts (column-name, DuckDB-DDL-type, source-alias)
@@ -1062,19 +1096,25 @@ func extractColShapeForLib(ast *duckast.AST, alias string, singleSource bool) []
 // "" for unqualified refs and non-COLUMN_REF expressions. Returns "" name
 // for unrecognised forms.
 //
-// CAST nodes carry an `id` field on their cast_type child holding the DuckDB
-// type name ("DECIMAL", "VARCHAR", "JSON", etc). Composite types (DECIMAL with
-// precision/scale, LIST<X>, STRUCT) are reconstructed best-effort from
-// cast_type's `type_info`.
-func projectionNameTypeAndAlias(item *duckast.Node) (string, string, string) {
+// CAST nodes carry their target type as a TYPE expression (see
+// duckast.CastType). Composite types (DECIMAL with precision/scale,
+// LIST<X>, STRUCT) are reconstructed best-effort from its modifiers and
+// nested types.
+func projectionNameTypeAndAlias(item *duckast.Node) (string, string, string, error) {
 	if item == nil {
-		return "", "", ""
+		return "", "", "", nil
 	}
 
 	switch item.Class() {
 	case "CAST":
-		castType := item.Field("cast_type")
-		sqlType := sqlTypeFromCastNode(castType)
+		castType, err := item.CastType()
+		if err != nil {
+			return "", "", "", fmt.Errorf("projection %q: %w", projectionDisplayName(item), err)
+		}
+		sqlType, err := sqlTypeFromCastNode(castType)
+		if err != nil {
+			return "", "", "", fmt.Errorf("projection %q: %w", projectionDisplayName(item), err)
+		}
 		var sourceAlias, underlyingName string
 		child := item.Field("child")
 		if child != nil && child.Class() == "COLUMN_REF" {
@@ -1088,17 +1128,17 @@ func projectionNameTypeAndAlias(item *duckast.Node) (string, string, string) {
 		}
 		// Name preference: alias > underlying column name
 		if alias := item.Alias(); alias != "" {
-			return alias, sqlType, sourceAlias
+			return alias, sqlType, sourceAlias, nil
 		}
 		if underlyingName != "" {
-			return underlyingName, sqlType, sourceAlias
+			return underlyingName, sqlType, sourceAlias, nil
 		}
-		return "", sqlType, sourceAlias
+		return "", sqlType, sourceAlias, nil
 
 	case "COLUMN_REF":
 		names := item.ColumnNames()
 		if len(names) == 0 {
-			return "", "VARCHAR", ""
+			return "", "VARCHAR", "", nil
 		}
 		var sourceAlias string
 		if len(names) >= 2 {
@@ -1108,94 +1148,67 @@ func projectionNameTypeAndAlias(item *duckast.Node) (string, string, string) {
 		if alias := item.Alias(); alias != "" {
 			name = alias
 		}
-		return name, "VARCHAR", sourceAlias
+		return name, "VARCHAR", sourceAlias, nil
 
 	default:
 		// Computed expression, function call, literal — VARCHAR is the safe
 		// default; explicit cast in the SELECT recovers precision. We can't
 		// attribute these to a specific lib alias.
 		if alias := item.Alias(); alias != "" {
-			return alias, "VARCHAR", ""
+			return alias, "VARCHAR", "", nil
 		}
-		return "", "VARCHAR", ""
+		return "", "VARCHAR", "", nil
 	}
 }
 
-// sqlTypeFromCastNode reconstructs a DuckDB DDL type string from a cast_type
-// AST node. Returns "VARCHAR" if the node is missing or unrecognised.
-func sqlTypeFromCastNode(castType *duckast.Node) string {
-	if castType == nil {
-		return "VARCHAR"
-	}
-	id := castType.String("id")
-	if id == "" {
-		return "VARCHAR"
+// sqlTypeFromCastNode reconstructs a DuckDB DDL type string from a cast's
+// target type. A missing target type is an error, not VARCHAR.
+func sqlTypeFromCastNode(t *duckast.TypeRef) (string, error) {
+	if t == nil {
+		return "", fmt.Errorf("cast has no target type")
 	}
 
-	// DECIMAL / NUMERIC carry precision + scale in type_info.
-	if id == "DECIMAL" || id == "NUMERIC" {
-		typeInfo := castType.Field("type_info")
-		if typeInfo != nil {
-			width := typeInfo.String("width")
-			scale := typeInfo.String("scale")
-			if width != "" && scale != "" {
-				return fmt.Sprintf("DECIMAL(%s,%s)", width, scale)
-			}
-			if width != "" {
-				return fmt.Sprintf("DECIMAL(%s,0)", width)
+	// A user-defined or extension type keeps its qualifier; quoting each
+	// part keeps an odd name from being read as something else.
+	quoted := func() string {
+		var parts []string
+		for _, p := range []string{t.Catalog, t.Schema, t.Name} {
+			if p != "" {
+				parts = append(parts, duckdb.QuoteIdentifier(p))
 			}
 		}
-		return "DECIMAL"
+		return withModifiers(strings.Join(parts, "."), t.Params)
+	}
+	if t.Qualified() {
+		return quoted(), nil
 	}
 
-	// UNBOUND is DuckDB's encoding for user-defined types (JSON, UUID,
-	// extension types). The actual type name lives on type_info.name.
-	if id == "UNBOUND" {
-		typeInfo := castType.Field("type_info")
-		if typeInfo != nil {
-			if name := typeInfo.String("name"); name != "" {
-				return name
-			}
-		}
-		return "VARCHAR"
-	}
-
+	switch strings.ToUpper(t.Name) {
+	case "DECIMAL", "NUMERIC", "DEC":
+		return decimalSpec(t)
 	// Composite + parameterized types — DuckDB needs the full shape
-	// (`STRUCT(a INT, b VARCHAR)`, `UNION(...)`, `ENUM(...)`) which we
-	// can't reconstruct from the stub-side AST. The stub holds 0 rows;
-	// VARCHAR is the safest column type that won't fail CREATE and won't
-	// constrain anything (the real data flows through the rewrite path,
-	// not the stub).
-	switch id {
+	// (`STRUCT(a INT, b VARCHAR)`, `UNION(...)`, `ENUM(...)`), which the stub
+	// does not need. The stub holds 0 rows; VARCHAR is the safest column type
+	// that won't fail CREATE and won't constrain anything (the real data
+	// flows through the rewrite path, not the stub).
 	case "LIST", "ARRAY":
-		return "VARCHAR[]" // simplification: stub doesn't need true element type
-	case "STRUCT":
-		return "VARCHAR"
-	case "MAP":
-		return "VARCHAR"
-	case "UNION":
-		return "VARCHAR"
-	case "ENUM":
-		return "VARCHAR"
+		return "VARCHAR[]", nil // simplification: stub doesn't need true element type
+	case "STRUCT", "ROW", "MAP", "UNION", "ENUM":
+		return "VARCHAR", nil
 	}
 
-	// Most DuckDB types accept their id verbatim as DDL: numeric (TINYINT,
-	// SMALLINT, INTEGER, BIGINT, HUGEINT, UTINYINT..UHUGEINT, FLOAT, DOUBLE,
-	// BIGNUM, VARINT), string (VARCHAR), boolean (BOOLEAN), temporal (DATE,
-	// TIME, TIMETZ, TIMESTAMP, TIMESTAMPTZ, INTERVAL), binary (BLOB, BIT,
-	// UUID), JSON.
-	return id
+	if canon, ok := canonicalDuckType(t.Name); ok {
+		return builtinWithModifiers(canon, t.Params), nil
+	}
+	return quoted(), nil
 }
 
-// buildLibCallKwargs builds the kwargs map for calling a Starlark lib function.
-func buildLibCallKwargs(lib *libregistry.LibFunc, args []any, cols []string, typedCols []any) map[string]any {
-	kwargs := make(map[string]any)
-
-	// Args mapped to API.fetch.args names — all as kwargs
-	for i, argName := range lib.Args {
-		if i < len(args) {
-			kwargs[argName] = args[i]
-		}
+// buildLibCallKwargs builds the kwargs map for calling a Starlark lib
+// function. args is keyed by API.fetch.args name, as evaluateArgs binds it.
+func buildLibCallKwargs(lib *libregistry.LibFunc, args map[string]any, cols []string, typedCols []any) map[string]any {
+	kwargs := make(map[string]any, len(args))
+	for name, v := range args {
+		kwargs[name] = v
 	}
 
 	// Column selections — filtered to only columns belonging to this lib
@@ -1260,12 +1273,13 @@ func rewriteLibCalls(ast *duckast.AST, calls []LibCall) {
 		func(n *duckast.Node) map[string]any {
 			return map[string]any{
 				"type":              "BASE_TABLE",
-				"alias":            n.Alias(),
-				"sample":           nil,
-				"query_location":   0,
-				"catalog_name":     "",
-				"schema_name":      "",
-				"table_name":       nodeToTemp[n],
+				"alias":             n.Alias(),
+				"sample":            nil,
+				"query_location":    0,
+				"catalog_name":      "",
+				"schema_name":       "",
+				"table_name":        nodeToTemp[n],
+				"qualified_name":    duckast.QualifiedName(nodeToTemp[n]),
 				"column_name_alias": []any{},
 			}
 		},
@@ -1274,7 +1288,7 @@ func rewriteLibCalls(ast *duckast.AST, calls []LibCall) {
 
 // findMatchingParen finds the position after the closing paren, starting from
 // pos (which should be just after the opening paren). Respects:
-//   - single-quoted strings ('...' with '' escapes)
+//   - single-quoted strings ('...', a quote inside doubled)
 //   - double-quoted identifiers ("...")
 //   - line comments (-- ...)
 //   - block comments (/* ... */)

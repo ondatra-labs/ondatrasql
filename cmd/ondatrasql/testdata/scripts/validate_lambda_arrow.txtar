@@ -1,0 +1,45 @@
+# A lambda written `x -> ...` passes json_serialize_sql but DuckDB 2.0
+# rejects it when the query binds. validate reports it; the JSON arrow and
+# the `lambda x:` form are fine.
+exec ondatrasql init
+mkdir models/staging
+cp arrow.sql models/staging/arrow.sql
+cp ok.sql models/staging/ok.sql
+
+! exec ondatrasql validate
+stdout 'BLOCKER parser.lambda_arrow\] list_transform\(\.\.\.\) has a lambda written as `x -> \.\.\.`'
+stdout 'write it as `lambda x: \.\.\.`'
+stdout '1 BLOCKER'
+
+exec ondatrasql run staging.ok
+stdout 'staging.ok'
+
+# A macro is bound when DuckDB creates it, so an arrow in config/macros/
+# stops every run; validate reports it on the macro file.
+cp macro.sql config/macros/arrow_macro.sql
+! exec ondatrasql validate
+stdout 'config/macros/arrow_macro.sql'
+stdout 'BLOCKER parser.lambda_arrow\] a macro has a lambda written as `x -> \.\.\.`'
+! exec ondatrasql run staging.ok
+stderr 'Deprecated lambda arrow'
+
+# With the deprecated syntax switched back on in settings.sql, DuckDB binds
+# the arrow, and validate accepts it.
+cp settings.sql config/settings.sql
+exec ondatrasql validate
+! stdout 'parser.lambda_arrow'
+exec ondatrasql run staging.arrow
+stdout 'staging.arrow'
+exec ondatrasql run staging.ok
+stdout 'staging.ok'
+
+-- arrow.sql --
+-- @kind: table
+SELECT list_transform([1, 2], x -> x + 1) AS l
+-- ok.sql --
+-- @kind: table
+SELECT list_transform([1, 2], lambda x: x + 1) AS l, '{"a": 1}'::JSON -> '$.a' AS j
+-- settings.sql --
+SET lambda_syntax = 'ENABLE_SINGLE_ARROW';
+-- macro.sql --
+CREATE MACRO inc_all(l) AS list_transform(l, x -> x + 1);

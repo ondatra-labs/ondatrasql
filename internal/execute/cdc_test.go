@@ -125,18 +125,24 @@ func TestBuildCDCSubquery_Structure(t *testing.T) {
 		t.Fatalf("expected EXCEPT, got %v", stmtNode["setop_type"])
 	}
 
-	// Check right side has at_clause with version
-	right := stmtNode["right"].(map[string]any)
+	// DuckDB 2.0 lists set-operation arms under children; left and right
+	// are null.
+	arms := stmtNode["children"].([]any)
+	if len(arms) != 2 || stmtNode["left"] != nil || stmtNode["right"] != nil {
+		t.Fatalf("expected two arms under children and null left/right, got %v", stmtNode)
+	}
+
+	// Check second arm has at_clause with version
+	right := arms[1].(map[string]any)
 	fromTable := right["from_table"].(map[string]any)
 	atClause := fromTable["at_clause"].(map[string]any)
 	if atClause["unit"] != "VERSION" {
 		t.Fatalf("expected VERSION unit, got %v", atClause["unit"])
 	}
 	expr := atClause["expr"].(map[string]any)
-	val := expr["value"].(map[string]any)
-	// JSON numbers from Go marshal are float64, but we constructed with int64
-	if v, ok := val["value"].(int64); ok && v != 42 {
-		t.Fatalf("expected snapshot 42, got %v", v)
+	lit := expr["literal"].(map[string]any)
+	if lit["kind"] != "INTEGER" || lit["text"] != "42" {
+		t.Fatalf("expected INTEGER literal 42, got %v", lit)
 	}
 }
 
@@ -146,16 +152,17 @@ func TestBuildCDCSubquery_WithCatalog(t *testing.T) {
 	subquery := node["subquery"].(map[string]any)
 	stmtNode := subquery["node"].(map[string]any)
 
-	// Both left and right should reference catalog "lake"
-	left := stmtNode["left"].(map[string]any)
-	leftFrom := left["from_table"].(map[string]any)
-	if leftFrom["catalog_name"] != "lake" {
-		t.Errorf("left catalog = %v, want 'lake'", leftFrom["catalog_name"])
-	}
-	right := stmtNode["right"].(map[string]any)
-	rightFrom := right["from_table"].(map[string]any)
-	if rightFrom["catalog_name"] != "lake" {
-		t.Errorf("right catalog = %v, want 'lake'", rightFrom["catalog_name"])
+	// Both arms should reference catalog "lake", in the name fields and in
+	// the qualified_name path json_deserialize_sql renders from.
+	for i, arm := range stmtNode["children"].([]any) {
+		from := arm.(map[string]any)["from_table"].(map[string]any)
+		if from["catalog_name"] != "lake" {
+			t.Errorf("arm %d catalog = %v, want 'lake'", i, from["catalog_name"])
+		}
+		path := from["qualified_name"].(map[string]any)["path"].([]any)
+		if len(path) != 3 || path[0] != "lake" || path[1] != "staging" || path[2] != "orders" {
+			t.Errorf("arm %d qualified_name path = %v, want [lake staging orders]", i, path)
+		}
 	}
 }
 
@@ -177,8 +184,8 @@ func TestBuildEmptyCDCSubquery_Structure(t *testing.T) {
 	}
 
 	whereClause := stmtNode["where_clause"].(map[string]any)
-	if whereClause["type"] != "OPERATOR_CAST" {
-		t.Fatalf("expected OPERATOR_CAST for WHERE false, got %v", whereClause["type"])
+	if whereClause["type"] != "VALUE_CONSTANT" {
+		t.Fatalf("expected VALUE_CONSTANT for WHERE false, got %v", whereClause["type"])
 	}
 }
 
@@ -320,17 +327,12 @@ func TestStarExpr_Structure(t *testing.T) {
 func TestWhereFalseExpr_Structure(t *testing.T) {
 	t.Parallel()
 	wf := whereFalseExpr()
-	if wf["class"] != "CAST" {
-		t.Errorf("expected class CAST, got %v", wf["class"])
+	if wf["class"] != "CONSTANT" {
+		t.Errorf("expected class CONSTANT, got %v", wf["class"])
 	}
-	castType := wf["cast_type"].(map[string]any)
-	if castType["id"] != "BOOLEAN" {
-		t.Errorf("expected BOOLEAN cast, got %v", castType["id"])
-	}
-	child := wf["child"].(map[string]any)
-	val := child["value"].(map[string]any)
-	if val["value"] != "f" {
-		t.Errorf("expected 'f' value, got %v", val["value"])
+	lit := wf["literal"].(map[string]any)
+	if lit["kind"] != "BOOLEAN" || lit["text"] != "false" {
+		t.Errorf("expected BOOLEAN literal false, got %v", lit)
 	}
 }
 
@@ -433,6 +435,12 @@ func TestQualifyTablesInAST_JoinStructure(t *testing.T) {
 
 	if left["catalog_name"] != "prod_lake" {
 		t.Errorf("left catalog = %v, want 'prod_lake'", left["catalog_name"])
+	}
+	// DuckDB 2.0's json_deserialize_sql renders the table from
+	// qualified_name, so a catalog set only in catalog_name is lost.
+	path, _ := left["qualified_name"].(map[string]any)["path"].([]any)
+	if len(path) != 3 || path[0] != "prod_lake" {
+		t.Errorf("left qualified_name path = %v, want [prod_lake staging orders]", path)
 	}
 	if right["catalog_name"] != "" {
 		t.Errorf("right catalog = %v, want empty", right["catalog_name"])

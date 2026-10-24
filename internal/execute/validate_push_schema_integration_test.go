@@ -170,3 +170,29 @@ WHERE id > 0
 		t.Errorf("expected 1 row, got %d", r.RowsAffected)
 	}
 }
+
+// A chain of different set operations nests: in `(a UNION BY NAME b) UNION ALL
+// c` the first arm of the UNION ALL is itself a set operation with an empty
+// select list, and checking that list let SELECT * through. Under UNION BY NAME
+// every arm adds columns, so a star in a later arm is rejected too; a
+// positional set operation takes its columns from the first arm only.
+func TestStrictPush_SetOperationArms(t *testing.T) {
+	p := setupPushLib(t)
+	const typed = "SELECT id::BIGINT AS id, name::VARCHAR AS name FROM staging.contacts"
+	for name, tc := range map[string]struct {
+		sql    string
+		reject bool
+	}{
+		"star under a nested BY NAME":    {"SELECT * FROM staging.contacts UNION BY NAME " + typed + " UNION ALL " + typed, true},
+		"star in a later BY NAME arm":    {typed + " UNION BY NAME SELECT * FROM staging.contacts", true},
+		"star in a later positional arm": {typed + " UNION ALL SELECT id, name FROM staging.contacts", false},
+		"typed arms":                     {typed + " UNION BY NAME " + typed + " UNION ALL " + typed, false},
+	} {
+		p.AddModel("sync/setop.sql", "-- @kind: merge\n-- @unique_key: id\n-- @push: psink\n\n"+tc.sql+"\n")
+		_, err := runModelWithLibErr(t, p, "sync/setop.sql")
+		rejected := err != nil && strings.Contains(err.Error(), "SELECT *")
+		if rejected != tc.reject {
+			t.Errorf("%s: err = %v, want rejected=%v", name, err, tc.reject)
+		}
+	}
+}

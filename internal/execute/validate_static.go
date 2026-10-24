@@ -9,6 +9,7 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/libcall"
+	"github.com/ondatra-labs/ondatrasql/internal/lineage"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 )
 
@@ -40,7 +41,15 @@ type StaticValidationResult struct {
 // rather than re-detecting inside each validator.
 //
 // Order mirrors runner.Run() so behavior matches at validate vs run time.
-func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall.Call) []StaticValidationResult {
+// StaticOptions carries project settings that change what the static
+// validators accept.
+type StaticOptions struct {
+	// SingleArrowLambdas is set when config/settings.sql enables DuckDB's
+	// deprecated `x -> ...` lambda syntax (InspectProjectLambdas).
+	SingleArrowLambdas bool
+}
+
+func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall.Call, opts StaticOptions) []StaticValidationResult {
 	var out []StaticValidationResult
 
 	if astJSON == "" {
@@ -58,8 +67,26 @@ func ValidateModelStatic(model *parser.Model, astJSON string, libCalls []libcall
 		}
 	}
 
+	// The run reads the model's source tables from the AST, and for append
+	// and merge its column lineage, which CDC needs; failing either fails
+	// the run, so it is a BLOCKER here.
+	if _, err := lineage.ExtractTablesFromAST(astJSON); err != nil {
+		out = append(out, StaticValidationResult{Category: "parser", Err: fmt.Errorf("cannot read the model's source tables: %w", err)})
+	}
+	if model.Kind == "append" || model.Kind == "merge" {
+		if _, err := lineage.ExtractFromAST(astJSON); err != nil {
+			out = append(out, StaticValidationResult{Category: "parser", Err: fmt.Errorf("cannot read the model's column lineage, which CDC needs: %w", err)})
+		}
+	}
+
 	if err := validateNoLimitOffset(parsedAST); err != nil {
 		out = append(out, StaticValidationResult{Category: "read_only", Err: err})
+	}
+
+	if !opts.SingleArrowLambdas {
+		for _, err := range validateNoArrowLambda(parsedAST) {
+			out = append(out, StaticValidationResult{Category: "parser", Err: err})
+		}
 	}
 
 	if model.Fetch {

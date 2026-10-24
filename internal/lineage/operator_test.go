@@ -68,7 +68,7 @@ func TestOperators_ContributeTheirSources(t *testing.T) {
 func TestLambda_ParameterIsNotASourceColumn(t *testing.T) {
 	setupStarTables(t)
 	cols, err := Extract(shared, `
-		SELECT list_transform([b.orgnr], x -> x || b.namn) AS v FROM star.bolag b`)
+		SELECT list_transform([b.orgnr], lambda x: x || b.namn) AS v FROM star.bolag b`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestFunction_DoesNotHideAnAggregate(t *testing.T) {
 func TestLambda_BindingDoesNotLeakIntoASubqueryWithItsOwnFrom(t *testing.T) {
 	setupStarTables(t)
 	cols, err := Extract(shared, `
-		SELECT list_transform([1], gata -> (SELECT max(gata) FROM star.adress)) AS v`)
+		SELECT list_transform([1], lambda gata: (SELECT max(gata) FROM star.adress)) AS v`)
 	if err != nil {
 		t.Fatal(err)
 	}

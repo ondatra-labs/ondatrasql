@@ -6,6 +6,7 @@ package execute
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 )
@@ -66,18 +67,42 @@ func validateStrictPushSchema(ast *duckast.AST, hasLibCalls bool) error {
 	}
 
 	// For SET_OPERATION_NODE at the top level (UNION/INTERSECT/EXCEPT),
-	// we still enforce projection rules on the leftmost branch — the
-	// output schema is determined by the leftmost SELECT.
+	// we still enforce projection rules on the arms that name columns.
 	if root.IsSetOpNode() {
-		left := root.SetOpLeft()
-		if !left.IsNil() {
-			return validateSelectProjections(left, false /* fetchMode */)
-		}
-		return nil
+		return validatePushSetOp(root)
 	}
 
 	if root.IsSelectNode() {
 		return validateSelectProjections(root, false /* fetchMode */)
+	}
+	return nil
+}
+
+// validatePushSetOp enforces the @push projection rules on the arms of a set
+// operation that determine its output columns. A positional set operation
+// takes its columns from the first arm, so that one is checked — descending
+// through nested set operations, since in `(a UNION BY NAME b) UNION ALL c`
+// the first arm is itself a set operation whose own select list is empty,
+// and checking that list let `SELECT *` through. A BY NAME operation adds
+// the columns of every arm, so every arm is checked.
+func validatePushSetOp(n *duckast.Node) error {
+	arms := n.SetOpArms()
+	if len(arms) == 0 {
+		return fmt.Errorf("@push model is a set operation with no arms; cannot determine its columns")
+	}
+	if !strings.HasSuffix(n.SetOpType(), "_BY_NAME") {
+		arms = arms[:1]
+	}
+	for _, arm := range arms {
+		var err error
+		if arm.IsSetOpNode() {
+			err = validatePushSetOp(arm)
+		} else {
+			err = validateSelectProjections(arm, false /* fetchMode */)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

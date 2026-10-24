@@ -75,7 +75,7 @@ func TestExtractFromAST_WithCTE(t *testing.T) {
 	// AST for:
 	// WITH order_totals AS (SELECT customer_id, SUM(amount) as total FROM orders GROUP BY customer_id)
 	// SELECT c.name, ot.total FROM customers c JOIN order_totals ot ON c.id = ot.customer_id
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"order_totals","value":{"query":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["customer_id"]},{"class":"FUNCTION","type":"FUNCTION","alias":"total","function_name":"sum","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["c","name"]},{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["ot","total"]}],"from_table":{"type":"JOIN","left":{"type":"BASE_TABLE","alias":"c","table_name":"customers"},"right":{"type":"BASE_TABLE","alias":"ot","table_name":"order_totals"}}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"order_totals","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["customer_id"]},{"class":"FUNCTION","type":"FUNCTION","alias":"total","function_name":"sum","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["c","name"]},{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["ot","total"]}],"from_table":{"type":"JOIN","left":{"type":"BASE_TABLE","alias":"c","table_name":"customers"},"right":{"type":"BASE_TABLE","alias":"ot","table_name":"order_totals"}}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -109,7 +109,7 @@ func TestExtractFromAST_NestedCTEs(t *testing.T) {
 	// WITH raw AS (SELECT id, amount FROM orders),
 	//      agg AS (SELECT SUM(amount) as total FROM raw)
 	// SELECT a.total FROM agg a
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"raw","value":{"query":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["id"]},{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}},{"key":"agg","value":{"query":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"total","function_name":"sum","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"raw"}}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["a","total"]}],"from_table":{"type":"BASE_TABLE","alias":"a","table_name":"agg"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"raw","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["id"]},{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}},{"key":"agg","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"total","function_name":"sum","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"raw"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["a","total"]}],"from_table":{"type":"BASE_TABLE","alias":"a","table_name":"agg"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestExtractFromAST_NestedCTEs(t *testing.T) {
 func TestExtractFromAST_ExpressionWithAlias(t *testing.T) {
 	t.Parallel()
 	// AST for: SELECT o.amount * 1.25 AS total_with_tax FROM orders o
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"total_with_tax","function_name":"*","is_operator":true,"children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["o","amount"]},{"class":"CONSTANT","type":"VALUE_CONSTANT","alias":"","value":{"type":{"id":"DECIMAL"}},"value_is_null":false}]}],"from_table":{"type":"BASE_TABLE","alias":"o","table_name":"orders"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"total_with_tax","function_name":"*","is_operator":true,"arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["o","amount"]}},{"name":"","expression":{"class":"CONSTANT","type":"VALUE_CONSTANT","alias":"","literal":{"kind":"NUMERIC","text":"1.08"}}}]}],"from_table":{"type":"BASE_TABLE","alias":"o","table_name":"orders"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -238,7 +238,7 @@ func TestExtractTablesFromAST_WithCTE(t *testing.T) {
 	// WITH order_totals AS (SELECT customer_id, SUM(amount) as total FROM orders GROUP BY customer_id)
 	// SELECT c.name, ot.total FROM customers c JOIN order_totals ot ON c.id = ot.customer_id
 	// CTE "order_totals" should NOT be in the result, but "orders" inside CTE should be
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"order_totals","value":{"query":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["customer_id"]},{"class":"FUNCTION","type":"FUNCTION","alias":"total","function_name":"sum","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["c","name"]},{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["ot","total"]}],"from_table":{"type":"JOIN","left":{"type":"BASE_TABLE","alias":"c","table_name":"customers"},"right":{"type":"BASE_TABLE","alias":"ot","table_name":"order_totals"}}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"order_totals","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["customer_id"]},{"class":"FUNCTION","type":"FUNCTION","alias":"total","function_name":"sum","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["amount"]}}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["c","name"]},{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["ot","total"]}],"from_table":{"type":"JOIN","left":{"type":"BASE_TABLE","alias":"c","table_name":"customers"},"right":{"type":"BASE_TABLE","alias":"ot","table_name":"order_totals"}}}}]}`
 
 	tables, err := ExtractTablesFromAST(astJSON)
 	if err != nil {
@@ -271,7 +271,7 @@ func TestExtractTablesFromAST_WithCTE(t *testing.T) {
 func TestExtractFromAST_CaseExpression(t *testing.T) {
 	t.Parallel()
 	// AST for: SELECT CASE WHEN status = 'active' THEN name ELSE 'unknown' END AS label FROM users
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CASE","type":"CASE","alias":"label","case_checks":[{"when_expr":{"class":"COMPARISON","type":"COMPARISON","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["status"]},{"class":"CONSTANT","type":"VALUE_CONSTANT"}]},"then_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["name"]}}],"children":[{"class":"CONSTANT","type":"VALUE_CONSTANT"}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"users"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CASE","type":"CASE","alias":"label","case_checks":[{"when_expr":{"class":"COMPARISON","type":"COMPARISON","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["status"]},{"class":"CONSTANT","type":"VALUE_CONSTANT","literal":{"kind":"INTEGER","text":"0"}}]},"then_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["name"]}}],"children":[{"class":"CONSTANT","type":"VALUE_CONSTANT","literal":{"kind":"INTEGER","text":"0"}}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"users"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -314,7 +314,7 @@ func TestExtractFromAST_CastExpression(t *testing.T) {
 	// "children". This fixture previously used the type as the class and a
 	// children array — a shape DuckDB never emits — which matched the
 	// extractor's own mistake and kept a real bug green.
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CAST","type":"OPERATOR_CAST","alias":"amount_dec","child":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["amount"]},"cast_type":{"id":"DECIMAL"},"try_cast":false}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CAST","type":"OPERATOR_CAST","alias":"amount_dec","child":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["amount"]},"type_expr":{"class":"TYPE","type":"TYPE","type_name":"DECIMAL","children":[]},"try_cast":false}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -488,7 +488,7 @@ func TestExtractFromAST_ComparisonExpression(t *testing.T) {
 func TestExtractFromAST_AggregateFunction(t *testing.T) {
 	t.Parallel()
 	// AST for: SELECT COUNT(id) AS cnt FROM orders
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"cnt","function_name":"count","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["id"]}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"cnt","function_name":"count","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["id"]}}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -528,7 +528,7 @@ func TestExtractFromAST_CTEColumnNotFound(t *testing.T) {
 	t.Parallel()
 	// Query references a CTE column that doesn't exist in the CTE's select list
 	// WITH raw AS (SELECT id FROM orders) SELECT raw.nonexistent FROM raw
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"raw","value":{"query":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["id"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["raw","nonexistent"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"raw"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"raw","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["id"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["raw","nonexistent"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"raw"}}}]}`
 
 	lineages, err := ExtractFromAST(astJSON)
 	if err != nil {
@@ -547,7 +547,7 @@ func TestExtractFromAST_CTEColumnNotFound(t *testing.T) {
 func TestExtractTablesFromAST_SelectListSubquery(t *testing.T) {
 	t.Parallel()
 	// AST for: SELECT id, (SELECT MAX(val) FROM lookup) AS max_val FROM orders
-	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["id"]},{"class":"SUBQUERY","type":"SUBQUERY","alias":"max_val","subquery":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","function_name":"max","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["val"]}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"lookup"}}}}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["id"]},{"class":"SUBQUERY","type":"SUBQUERY","alias":"max_val","subquery":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","function_name":"max","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["val"]}}]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"lookup"}}}}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"orders"}}}]}`
 
 	tables, err := ExtractTablesFromAST(astJSON)
 	if err != nil {
@@ -731,5 +731,19 @@ func TestGetCDCTables(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A set operation with no arms has columns nobody can name. It reports the
+// unknown placeholder, not an empty column list that reads as "no columns".
+func TestExtractFromAST_SetOpWithoutArmsIsUnknown(t *testing.T) {
+	t.Parallel()
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SET_OPERATION_NODE","setop_type":"UNION","setop_all":true,"left":null,"right":null,"children":[],"modifiers":[],"cte_map":{"map":[]}}}]}`
+	lineages, err := ExtractFromAST(astJSON)
+	if err != nil {
+		t.Fatalf("ExtractFromAST: %v", err)
+	}
+	if len(lineages) != 1 || !isPlaceholder(lineages[0]) {
+		t.Errorf("got %+v, want the single unknown placeholder", lineages)
 	}
 }

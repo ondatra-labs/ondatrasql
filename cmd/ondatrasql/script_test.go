@@ -31,6 +31,16 @@ func TestScript(t *testing.T) {
 		Setup: func(env *testscript.Env) error {
 			// DuckDB requires a valid HOME directory
 			env.Setenv("HOME", env.WorkDir)
+			// A fresh HOME has no extension cache, so every script downloads
+			// ducklake. testscript starts from an empty environment, which
+			// drops the proxy a sandboxed host can only reach the network
+			// through; without it DuckDB 2.0 spins on the download until
+			// the package times out instead of failing.
+			for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+				if v, ok := os.LookupEnv(name); ok {
+					env.Setenv(name, v)
+				}
+			}
 			return nil
 		},
 	})

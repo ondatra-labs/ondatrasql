@@ -89,6 +89,40 @@ bugcheck-static:
 	@! grep -rnE 'os\.ExpandEnv\(|os\.Expand\(.*os\.Getenv' --include=*.go internal cmd \
 		| grep -v '_test\.go:' | grep -v '^internal/configenv/' | grep -v '^\S*:[0-9]*:\s*//' \
 		|| (echo "bugcheck-static: config SQL expanded with os.ExpandEnv, use configenv.Expand (see config-sql-expandenv)"; exit 1)
+	@# sql-lambda-arrow: a lambda written with the single arrow, `x -> x + 1`.
+	@# DuckDB 2.0 rejects it at bind time ("Deprecated lambda arrow (->)
+	@# detected"), so an embedded query that still uses it fails only when it
+	@# runs — the sandbox scd2 diff did, in front of the user. Write
+	@# `lambda x: x + 1`. The JSON operator is spelled the same, so a match
+	@# needs the shape of a lambda: an argument position (after `(` or `,`, or
+	@# a continued line), a parameter or parameter list, and that parameter
+	@# used again before the next `,` or `)`. `j -> '$$.a'`, `j -> 0` and
+	@# `j -> path_col` are JSON and do not match. perl for the
+	@# back-reference, which neither BSD grep -E nor ugrep has. Tests and
+	@# testdata use the arrow on purpose; ondatrasql validate covers models
+	@# (parser.lambda_arrow).
+	@# The scan runs under pipefail, so a failure in any stage fails the
+	@# gate: without that, a missing perl left the pipeline with no output,
+	@# which read as clean. grep's "no match" (exit 1) is not a failure.
+	@command -v perl >/dev/null 2>&1 \
+		|| { echo "bugcheck-static: perl is required for sql-lambda-arrow"; exit 1; }
+	@hits=$$(set -o pipefail; \
+		{ grep -rlE --include=*.sql --include=*.go -e '->' internal cmd e2e || [ $$? -eq 1 ]; } \
+		| { grep -vE '_test\.go$$|/testdata/' || [ $$? -eq 1 ]; } \
+		| xargs perl -ne 'next if m{^\s*(//|--)}; print "$$ARGV:$$.: $$_" if m{(?:^|[(,])\s*([A-Za-z_]\w*)\s*->(?!>)(?!\s*[\x27"])(?=[^,)]*\b\1\b)} || m{(?:^|[(,])\s*\(\s*([A-Za-z_]\w*)[^)]*\)\s*->(?=[^,)]*\b\1\b)}; close ARGV if eof') \
+		|| { echo "bugcheck-static: sql-lambda-arrow scan failed"; exit 1; }; \
+	if [ -n "$$hits" ]; then \
+		echo "$$hits"; \
+		echo "bugcheck-static: lambda written as x -> ..., use lambda x: ... (see sql-lambda-arrow)"; exit 1; \
+	fi
+	@# ducklake-automatic-migration: an ATTACH with AUTOMATIC_MIGRATION. DuckDB
+	@# 2.0's ducklake opens a 1.5-created catalog (version 1.0) as is and keeps
+	@# it at 1.0, so 1.5 can still read it; AUTOMATIC_MIGRATION upgrades it in
+	@# place, after which 1.5 refuses to attach it at all. The catalog has to
+	@# stay readable by 1.5.
+	@! grep -rniE 'automatic_migration' --include=*.go --include=*.sql --include=*.txtar internal cmd e2e \
+		| grep -vE '^\S*:[0-9]*:\s*(//|--|#)' \
+		|| (echo "bugcheck-static: AUTOMATIC_MIGRATION would upgrade the catalog past 1.5 (see ducklake-automatic-migration)"; exit 1)
 	@echo "bugcheck-static: clean"
 
 build:

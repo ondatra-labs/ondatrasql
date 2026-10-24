@@ -26,6 +26,21 @@ type Project struct {
 // NewProject creates a complete project structure in t.TempDir() with an in-memory DuckLake catalog.
 func NewProject(t *testing.T) *Project {
 	t.Helper()
+	return newProject(t, false)
+}
+
+// NewProjectOnDuckLake10 is NewProject over a catalog created at DuckLake
+// version 1.0, the format DuckDB 1.5 creates and the newest it can read,
+// as a project made under 1.5 has. The catalog is created by a separate
+// session first, so config/catalog.sql is the plain ATTACH such a project
+// carries and does not itself pin the version.
+func NewProjectOnDuckLake10(t *testing.T) *Project {
+	t.Helper()
+	return newProject(t, true)
+}
+
+func newProject(t *testing.T, ducklake10 bool) *Project {
+	t.Helper()
 	dir := t.TempDir()
 
 	// Create directory structure
@@ -34,6 +49,17 @@ func NewProject(t *testing.T) *Project {
 
 	// Create DuckLake catalog backed by a temp SQLite file
 	catalogPath := filepath.Join(dir, "ducklake.sqlite")
+	if ducklake10 {
+		pre, err := duckdb.NewSession(":memory:")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		err = pre.Exec("ATTACH 'ducklake:sqlite:" + catalogPath + "' AS lake (DATA_PATH '" + filepath.Join(dir, "data") + "', DUCKLAKE_VERSION '1.0')")
+		pre.Close()
+		if err != nil {
+			t.Fatalf("create DuckLake 1.0 catalog: %v", err)
+		}
+	}
 	WriteFile(t, dir, "config/catalog.sql",
 		"ATTACH 'ducklake:sqlite:"+catalogPath+"' AS lake (DATA_PATH '"+filepath.Join(dir, "data")+"');\n")
 

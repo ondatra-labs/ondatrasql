@@ -201,6 +201,10 @@ func initCatalog() string {
 --------------------------------------------------------------------------------
 
 -- SQLite catalog with local Parquet files
+-- A new catalog gets the current DuckLake format, which DuckDB 1.5 cannot
+-- read. If 1.5 tools must read it, add DUCKLAKE_VERSION '1.0' to the options
+-- before the first run. Never add AUTOMATIC_MIGRATION: it upgrades a catalog
+-- in place, one way.
 ATTACH 'ducklake:sqlite:ducklake.sqlite' AS lake (DATA_PATH 'ducklake.sqlite.files');
 
 -- DuckLake options (uncomment to customize)

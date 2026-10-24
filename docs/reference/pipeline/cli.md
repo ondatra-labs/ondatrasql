@@ -205,7 +205,7 @@ ondatrasql validate --output ndjson              # Stream one line per file
 ondatrasql validate --strict                     # Promote WARN to exit 1
 ```
 
-Severity levels: `BLOCKER` (would fail at `run` — includes deprecated directives, which the parser rejects outright), `WARN` (validate's own environment is degraded so downstream findings may be incomplete — extension load failed, blueprint parse error, walk skipped, etc.), `INFO` (cannot be verified without external state, e.g. external table references). Each finding carries a stable rule-ID like `parser.multi_statement` or `strict_fetch.cast_required` — these are public contract, never renamed without a `schema_version` bump.
+Severity levels: `BLOCKER` (would fail at `run` — includes deprecated directives, which the parser rejects outright), `WARN` (validate's own environment is degraded so downstream findings may be incomplete — extension load failed, blueprint parse error, walk skipped, etc.), `INFO` (cannot be verified without external state, e.g. external table references). Each finding carries a stable rule-ID like `parser.multi_statement` or `strict_fetch.cast_required` — these are public contract, never renamed without a `schema_version` bump. [Validate Rule IDs](/reference/pipeline/validate-rules/) lists them all.
 
 `validate.*` WARN findings always trigger exit 1 regardless of `--strict` because they signal that validate's own analysis was incomplete — CI consumers can't treat a degraded run as a clean one.
 

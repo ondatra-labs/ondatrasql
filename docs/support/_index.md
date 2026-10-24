@@ -9,3 +9,4 @@ When something doesn't work, start here.
 - [Known Limitations](/support/known-limitations/) — documented constraints and edge cases
 - [Troubleshooting](/support/troubleshooting/) — common errors and how to fix them
 - [FAQ](/support/faq/) — frequently asked questions
+- [Moving to DuckDB 2.0](/support/duckdb-2-migration/) — what changes for a project on DuckDB 2.0

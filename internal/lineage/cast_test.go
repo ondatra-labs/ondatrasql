@@ -16,18 +16,9 @@ import (
 // came back with no sources at all — including every `@fetch` and `@push`
 // model, whose strict contracts require `col::TYPE AS alias` per projection.
 
-const castColumnAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"CAST","type":"OPERATOR_CAST","alias":"total","child":` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["f","amount"]},` +
-	`"cast_type":{"id":"BIGINT"},"try_cast":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
+const castColumnAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CAST","type":"OPERATOR_CAST","alias":"total","child":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["f","amount"]},"type_expr":{"class":"TYPE","type":"TYPE","type_name":"BIGINT","children":[]},"try_cast":false}],"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
 
-const castAggregateAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"CAST","type":"OPERATOR_CAST","alias":"total","child":` +
-	`{"class":"FUNCTION","type":"FUNCTION","alias":"","function_name":"sum","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["f","amount"]}],"is_operator":false},` +
-	`"cast_type":{"id":"BIGINT"},"try_cast":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
+const castAggregateAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CAST","type":"OPERATOR_CAST","alias":"total","child":{"class":"FUNCTION","type":"FUNCTION","alias":"","function_name":"sum","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","column_names":["f","amount"]}}],"is_operator":false},"type_expr":{"class":"TYPE","type":"TYPE","type_name":"BIGINT","children":[]},"try_cast":false}],"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
 
 func TestExtractFromAST_CastKeepsSource(t *testing.T) {
 	t.Parallel()
@@ -81,14 +72,7 @@ func TestExtractFromAST_CastKeepsInnerAggregation(t *testing.T) {
 // not change how that value was derived. Flattening SUM(x) to CONDITIONAL
 // would hide the aggregation from GetCDCTables, and an aggregation missed
 // there is one the runtime will incorrectly serve from a CDC delta.
-const caseAggregateAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"CAST","type":"OPERATOR_CAST","alias":"total","child":` +
-	`{"class":"CASE","type":"CASE_EXPR","alias":"","case_checks":[{` +
-	`"when_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","flag"]},` +
-	`"then_expr":{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","amount"]}],"is_operator":false}}],` +
-	`"else_expr":null},"cast_type":{"id":"BIGINT"},"try_cast":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
+const caseAggregateAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CAST","type":"OPERATOR_CAST","alias":"total","child":{"class":"CASE","type":"CASE_EXPR","alias":"","case_checks":[{"when_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","flag"]},"then_expr":{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","amount"]}}],"is_operator":false}}],"else_expr":null},"type_expr":{"class":"TYPE","type":"TYPE","type_name":"BIGINT","children":[]},"try_cast":false}],"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
 
 func TestExtractFromAST_CaseKeepsInnerAggregation(t *testing.T) {
 	t.Parallel()
@@ -131,13 +115,7 @@ func TestExtractFromAST_CaseKeepsInnerAggregation(t *testing.T) {
 // that alias, and the COLUMN_REF fallback records whatever bare name it was
 // given — so without an outer-scope fallback the lineage claimed a source
 // table literally called "b".
-const correlatedSubqueryAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"SUBQUERY","type":"SUBQUERY","alias":"lbl","subquery_type":"SCALAR","child":null,"subquery":{"node":{` +
-	`"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"FUNCTION","type":"FUNCTION","function_name":"min","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["b","label"]}],"is_operator":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"e","table_name":"events"}}}}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"b","table_name":"base"}}}]}`
+const correlatedSubqueryAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"SUBQUERY","type":"SUBQUERY","alias":"lbl","subquery_type":"SCALAR","child":null,"subquery":{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","function_name":"min","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["b","label"]}}],"is_operator":false}],"from_table":{"type":"BASE_TABLE","alias":"e","table_name":"events"}}}}],"from_table":{"type":"BASE_TABLE","alias":"b","table_name":"base"}}}]}`
 
 func TestExtractFromAST_CorrelatedSubqueryResolvesOuterAlias(t *testing.T) {
 	t.Parallel()
@@ -160,18 +138,7 @@ func TestExtractFromAST_CorrelatedSubqueryResolvesOuterAlias(t *testing.T) {
 // A subquery body can be a set operation, whose own select_list is empty. Its
 // arms have to be descended into, or an aggregate inside a UNION contributes
 // no lineage and the runtime never learns the source is aggregated.
-const setOpSubqueryAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"SUBQUERY","type":"SUBQUERY","alias":"total","subquery_type":"SCALAR","child":null,"subquery":{"node":{` +
-	`"type":"SET_OPERATION_NODE","setop_type":"UNION",` +
-	`"left":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["e","amount"]}],"is_operator":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"e","table_name":"events"}},` +
-	`"right":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["a","amount"]}],"is_operator":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"a","table_name":"archive"}}}}}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"b","table_name":"base"}}}]}`
+const setOpSubqueryAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"SUBQUERY","type":"SUBQUERY","alias":"total","subquery_type":"SCALAR","child":null,"subquery":{"node":{"type":"SET_OPERATION_NODE","setop_type":"UNION","left":null,"right":null,"children":[{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["e","amount"]}}],"is_operator":false}],"from_table":{"type":"BASE_TABLE","alias":"e","table_name":"events"}},{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["a","amount"]}}],"is_operator":false}],"from_table":{"type":"BASE_TABLE","alias":"a","table_name":"archive"}}]}}}],"from_table":{"type":"BASE_TABLE","alias":"b","table_name":"base"}}}]}`
 
 func TestExtractFromAST_SetOperationSubqueryArms(t *testing.T) {
 	t.Parallel()
@@ -203,16 +170,7 @@ func TestExtractFromAST_SetOperationSubqueryArms(t *testing.T) {
 // itself as the source table, hiding the aggregation underneath it.
 //
 // cte_map shape verified against json_serialize_sql.
-const innerCTESubqueryAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"SUBQUERY","type":"SUBQUERY","alias":"total","subquery_type":"SCALAR","child":null,"subquery":{"node":{` +
-	`"type":"SELECT_NODE","cte_map":{"map":[{"key":"x","value":{"aliases":[],"query":{"node":{` +
-	`"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"FUNCTION","type":"FUNCTION","alias":"t","function_name":"sum","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","amount"]}],"is_operator":false}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}}}]},` +
-	`"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["x","t"]}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"b","table_name":"base"}}}]}`
+const innerCTESubqueryAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"SUBQUERY","type":"SUBQUERY","alias":"total","subquery_type":"SCALAR","child":null,"subquery":{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"x","value":{"aliases":[],"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"t","function_name":"sum","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","amount"]}}],"is_operator":false}],"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["x","t"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}}],"from_table":{"type":"BASE_TABLE","alias":"b","table_name":"base"}}}]}`
 
 func TestExtractFromAST_SubqueryLocalCTEResolves(t *testing.T) {
 	t.Parallel()
@@ -252,7 +210,7 @@ func TestExtractFromAST_SubqueryCTEShadowingIsRestored(t *testing.T) {
 		"type": "SELECT_NODE",
 		"cte_map": map[string]any{"map": []any{map[string]any{
 			"key":   "x",
-			"value": map[string]any{"query": map[string]any{"node": map[string]any{"type": "SELECT_NODE", "marker": "outer"}}},
+			"value": map[string]any{"query_node": map[string]any{"type": "SELECT_NODE", "marker": "outer"}},
 		}}},
 	})
 	e.pushCTEScope(outer)
@@ -260,7 +218,7 @@ func TestExtractFromAST_SubqueryCTEShadowingIsRestored(t *testing.T) {
 		"type": "SELECT_NODE",
 		"cte_map": map[string]any{"map": []any{map[string]any{
 			"key":   "x",
-			"value": map[string]any{"query": map[string]any{"node": map[string]any{"type": "SELECT_NODE", "marker": "inner"}}},
+			"value": map[string]any{"query_node": map[string]any{"type": "SELECT_NODE", "marker": "inner"}},
 		}}},
 	})
 	restore := e.pushCTEScope(inner)
@@ -278,19 +236,7 @@ func TestExtractFromAST_SubqueryCTEShadowingIsRestored(t *testing.T) {
 // as the recursion guard, so clearing that entry to shadow the name left the
 // in-flight resolution writing into a map that no longer existed — a panic on
 // user SQL, not a wrong answer.
-const selfReferencingShadowedCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE",` +
-	`"cte_map":{"map":[{"key":"x","value":{"query":{"node":{` +
-	`"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"SUBQUERY","type":"SUBQUERY","alias":"v","subquery_type":"SCALAR","child":null,"subquery":{"node":{` +
-	`"type":"SELECT_NODE","cte_map":{"map":[{"key":"x","value":{"query":{"node":{` +
-	`"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"c","column_names":["x","c"]}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}}}]},` +
-	`"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["x","c"]}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"","table_name":"src"}}}}}]},` +
-	`"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["x","v"]}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}]}`
+const selfReferencingShadowedCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"x","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"SUBQUERY","type":"SUBQUERY","alias":"v","subquery_type":"SCALAR","child":null,"subquery":{"node":{"type":"SELECT_NODE","cte_map":{"map":[{"key":"x","value":{"query_node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"c","column_names":["x","c"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["x","c"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"src"}}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["x","v"]}],"from_table":{"type":"BASE_TABLE","alias":"","table_name":"x"}}}]}`
 
 func TestExtractFromAST_SelfReferencingShadowedCTEDoesNotPanic(t *testing.T) {
 	t.Parallel()
@@ -308,13 +254,7 @@ func TestExtractFromAST_SelfReferencingShadowedCTEDoesNotPanic(t *testing.T) {
 // `else_expr`. Iterating Children() was a silent no-op, so an aggregate
 // reachable only through ELSE contributed no lineage and the source never
 // reached GetCDCTables.
-const caseElseAggregateAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[` +
-	`{"class":"CASE","type":"CASE_EXPR","alias":"total","case_checks":[{` +
-	`"when_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","flag"]},` +
-	`"then_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","fallback"]}}],` +
-	`"else_expr":{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","children":[` +
-	`{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","amount"]}],"is_operator":false}}],` +
-	`"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
+const caseElseAggregateAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","cte_map":{"map":[]},"select_list":[{"class":"CASE","type":"CASE_EXPR","alias":"total","case_checks":[{"when_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","flag"]},"then_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","fallback"]}}],"else_expr":{"class":"FUNCTION","type":"FUNCTION","function_name":"sum","schema":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","column_names":["f","amount"]}}],"is_operator":false}}],"from_table":{"type":"BASE_TABLE","alias":"f","table_name":"events"}}}]}`
 
 func TestExtractFromAST_CaseElseBranchIsTraced(t *testing.T) {
 	t.Parallel()
@@ -347,7 +287,12 @@ func TestExtractFromAST_CaseElseBranchIsTraced(t *testing.T) {
 // names against the derived table's FROM only, so `FROM (WITH x AS (SELECT
 // SUM(...) ...) SELECT x.t) d` recorded the CTE alias as the source table and
 // the aggregation underneath it never reached GetCDCTables.
-const derivedTableCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"total","query_location":7,"column_names":["d","t"]}],"from_table":{"type":"SUBQUERY","alias":"d","sample":null,"query_location":18446744073709551615,"subquery":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[{"key":"x","value":{"aliases":[],"query":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"t","query_location":44,"function_name":"sum","schema":"","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":48,"column_names":["f","amount"]}],"filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":""}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":68,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"materialized":"CTE_MATERIALIZE_DEFAULT","key_targets":[]}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"t","query_location":85,"column_names":["x","t"]}],"from_table":{"type":"BASE_TABLE","alias":"","sample":null,"query_location":99,"schema_name":"","table_name":"x","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"column_name_alias":[]},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
+//
+// Generated with json_serialize_sql from:
+//
+//	SELECT d.t AS total FROM (WITH x AS (SELECT SUM(f.amount) AS t FROM events f)
+//	                          SELECT x.t FROM x) d
+const derivedTableCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"total","query_location":7,"query_location_length":3,"column_names":["d","t"]}],"from_table":{"type":"SUBQUERY","alias":"d","sample":null,"query_location":25,"query_location_length":71,"subquery":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[{"key":"x","value":{"aliases":[],"materialized":"CTE_MATERIALIZE_DEFAULT","key_targets":[],"payload_aggregates":[],"query_node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"t","query_location":44,"query_location_length":13,"function_name":"sum","schema":"","filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":48,"query_location_length":8,"column_names":["f","amount"]}}],"qualified_name":{"path":["sum"]}}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":68,"query_location_length":8,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["events"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":85,"query_location_length":3,"column_names":["x","t"]}],"from_table":{"type":"BASE_TABLE","alias":"","sample":null,"query_location":94,"query_location_length":1,"schema_name":"","table_name":"x","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["x"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"column_name_alias":[]},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
 
 func TestExtractFromAST_DerivedTableLocalCTEResolves(t *testing.T) {
 	t.Parallel()
@@ -380,7 +325,7 @@ func TestExtractFromAST_DerivedTableLocalCTEResolves(t *testing.T) {
 //	WITH x AS (SELECT (WITH x AS (SELECT SUM(b.amount) AS t FROM archive b)
 //	                   SELECT x.t FROM x) AS v FROM events e)
 //	SELECT x.v AS out FROM x
-const shadowedInFlightCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[{"key":"x","value":{"aliases":[],"query":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"SUBQUERY","type":"SUBQUERY","alias":"v","query_location":18,"subquery_type":"SCALAR","subquery":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[{"key":"x","value":{"aliases":[],"query":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"t","query_location":37,"function_name":"sum","schema":"","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":41,"column_names":["b","amount"]}],"filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":""}],"from_table":{"type":"BASE_TABLE","alias":"b","sample":null,"query_location":61,"schema_name":"","table_name":"archive","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"materialized":"CTE_MATERIALIZE_DEFAULT","key_targets":[]}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":79,"column_names":["x","t"]}],"from_table":{"type":"BASE_TABLE","alias":"","sample":null,"query_location":88,"schema_name":"","table_name":"x","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"child":null,"comparison_type":"INVALID"}],"from_table":{"type":"BASE_TABLE","alias":"e","sample":null,"query_location":101,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"materialized":"CTE_MATERIALIZE_DEFAULT","key_targets":[]}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"out","query_location":118,"column_names":["x","v"]}],"from_table":{"type":"BASE_TABLE","alias":"","sample":null,"query_location":134,"schema_name":"","table_name":"x","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
+const shadowedInFlightCTEAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[{"key":"x","value":{"aliases":[],"materialized":"CTE_MATERIALIZE_DEFAULT","key_targets":[],"payload_aggregates":[],"query_node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"SUBQUERY","type":"SUBQUERY","alias":"v","query_location":18,"query_location_length":72,"subquery_type":"SCALAR","subquery":{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[{"key":"x","value":{"aliases":[],"materialized":"CTE_MATERIALIZE_DEFAULT","key_targets":[],"payload_aggregates":[],"query_node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"FUNCTION","type":"FUNCTION","alias":"t","query_location":37,"query_location_length":13,"function_name":"sum","schema":"","filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":41,"query_location_length":8,"column_names":["b","amount"]}}],"qualified_name":{"path":["sum"]}}],"from_table":{"type":"BASE_TABLE","alias":"b","sample":null,"query_location":61,"query_location_length":9,"schema_name":"","table_name":"archive","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["archive"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":79,"query_location_length":3,"column_names":["x","t"]}],"from_table":{"type":"BASE_TABLE","alias":"","sample":null,"query_location":88,"query_location_length":1,"schema_name":"","table_name":"x","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["x"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]},"child":null,"comparison_type":"INVALID"}],"from_table":{"type":"BASE_TABLE","alias":"e","sample":null,"query_location":101,"query_location_length":8,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["events"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null}}}]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"out","query_location":118,"query_location_length":3,"column_names":["x","v"]}],"from_table":{"type":"BASE_TABLE","alias":"","sample":null,"query_location":134,"query_location_length":1,"schema_name":"","table_name":"x","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["x"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
 
 func TestExtractFromAST_ShadowedCTEInFlightKeepsInnerSources(t *testing.T) {
 	t.Parallel()
@@ -414,7 +359,7 @@ func TestExtractFromAST_ShadowedCTEInFlightKeepsInnerSources(t *testing.T) {
 // Generated with json_serialize_sql from:
 //
 //	SELECT row_number() OVER (PARTITION BY f.grp ORDER BY f.ts) AS rn FROM events f
-const windowPartitionOrderAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"WINDOW","type":"WINDOW_ROW_NUMBER","alias":"rn","query_location":7,"function_name":"row_number","schema":"","catalog":"","children":[],"partitions":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":39,"column_names":["f","grp"]}],"orders":[{"type":"ORDER_DEFAULT","null_order":"ORDER_DEFAULT","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":54,"column_names":["f","ts"]}}],"start":"UNBOUNDED_PRECEDING","end":"CURRENT_ROW_RANGE","start_expr":null,"end_expr":null,"offset_expr":null,"default_expr":null,"ignore_nulls":false,"filter_expr":null,"exclude_clause":"NO_OTHER","distinct":false,"arg_orders":[]}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":71,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
+const windowPartitionOrderAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"WINDOW","type":"WINDOW_ROW_NUMBER","alias":"rn","query_location":7,"query_location_length":52,"function_name":"row_number","schema":"","catalog":"","partitions":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":39,"query_location_length":5,"column_names":["f","grp"]}],"orders":[{"type":"ORDER_DEFAULT","null_order":"ORDER_DEFAULT","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":54,"query_location_length":4,"column_names":["f","ts"]}}],"start":"UNBOUNDED_PRECEDING","end":"CURRENT_ROW_RANGE","start_expr":null,"end_expr":null,"offset_expr":null,"default_expr":null,"ignore_nulls":false,"filter_expr":null,"exclude_clause":"NO_OTHER","distinct":false,"arg_orders":[],"has_ignore_nulls":false,"arguments":[],"qualified_name":{"path":["row_number"]}}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":71,"query_location_length":8,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["events"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
 
 func TestExtractFromAST_WindowPartitionAndOrderAreTraced(t *testing.T) {
 	t.Parallel()
@@ -446,7 +391,7 @@ func TestExtractFromAST_WindowPartitionAndOrderAreTraced(t *testing.T) {
 //
 //	SELECT sum(f.amt) FILTER (WHERE f.ok) OVER (PARTITION BY f.grp ORDER BY f.ts) AS s
 //	FROM events f
-const windowFilterAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"WINDOW","type":"WINDOW_AGGREGATE","alias":"s","query_location":7,"function_name":"sum","schema":"","catalog":"","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":11,"column_names":["f","amt"]}],"partitions":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":57,"column_names":["f","grp"]}],"orders":[{"type":"ORDER_DEFAULT","null_order":"ORDER_DEFAULT","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":72,"column_names":["f","ts"]}}],"start":"UNBOUNDED_PRECEDING","end":"CURRENT_ROW_RANGE","start_expr":null,"end_expr":null,"offset_expr":null,"default_expr":null,"ignore_nulls":false,"filter_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":32,"column_names":["f","ok"]},"exclude_clause":"NO_OTHER","distinct":false,"arg_orders":[]}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":88,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
+const windowFilterAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"WINDOW","type":"WINDOW_AGGREGATE","alias":"s","query_location":7,"query_location_length":70,"function_name":"sum","schema":"","catalog":"","partitions":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":57,"query_location_length":5,"column_names":["f","grp"]}],"orders":[{"type":"ORDER_DEFAULT","null_order":"ORDER_DEFAULT","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":72,"query_location_length":4,"column_names":["f","ts"]}}],"start":"UNBOUNDED_PRECEDING","end":"CURRENT_ROW_RANGE","start_expr":null,"end_expr":null,"offset_expr":null,"default_expr":null,"ignore_nulls":false,"filter_expr":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":32,"query_location_length":4,"column_names":["f","ok"]},"exclude_clause":"NO_OTHER","distinct":false,"arg_orders":[],"has_ignore_nulls":false,"arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":11,"query_location_length":5,"column_names":["f","amt"]}}],"qualified_name":{"path":["sum"]}}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":88,"query_location_length":8,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["events"]}},"where_clause":null,"group_expressions":[],"group_sets":[],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
 
 func TestExtractFromAST_WindowFilterIsTraced(t *testing.T) {
 	t.Parallel()
@@ -475,7 +420,7 @@ func TestExtractFromAST_WindowFilterIsTraced(t *testing.T) {
 //	SELECT f.g AS g, count(*) FILTER (WHERE f.flag) AS c,
 //	       string_agg(f.v, chr(44) ORDER BY f.ts) AS s
 //	FROM events f GROUP BY f.g
-const aggregateFilterOrderAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"g","query_location":7,"column_names":["f","g"]},{"class":"FUNCTION","type":"FUNCTION","alias":"c","query_location":17,"function_name":"count_star","schema":"","children":[],"filter":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":40,"column_names":["f","flag"]},"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":""},{"class":"FUNCTION","type":"FUNCTION","alias":"s","query_location":54,"function_name":"string_agg","schema":"","children":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":65,"column_names":["f","v"]},{"class":"FUNCTION","type":"FUNCTION","alias":"","query_location":70,"function_name":"chr","schema":"","children":[{"class":"CONSTANT","type":"VALUE_CONSTANT","alias":"","query_location":74,"value":{"type":{"id":"INTEGER","type_info":null},"is_null":false,"value":44}}],"filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":""}],"filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[{"type":"ORDER_DEFAULT","null_order":"ORDER_DEFAULT","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":87,"column_names":["f","ts"]}}]},"distinct":false,"is_operator":false,"export_state":false,"catalog":""}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":103,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null},"where_clause":null,"group_expressions":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":121,"column_names":["f","g"]}],"group_sets":[[0]],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
+const aggregateFilterOrderAST = `{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],"cte_map":{"map":[]},"select_list":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"g","query_location":7,"query_location_length":3,"column_names":["f","g"]},{"class":"FUNCTION","type":"FUNCTION","alias":"c","query_location":17,"query_location_length":30,"function_name":"count_star","schema":"","filter":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":40,"query_location_length":6,"column_names":["f","flag"]},"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":"","arguments":[],"qualified_name":{"path":["count_star"]}},{"class":"FUNCTION","type":"FUNCTION","alias":"s","query_location":54,"query_location_length":38,"function_name":"string_agg","schema":"","filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[{"type":"ORDER_DEFAULT","null_order":"ORDER_DEFAULT","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":87,"query_location_length":4,"column_names":["f","ts"]}}]},"distinct":false,"is_operator":false,"export_state":false,"catalog":"","arguments":[{"name":"","expression":{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":65,"query_location_length":3,"column_names":["f","v"]}},{"name":"","expression":{"class":"FUNCTION","type":"FUNCTION","alias":"","query_location":70,"query_location_length":7,"function_name":"chr","schema":"","filter":null,"order_bys":{"type":"ORDER_MODIFIER","orders":[]},"distinct":false,"is_operator":false,"export_state":false,"catalog":"","arguments":[{"name":"","expression":{"class":"CONSTANT","type":"VALUE_CONSTANT","alias":"","query_location":74,"query_location_length":2,"literal":{"kind":"INTEGER","text":"44"}}}],"qualified_name":{"path":["chr"]}}}],"qualified_name":{"path":["string_agg"]}}],"from_table":{"type":"BASE_TABLE","alias":"f","sample":null,"query_location":103,"query_location_length":8,"schema_name":"","table_name":"events","column_name_alias":[],"catalog_name":"","at_clause":null,"qualified_name":{"path":["events"]}},"where_clause":null,"group_expressions":[{"class":"COLUMN_REF","type":"COLUMN_REF","alias":"","query_location":121,"query_location_length":3,"column_names":["f","g"]}],"group_sets":[[0]],"aggregate_handling":"STANDARD_HANDLING","having":null,"sample":null,"qualify":null},"named_param_map":[]}]}`
 
 func TestExtractFromAST_AggregateFilterAndOrderAreTraced(t *testing.T) {
 	t.Parallel()

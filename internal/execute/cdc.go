@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
@@ -118,7 +119,9 @@ func (r *Runner) applyEmptySmartCDC(astJSON string, cdcTables []string) (string,
 	return r.deserializeAST(modified)
 }
 
-// qualifyTablesInAST sets catalog_name on BASE_TABLE nodes matching the given tables.
+// qualifyTablesInAST sets the catalog on BASE_TABLE nodes matching the given
+// tables, through duckast.SetTableRef so that the `qualified_name` path that
+// json_deserialize_sql renders from carries it too.
 // tablesToQualify maps lowercase "schema.table" to true.
 func qualifyTablesInAST(root map[string]any, tablesToQualify map[string]bool, catalog string) {
 	walkAST(root, func(node map[string]any) map[string]any {
@@ -137,7 +140,7 @@ func qualifyTablesInAST(root map[string]any, tablesToQualify map[string]bool, ca
 		table, _ := node["table_name"].(string)
 		fullName := strings.ToLower(schema + "." + table)
 		if tablesToQualify[fullName] {
-			node["catalog_name"] = catalog
+			duckast.NewNode(node).SetTableRef(catalog, schema, table)
 		}
 		return nil // mutate in place, no replacement
 	})
@@ -197,8 +200,9 @@ func buildCDCSubquery(schema, table, catalog, alias string, snapshotID int64) ma
 			"type": "BASE_TABLE", "alias": "",
 			"at_clause": atClause, "catalog_name": catalog,
 			"column_name_alias": []any{},
-			"query_location": 0, "sample": nil,
+			"query_location":    0, "sample": nil,
 			"schema_name": schema, "table_name": table,
+			"qualified_name": duckast.QualifiedName(catalog, schema, table),
 		}
 	}
 
@@ -206,14 +210,14 @@ func buildCDCSubquery(schema, table, catalog, alias string, snapshotID int64) ma
 		return map[string]any{
 			"type":               "SELECT_NODE",
 			"aggregate_handling": "STANDARD_HANDLING",
-			"cte_map":           map[string]any{"map": []any{}},
-			"group_expressions": []any{},
-			"group_sets":        []any{},
-			"having":            nil,
-			"modifiers":         []any{},
-			"qualify":           nil,
-			"sample":            nil,
-			"where_clause":      nil,
+			"cte_map":            map[string]any{"map": []any{}},
+			"group_expressions":  []any{},
+			"group_sets":         []any{},
+			"having":             nil,
+			"modifiers":          []any{},
+			"qualify":            nil,
+			"sample":             nil,
+			"where_clause":       nil,
 			"select_list": []any{
 				starExpr(),
 			},
@@ -226,10 +230,9 @@ func buildCDCSubquery(schema, table, catalog, alias string, snapshotID int64) ma
 		"expr": map[string]any{
 			"alias": "", "class": "CONSTANT",
 			"query_location": 0, "type": "VALUE_CONSTANT",
-			"value": map[string]any{
-				"is_null": false,
-				"type":    map[string]any{"id": "BIGINT", "type_info": nil},
-				"value":   snapshotID,
+			"literal": map[string]any{
+				"kind": "INTEGER",
+				"text": strconv.FormatInt(snapshotID, 10),
 			},
 		},
 	}
@@ -248,8 +251,12 @@ func buildCDCSubquery(schema, table, catalog, alias string, snapshotID int64) ma
 				"setop_type": "EXCEPT",
 				"setop_all":  false,
 				"modifiers":  []any{},
-				"left":       selectStar(baseTable(nil)),
-				"right":      selectStar(baseTable(atClause)),
+				"left":       nil,
+				"right":      nil,
+				"children": []any{
+					selectStar(baseTable(nil)),
+					selectStar(baseTable(atClause)),
+				},
 			},
 		},
 	}
@@ -269,13 +276,13 @@ func buildEmptyCDCSubquery(schema, table, catalog, alias string) map[string]any 
 			"node": map[string]any{
 				"type":               "SELECT_NODE",
 				"aggregate_handling": "STANDARD_HANDLING",
-				"cte_map":           map[string]any{"map": []any{}},
-				"group_expressions": []any{},
-				"group_sets":        []any{},
-				"having":            nil,
-				"modifiers":         []any{},
-				"qualify":           nil,
-				"sample":            nil,
+				"cte_map":            map[string]any{"map": []any{}},
+				"group_expressions":  []any{},
+				"group_sets":         []any{},
+				"having":             nil,
+				"modifiers":          []any{},
+				"qualify":            nil,
+				"sample":             nil,
 				"select_list": []any{
 					starExpr(),
 				},
@@ -283,8 +290,9 @@ func buildEmptyCDCSubquery(schema, table, catalog, alias string) map[string]any 
 					"type": "BASE_TABLE", "alias": "",
 					"at_clause": nil, "catalog_name": catalog,
 					"column_name_alias": []any{},
-					"query_location": 0, "sample": nil,
+					"query_location":    0, "sample": nil,
 					"schema_name": schema, "table_name": table,
+					"qualified_name": duckast.QualifiedName(catalog, schema, table),
 				},
 				"where_clause": whereFalseExpr(),
 			},
@@ -298,33 +306,18 @@ func starExpr() map[string]any {
 		"alias": "", "class": "STAR", "columns": false,
 		"exclude_list": []any{}, "expr": nil,
 		"qualified_exclude_list": []any{},
-		"query_location": 0, "relation_name": "",
+		"query_location":         0, "relation_name": "",
 		"rename_list": []any{}, "replace_list": []any{},
 		"type": "STAR",
 	}
 }
 
-// whereFalseExpr returns a WHERE false AST expression (CAST('f' AS BOOLEAN)).
+// whereFalseExpr returns a WHERE false AST expression.
 func whereFalseExpr() map[string]any {
 	return map[string]any{
-		"alias":    "",
-		"class":    "CAST",
-		"type":     "OPERATOR_CAST",
-		"try_cast": false,
-		"cast_type": map[string]any{
-			"id":        "BOOLEAN",
-			"type_info": nil,
-		},
-		"query_location": 0,
-		"child": map[string]any{
-			"alias": "", "class": "CONSTANT",
-			"query_location": 0, "type": "VALUE_CONSTANT",
-			"value": map[string]any{
-				"is_null": false,
-				"type":    map[string]any{"id": "VARCHAR", "type_info": nil},
-				"value":   "f",
-			},
-		},
+		"alias": "", "class": "CONSTANT",
+		"query_location": 0, "type": "VALUE_CONSTANT",
+		"literal": map[string]any{"kind": "BOOLEAN", "text": "false"},
 	}
 }
 
