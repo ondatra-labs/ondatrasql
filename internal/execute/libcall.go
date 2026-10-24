@@ -428,6 +428,25 @@ func withModifiers(name string, params []string) string {
 	return name + "(" + strings.Join(params, ", ") + ")"
 }
 
+// builtinWithModifiers renders a built-in type with its modifiers the way
+// DuckDB binds it. FLOAT(p) is SQL's precision in bits: up to 24 it is FLOAT,
+// up to 53 DOUBLE, so FLOAT(53) binds as DOUBLE. A character type drops its
+// length, which DuckDB ignores. Any other modifier is kept, and DuckDB
+// rejects one a type does not take when the stub or the cast binds.
+func builtinWithModifiers(canon string, params []string) string {
+	if canon == "FLOAT" && len(params) == 1 {
+		if p, err := strconv.Atoi(params[0]); err == nil {
+			switch {
+			case p >= 1 && p <= 24:
+				return "FLOAT"
+			case p >= 25 && p <= 53:
+				return "DOUBLE"
+			}
+		}
+	}
+	return withModifiers(canon, params)
+}
+
 // decimalSpec renders a DECIMAL/NUMERIC cast target with DuckDB's defaults
 // made explicit: bare DECIMAL is DECIMAL(18,3) and DECIMAL(p) has scale 0.
 // A modifier that is not an integer, or more than two, is an error rather
@@ -538,7 +557,7 @@ func normalizeTypeFromAST(t *duckast.TypeRef) (any, error) {
 	}
 
 	if canon, ok := canonicalDuckType(t.Name); ok {
-		return withModifiers(canon, t.Params), nil
+		return builtinWithModifiers(canon, t.Params), nil
 	}
 	return withModifiers(t.Name, t.Params), nil
 }
@@ -1179,7 +1198,7 @@ func sqlTypeFromCastNode(t *duckast.TypeRef) (string, error) {
 	}
 
 	if canon, ok := canonicalDuckType(t.Name); ok {
-		return withModifiers(canon, t.Params), nil
+		return builtinWithModifiers(canon, t.Params), nil
 	}
 	return quoted(), nil
 }

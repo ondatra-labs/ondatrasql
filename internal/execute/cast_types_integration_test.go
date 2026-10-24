@@ -44,6 +44,13 @@ func TestCastTypes_Spellings(t *testing.T) {
 		stub string // the stub column's DDL type
 	}{
 		{"double precision", "DOUBLE", "DOUBLE"},
+		{"float(53)", "DOUBLE", "DOUBLE"},
+		{"float(25)", "DOUBLE", "DOUBLE"},
+		{"float(24)", "FLOAT", "FLOAT"},
+		{"float(10)", "FLOAT", "FLOAT"},
+		{"nchar(5)", "VARCHAR", "VARCHAR"},
+		{"bpchar(3)", "VARCHAR", "VARCHAR"},
+		{"nvarchar(4)", "VARCHAR", "VARCHAR"},
 		{"character varying", "VARCHAR", "VARCHAR"},
 		{"character varying(5)", "VARCHAR", "VARCHAR"},
 		{"timestamp without time zone", "TIMESTAMP", "TIMESTAMP"},
