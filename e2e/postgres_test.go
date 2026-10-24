@@ -28,6 +28,12 @@ import (
 // configured to use it as the DuckLake catalog backend.
 func setupPostgres(t *testing.T) (projectDir string, connStr string) {
 	t.Helper()
+	// Without Docker, testcontainers panics, which takes down every e2e test
+	// after this one. Skip on a machine without Docker; in CI the container
+	// is required and a missing Docker stays a failure.
+	if os.Getenv("CI") == "" {
+		testcontainers.SkipIfProviderIsNotHealthy(t)
+	}
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,
