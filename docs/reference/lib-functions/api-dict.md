@@ -128,7 +128,7 @@ API = {"fetch": {"args": ["resource", "options"]}}
 SELECT id::BIGINT AS id, name::VARCHAR AS name FROM my_api('users', '{"filter": "active"}')
 ```
 
-Args are strings, whatever the SQL literal: `my_api('users', 5)` passes `"5"`, `true` passes `"true"`, `1.50` passes `"1.50"`, and `NULL` passes `""`. An expression is evaluated by DuckDB and passed as its text. Positional args bind to `args` in order; a named arg, `my_api('users', options => '{}')`, binds by name. A name the blueprint does not declare, a parameter given twice, a positional arg after a named one, or more args than declared is an error (`ondatrasql validate` reports it as `cross_ast.args_mismatch`). A name that is a SQL keyword, such as `limit`, cannot be passed by name.
+Args are strings, whatever the SQL literal: `my_api('users', 5)` passes `"5"`, `true` passes `"true"`, `1.50` passes `"1.50"`, and `NULL` passes `""`. An expression is evaluated by DuckDB and passed as its text. Positional args bind to `args` in order; a named arg, `my_api('users', options => '{}')`, binds by name. A name the blueprint does not declare, a parameter given twice, a positional arg after a named one, or more args than declared is an error (`ondatrasql validate` reports it as `cross_ast.args_mismatch`). A name that is a SQL keyword, such as `limit`, has to be quoted to be passed by name: `my_api('users', "limit" => 5)`; unquoted it is a syntax error and the run fails.
 
 For structured configuration, pass JSON and decode in Starlark:
 

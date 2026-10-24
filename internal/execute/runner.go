@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -2150,85 +2149,42 @@ func (r *Runner) extractArgsFromSQL(sql string, lib *libregistry.LibFunc, occurr
 
 	// Split by comma, respecting parentheses and quoted strings.
 	// Handles cases like: func('a,b'), func(json('{"x":1}'))
-	// A named argument, `name => value` or `name := value`, binds by name
-	// under the same rules as the AST path (libcall.BindArgNames).
-	parts := splitArgsRespectingNesting(argsStr)
-	names := make([]string, len(parts))
-	values := make([]string, len(parts))
-	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		if m := namedArgRe.FindStringSubmatch(part); m != nil {
-			names[i] = m[1]
-			part = strings.TrimSpace(m[2])
-		}
-		// Remove surrounding quotes
-		if len(part) >= 2 && ((part[0] == '\'' && part[len(part)-1] == '\'') || (part[0] == '"' && part[len(part)-1] == '"')) {
-			part = part[1 : len(part)-1]
-		}
-		values[i] = part
+	// The arguments go through the same path as an AST-detected call: the
+	// call text is serialized on its own, bound with BindArgNames and each
+	// argument evaluated by evaluateSingleArg. Splitting the text by hand
+	// gave different strings — NULL as "NULL", TRUE as "TRUE", 1_000 as
+	// "1_000", '' left doubled, a quoted "limit" => 5 not read as named, and
+	// an expression passed as its source text.
+	call := "SELECT * FROM " + duckdb.QuoteIdentifier(lib.Name) + "(" + argsStr + ")"
+	astJSON, err := lineage.GetAST(r.sess, call)
+	if err != nil {
+		return nil, fmt.Errorf("%s: read the arguments: %w", lib.Name, err)
+	}
+	ast, err := duckast.Parse(astJSON)
+	if err != nil {
+		return nil, fmt.Errorf("%s: read the arguments: %w", lib.Name, err)
+	}
+	args, err := ast.Statements()[0].FromTable().TableFunctionArgs()
+	if err != nil {
+		return nil, fmt.Errorf("%s: read the arguments: %w", lib.Name, err)
+	}
+	names := make([]string, len(args))
+	for i, a := range args {
+		names[i] = a.Name
 	}
 	params, err := libcall.BindArgNames(lib.Name, lib.Args, names)
 	if err != nil {
 		return nil, err
 	}
-	for i, p := range params {
-		kwargs[p] = values[i]
+	for i, a := range args {
+		v, err := r.evaluateSingleArg(a.Expr)
+		if err != nil {
+			return nil, fmt.Errorf("arg %d of %s: %w", i, lib.Name, err)
+		}
+		kwargs[params[i]] = v
 	}
 	return kwargs, nil
 }
-
-// namedArgRe matches a named argument in SQL text: an identifier followed by
-// `=>` or `:=`.
-var namedArgRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(?:=>|:=)\s*(.*)$`)
-
-
-
-// splitArgsRespectingNesting splits a comma-separated argument string while
-// respecting parentheses nesting and quoted strings. This correctly handles
-// cases like: 'a,b', json('{"x":1,"y":2}'), concat('a', 'b')
-func splitArgsRespectingNesting(s string) []string {
-	var parts []string
-	var current strings.Builder
-	depth := 0
-	inString := false
-	stringChar := byte(0)
-
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if inString {
-			current.WriteByte(c)
-			if c == stringChar {
-				// Handle escaped quotes ('')
-				if i+1 < len(s) && s[i+1] == stringChar {
-					current.WriteByte(s[i+1])
-					i++
-				} else {
-					inString = false
-				}
-			}
-		} else if c == '\'' || c == '"' {
-			inString = true
-			stringChar = c
-			current.WriteByte(c)
-		} else if c == '(' {
-			depth++
-			current.WriteByte(c)
-		} else if c == ')' {
-			depth--
-			current.WriteByte(c)
-		} else if c == ',' && depth == 0 {
-			parts = append(parts, current.String())
-			current.Reset()
-		} else {
-			current.WriteByte(c)
-		}
-	}
-	if current.Len() > 0 {
-		parts = append(parts, current.String())
-	}
-	return parts
-}
-
 
 func sanitizeTableName(target string) string {
 	// Replace non-alphanumeric characters with underscores.

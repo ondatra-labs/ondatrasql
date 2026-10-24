@@ -43,7 +43,7 @@ type Call struct {
 	// values returned from Detect.
 	Lib *libregistry.LibFunc
 	// Args holds the AST arguments in the order the SQL FROM clause passes
-	// them, each with its name when passed by name (`f(limit => 5)`).
+	// them, each with its name when passed by name (`f(page_size => 5)`).
 	// BindArgs maps them onto Lib.Args.
 	Args []duckast.Argument
 	// ArgsErr is set when the arguments could not be read from the AST.
@@ -182,13 +182,13 @@ func BuiltinTableFunctions(sess *duckdb.Session) (map[string]bool, error) {
 
 // BindArgs maps the arguments of a lib call onto the parameter names the
 // blueprint declares in Lib.Args: positional arguments in order, named ones
-// (`f(limit => 5)`) by name, compared case-insensitively. It returns the
+// (`f(page_size => 5)`) by name, compared case-insensitively. It returns the
 // parameter name of each argument, index for index.
 //
 // An argument that cannot be bound is an error, never dropped: a name the
 // blueprint does not declare, a parameter given twice, more positional
 // arguments than parameters, or a positional argument after a named one.
-// Binding by position alone used to hand `f(limit => 5, 'k')` the 5 as the
+// Binding by position alone used to hand `f(page_size => 5, 'k')` the 5 as the
 // first parameter, whatever it was called.
 func (c *Call) BindArgs() ([]string, error) {
 	if c.ArgsErr != nil {

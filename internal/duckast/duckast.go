@@ -333,7 +333,7 @@ func (n *Node) TableFunctionName() string {
 }
 
 // TableFunctionArgs returns the arguments of a TABLE_FUNCTION in order, with
-// the name of each named argument (`f(limit => 5)`).
+// the name of each named argument (`f(page_size => 5)`).
 func (n *Node) TableFunctionArgs() ([]Argument, error) {
 	fn := n.Field("function")
 	if fn.IsNil() {
