@@ -733,3 +733,17 @@ func TestGetCDCTables(t *testing.T) {
 		})
 	}
 }
+
+// A set operation with no arms has columns nobody can name. It reports the
+// unknown placeholder, not an empty column list that reads as "no columns".
+func TestExtractFromAST_SetOpWithoutArmsIsUnknown(t *testing.T) {
+	t.Parallel()
+	astJSON := `{"error":false,"statements":[{"node":{"type":"SET_OPERATION_NODE","setop_type":"UNION","setop_all":true,"left":null,"right":null,"children":[],"modifiers":[],"cte_map":{"map":[]}}}]}`
+	lineages, err := ExtractFromAST(astJSON)
+	if err != nil {
+		t.Fatalf("ExtractFromAST: %v", err)
+	}
+	if len(lineages) != 1 || !isPlaceholder(lineages[0]) {
+		t.Errorf("got %+v, want the single unknown placeholder", lineages)
+	}
+}
