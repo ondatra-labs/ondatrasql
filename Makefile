@@ -101,11 +101,18 @@ bugcheck-static:
 	@# back-reference, which neither BSD grep -E nor ugrep has. Tests and
 	@# testdata use the arrow on purpose; ondatrasql validate covers models
 	@# (parser.lambda_arrow).
-	@! grep -rlE --include=*.sql --include=*.go -e '->' internal cmd e2e \
+	@# The scan's own exit status is checked: without that, a missing perl
+	@# left the pipeline with no output, which read as clean.
+	@command -v perl >/dev/null 2>&1 \
+		|| { echo "bugcheck-static: perl is required for sql-lambda-arrow"; exit 1; }
+	@hits=$$(grep -rlE --include=*.sql --include=*.go -e '->' internal cmd e2e \
 		| grep -vE '_test\.go$$|/testdata/' \
-		| xargs perl -ne 'next if m{^\s*(//|--)}; print "$$ARGV:$$.: $$_" if m{(?:^|[(,])\s*([A-Za-z_]\w*)\s*->(?!>)(?!\s*[\x27"])(?=[^,)]*\b\1\b)} || m{(?:^|[(,])\s*\(\s*([A-Za-z_]\w*)[^)]*\)\s*->(?=[^,)]*\b\1\b)}; close ARGV if eof' \
-		| grep . \
-		|| (echo "bugcheck-static: lambda written as x -> ..., use lambda x: ... (see sql-lambda-arrow)"; exit 1)
+		| xargs perl -ne 'next if m{^\s*(//|--)}; print "$$ARGV:$$.: $$_" if m{(?:^|[(,])\s*([A-Za-z_]\w*)\s*->(?!>)(?!\s*[\x27"])(?=[^,)]*\b\1\b)} || m{(?:^|[(,])\s*\(\s*([A-Za-z_]\w*)[^)]*\)\s*->(?=[^,)]*\b\1\b)}; close ARGV if eof') \
+		|| { echo "bugcheck-static: sql-lambda-arrow scan failed"; exit 1; }; \
+	if [ -n "$$hits" ]; then \
+		echo "$$hits"; \
+		echo "bugcheck-static: lambda written as x -> ..., use lambda x: ... (see sql-lambda-arrow)"; exit 1; \
+	fi
 	@# ducklake-automatic-migration: an ATTACH with AUTOMATIC_MIGRATION. DuckDB
 	@# 2.0's ducklake opens a 1.5-created catalog (version 1.0) as is and keeps
 	@# it at 1.0, so 1.5 can still read it; AUTOMATIC_MIGRATION upgrades it in
