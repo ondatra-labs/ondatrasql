@@ -7,9 +7,9 @@
 -- Args: %[1]s = sandbox catalog, %[2]s = prod catalog, %[3]s = target table
 
 SELECT COUNT(*) FROM (
-    SELECT COLUMNS(c -> c NOT IN ('valid_from_snapshot', 'valid_to_snapshot', 'is_current', 'valid_from_at', 'valid_to_at'))
+    SELECT COLUMNS(lambda c: c NOT IN ('valid_from_snapshot', 'valid_to_snapshot', 'is_current', 'valid_from_at', 'valid_to_at'))
     FROM %[1]s.%[3]s WHERE is_current IS true
     EXCEPT
-    SELECT COLUMNS(c -> c NOT IN ('valid_from_snapshot', 'valid_to_snapshot', 'is_current', 'valid_from_at', 'valid_to_at'))
+    SELECT COLUMNS(lambda c: c NOT IN ('valid_from_snapshot', 'valid_to_snapshot', 'is_current', 'valid_from_at', 'valid_to_at'))
     FROM %[2]s.%[3]s WHERE is_current IS true
 )

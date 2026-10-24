@@ -89,6 +89,17 @@ bugcheck-static:
 	@! grep -rnE 'os\.ExpandEnv\(|os\.Expand\(.*os\.Getenv' --include=*.go internal cmd \
 		| grep -v '_test\.go:' | grep -v '^internal/configenv/' | grep -v '^\S*:[0-9]*:\s*//' \
 		|| (echo "bugcheck-static: config SQL expanded with os.ExpandEnv, use configenv.Expand (see config-sql-expandenv)"; exit 1)
+	@# sql-lambda-arrow: a lambda written with the single arrow, `x -> x + 1`.
+	@# DuckDB 2.0 rejects it at bind time ("Deprecated lambda arrow (->)
+	@# detected"), so an embedded query that still uses it fails only when it
+	@# runs — the sandbox scd2 diff did, in front of the user. Write
+	@# `lambda x: x + 1`. A lambda sits in argument position, after `(` or `,`
+	@# or at the start of a continued line; the JSON operator `j -> '$$.a'`
+	@# is followed by a quote and is left alone.
+	@! grep -rnE "(^|[(,])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*|\([A-Za-z_][A-Za-z0-9_, ]*\))[[:space:]]*->[[:space:]]*[^>'\"[:space:]]" \
+		--include=*.sql --include=*.go internal cmd e2e \
+		| grep -vE '^\S*:[0-9]*:\s*(//|--)' \
+		|| (echo "bugcheck-static: lambda written as x -> ..., use lambda x: ... (see sql-lambda-arrow)"; exit 1)
 	@echo "bugcheck-static: clean"
 
 build:
