@@ -32,6 +32,9 @@ func TestTouchesDisabledOptimizers(t *testing.T) {
 		"RESET ALL":                              true,
 		"SET threads = 4":                        false,
 		"CREATE TABLE t (a INT)":                 false,
+		"SELECT password_reset_at FROM users":    false,
+		"SELECT 1 AS reset":                      true, // a word match errs on the cheap side
+		"reset   all":                            true,
 	} {
 		if got := touchesDisabledOptimizers(sql); got != want {
 			t.Errorf("touchesDisabledOptimizers(%q) = %v, want %v", sql, got, want)

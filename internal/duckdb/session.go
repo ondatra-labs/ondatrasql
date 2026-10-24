@@ -54,6 +54,10 @@ type Session struct {
 	// files) before tearing down. This requires knowing the absolute data
 	// path so we can resolve the relative paths the catalog stores.
 	sandboxDataPath string // absolute prod/sandbox shared data path
+	// lateMatPending is set when SQL may have re-enabled
+	// late_materialization and adding it back has not succeeded yet; the
+	// session refuses to run anything until it does (see latemat.go).
+	lateMatPending bool
 }
 
 // NewSession creates a new embedded DuckDB session.
@@ -236,12 +240,6 @@ func (s *Session) GetVersion() string {
 	return s.version
 }
 
-// SqlConn returns the underlying *sql.Conn for direct driver access.
-// Use sparingly — prefer Exec/Query for normal operations.
-func (s *Session) SqlConn() *sql.Conn {
-	return s.conn
-}
-
 // RawConn provides access to the underlying driver.Conn for low-level
 // operations like the Appender API. The callback runs under the session mutex.
 func (s *Session) RawConn(fn func(any) error) error {
@@ -251,6 +249,11 @@ func (s *Session) RawConn(fn func(any) error) error {
 	if s.closed {
 		return errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return err
+	}
+	// The callback can run any SQL, so check afterwards unconditionally.
+	defer s.lateMatRecheckLocked()
 	return s.conn.Raw(fn)
 }
 
@@ -394,12 +397,11 @@ func (s *Session) execContext(ctx context.Context, sqlStr string) error {
 	if s.closed {
 		return errors.New("session closed")
 	}
-	_, err := s.conn.ExecContext(ctx, sqlStr)
-	if err == nil && touchesDisabledOptimizers(sqlStr) {
-		// User SQL replaced or reset the disabled optimizers; add
-		// late_materialization back (see latemat.go).
-		err = s.disableLateMaterializationLocked(ctx)
+	if err := s.lateMatGuardLocked(); err != nil {
+		return err
 	}
+	defer s.lateMatAfterLocked(sqlStr)
+	_, err := s.conn.ExecContext(ctx, sqlStr)
 	return err
 }
 
@@ -427,6 +429,10 @@ func (s *Session) queryContext(ctx context.Context, sqlStr string) (string, erro
 	if s.closed {
 		return "", errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return "", err
+	}
+	defer s.lateMatAfterLocked(sqlStr)
 
 	rows, err := s.conn.QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -461,6 +467,10 @@ func (s *Session) queryValueContext(ctx context.Context, sqlStr string) (string,
 	if s.closed {
 		return "", errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return "", err
+	}
+	defer s.lateMatAfterLocked(sqlStr)
 
 	var result any
 	err := s.conn.QueryRowContext(ctx, sqlStr).Scan(&result)
@@ -497,6 +507,10 @@ func (s *Session) queryRowsContext(ctx context.Context, sqlStr string) ([]string
 	if s.closed {
 		return nil, errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return nil, err
+	}
+	defer s.lateMatAfterLocked(sqlStr)
 
 	rows, err := s.conn.QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -539,6 +553,10 @@ func (s *Session) queryRowsMapContext(ctx context.Context, sqlStr string) ([]map
 	if s.closed {
 		return nil, errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return nil, err
+	}
+	defer s.lateMatAfterLocked(sqlStr)
 
 	rows, err := s.conn.QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -603,6 +621,10 @@ func (s *Session) queryRowsAnyContext(ctx context.Context, sqlStr string) ([]map
 	if s.closed {
 		return nil, errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return nil, err
+	}
+	defer s.lateMatAfterLocked(sqlStr)
 
 	rows, err := s.conn.QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -651,6 +673,10 @@ func (s *Session) queryPrint(sqlQuery, format string) error {
 	if s.closed {
 		return errors.New("session closed")
 	}
+	if err := s.lateMatGuardLocked(); err != nil {
+		return err
+	}
+	defer s.lateMatAfterLocked(sqlQuery)
 
 	rows, err := s.conn.QueryContext(context.Background(), sqlQuery)
 	if err != nil {

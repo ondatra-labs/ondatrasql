@@ -78,6 +78,46 @@ func TestLateMaterialization_DisabledInEverySession(t *testing.T) {
 	sessionCheck(t, "after RESET", sess)
 }
 
+// Every way SQL reaches the session re-applies it: the query paths that
+// ondatrasql sql and query use, RawConn, and an Exec script that resets the
+// setting and then fails on a later statement.
+func TestLateMaterialization_EverySessionPath(t *testing.T) {
+	sess := testutil.NewSession(t)
+	for name, run := range map[string]func() error{
+		"Query":        func() error { _, err := sess.Query("SET disabled_optimizers = 'join_order'"); return err },
+		"QueryValue":   func() error { _, err := sess.QueryValue("RESET disabled_optimizers"); return err },
+		"QueryRows":    func() error { _, err := sess.QueryRows("SET disabled_optimizers = ''"); return err },
+		"QueryRowsMap": func() error { _, err := sess.QueryRowsMap("RESET ALL"); return err },
+		"QueryRowsAny": func() error { _, err := sess.QueryRowsAny("SET disabled_optimizers = 'join_order'"); return err },
+		"QueryPrint":   func() error { return sess.QueryPrint("SET disabled_optimizers = 'join_order'", "csv") },
+		"RawConn": func() error {
+			return sess.RawConn(func(raw any) error {
+				_, err := raw.(driver.ExecerContext).ExecContext(context.Background(), "SET disabled_optimizers = ''", nil)
+				return err
+			})
+		},
+		"failing Exec script": func() error {
+			if err := sess.Exec("RESET disabled_optimizers; SELECT * FROM no_such_table"); err == nil {
+				t.Errorf("the script should fail on its second statement")
+			}
+			return nil
+		},
+	} {
+		_ = run() // a statement that returns no rows may report an error; the setting is what counts
+		sessionCheck(t, "after "+name, sess)
+	}
+}
+
+// DuckDB's error for an optimizer name it does not know is what
+// unknownOptimizer tolerates, so a rename cannot stop sessions opening.
+func TestLateMaterialization_UnknownOptimizerError(t *testing.T) {
+	sess := testutil.NewSession(t)
+	err := sess.Exec("SET disabled_optimizers = 'no_such_optimizer'")
+	if err == nil || !strings.Contains(err.Error(), "not recognized") {
+		t.Fatalf("err = %v, want DuckDB's \"not recognized\" error", err)
+	}
+}
+
 // settings.sql runs before anything else and may set disabled_optimizers.
 func TestLateMaterialization_ProjectAndSandboxSessions(t *testing.T) {
 	prod := testutil.NewProject(t)
