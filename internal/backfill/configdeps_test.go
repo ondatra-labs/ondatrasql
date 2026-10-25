@@ -523,6 +523,33 @@ func TestConfigIndex_InertStatements(t *testing.T) {
 		}
 	})
 
+	t.Run("async I/O and HTTP transport tuning rebuilds nothing", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A semantic setting keeps the hash non-empty, so the test shows the
+		// I/O knobs drop out of a real hash rather than an empty one.
+		const semantic = "SET TimeZone = 'UTC';\n"
+		writeConfig(t, dir, "settings.sql", semantic)
+		before := hashFor(t, dir, ref)
+		if before == "" {
+			t.Fatal("TimeZone must keep the hash non-empty")
+		}
+		writeConfig(t, dir, "settings.sql", semantic+
+			"SET async_threads = 16;\n"+
+			"SET GLOBAL read_ahead_depth = 0;\n"+
+			"SET http_client_pool_capacity = 64;\n"+
+			"SET http_timeout = 120;\n"+
+			"SET http_retries = 10;\n"+
+			"SET http_retry_wait_ms = 2000;\n"+
+			"SET http_retry_backoff = 2.5;\n"+
+			"SET http_keep_alive = false;\n"+
+			"SET httpfs_connection_caching = false;\n"+
+			"RESET http_timeout;\n")
+		if after := hashFor(t, dir, ref); after != before {
+			t.Errorf("tuning async I/O or HTTP transport must not change the config hash: %q -> %q", before, after)
+		}
+	})
+
 	for _, tc := range []struct{ name, before, after string }{
 		{"TimeZone", "SET TimeZone = 'UTC';", "SET TimeZone = 'Europe/Stockholm';"},
 		{"integer_division", "SET integer_division = false;", "SET integer_division = true;"},

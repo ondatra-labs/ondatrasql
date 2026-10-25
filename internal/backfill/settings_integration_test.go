@@ -24,6 +24,12 @@ import (
 // test turns that into a build failure so the list stays honest.
 func TestInertDuckDBSettings_ExistUpstream(t *testing.T) {
 	sess := testutil.NewSession(t)
+	// The HTTP transport entries (http_timeout, http_retries, ...) are
+	// registered by httpfs, so they only appear in duckdb_settings() once it
+	// is loaded — the way a project's extensions.sql loads it.
+	if err := sess.Exec("INSTALL httpfs; LOAD httpfs;"); err != nil {
+		t.Fatalf("load httpfs: %v", err)
+	}
 
 	rows, err := sess.QueryRows("SELECT name FROM duckdb_settings()")
 	if err != nil {
@@ -39,6 +45,21 @@ func TestInertDuckDBSettings_ExistUpstream(t *testing.T) {
 
 	var stale []string
 	for name := range inertDuckDBSettings {
+		if !upstream[name] {
+			stale = append(stale, name)
+		}
+	}
+	// Named explicitly so a later edit cannot drop one from the map and
+	// still pass: these are the knobs operators tune against slow S3.
+	for _, name := range []string{
+		"async_threads", "read_ahead_depth",
+		"http_client_pool_capacity", "http_timeout", "http_retries",
+		"http_retry_wait_ms", "http_retry_backoff", "http_keep_alive",
+		"httpfs_connection_caching",
+	} {
+		if !inertDuckDBSettings[name] {
+			t.Errorf("%s is missing from inertDuckDBSettings", name)
+		}
 		if !upstream[name] {
 			stale = append(stale, name)
 		}
