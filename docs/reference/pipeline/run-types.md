@@ -58,7 +58,9 @@ So if **any** statement anywhere in `config/` is a `USE`, a `SET search_path`, o
 
 ### Which settings are inert
 
-74 DuckDB settings cannot change what a query returns and are dropped from the hash: thread and memory limits, `temp_directory`, optimizer and join thresholds, caching and prefetching, checkpoint/WAL/write buffering, and the profiling, logging and progress-bar families. Bumping `threads` or `memory_limit` rebuilds nothing.
+79 DuckDB settings cannot change what a query returns and are dropped from the hash: thread and memory limits, `temp_directory`, optimizer and join thresholds, caching and prefetching, checkpoint/WAL/write buffering, and the profiling, logging and progress-bar families. Bumping `threads` or `memory_limit` rebuilds nothing.
+
+The same holds for the I/O knobs you reach for when object storage is slow or flaky: async I/O scheduling (`async_threads`, `read_ahead_depth`) and HTTP transport (`http_client_pool_capacity`, `http_timeout`, `http_retries`, `http_retry_wait_ms`, `http_retry_backoff`, `http_keep_alive`, `httpfs_connection_caching`). They decide whether and how fast a read succeeds, not what it returns, so tuning them in `config/settings.sql` rebuilds nothing. All but the first three come from the httpfs extension.
 
 Everything else is treated as semantic, **including settings not on the list at all** — a knob added by a future DuckDB release keeps forcing a rebuild until it is classified. Notable settings that stay semantic despite sounding harmless:
 

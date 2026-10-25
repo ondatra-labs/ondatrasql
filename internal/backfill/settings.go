@@ -14,8 +14,9 @@ package backfill
 // forcing a rebuild. Being wrong that way costs a needless rebuild; being
 // wrong the other way serves stale data.
 //
-// The 70 names were classified against duckdb_settings(). The embedded DuckDB
-// currently exposes 167 settings, so this covers a little under half of them.
+// The 79 names were classified against duckdb_settings(). The embedded DuckDB
+// exposes 167 settings, plus those httpfs adds once loaded; six of the HTTP
+// transport names below exist only with httpfs loaded.
 // DuckDB 2.0 removed seven names that were listed under 1.5: the profiling
 // and HTTP-logging ones map to their 2.0 successors (custom_profiling_settings
 // to tracked_metrics, profiling_mode to profiling_renderer_settings,
@@ -62,6 +63,21 @@ var inertDuckDBSettings = map[string]bool{
 	"temp_directory":                              true,
 	"max_temp_directory_size":                     true,
 	"scheduler_process_partial":                   true,
+
+	// Async I/O scheduling (2.0): how many reads are in flight, not which bytes they return.
+	"async_threads":    true,
+	"read_ahead_depth": true,
+
+	// HTTP transport: pooling, keep-alive, timeouts and retries decide whether
+	// and how fast a request succeeds, never what a successful one returns.
+	// All but http_client_pool_capacity come from the httpfs extension.
+	"http_client_pool_capacity": true,
+	"http_timeout":              true,
+	"http_retries":              true,
+	"http_retry_wait_ms":        true,
+	"http_retry_backoff":        true,
+	"http_keep_alive":           true,
+	"httpfs_connection_caching": true,
 
 	// Optimizer and join thresholds: they pick a different plan for the same answer.
 	"asof_loop_join_threshold":      true,
