@@ -124,7 +124,7 @@ Recording masks credentials with `[REDACTED]` before anything reaches the file:
 - in JSON and form bodies, the fields `client_secret`, `client_assertion`, `assertion` (the service-account JWT), `refresh_token`, `access_token`, `id_token`, `password`, `api_key`, `apikey`, `private_key`, `private_key_id` and `secret`;
 - every value the run knows is a secret, wherever it appears (URL, any header, any body, raw, URL-encoded or JSON-escaped): the `auth.env` value, the basic-auth password, `http.*(auth=…)` passwords, the service account's private key and the JWT, OAuth client secrets, refresh and access tokens, the credential sent in any of the headers above, and any `env.get()` value whose variable name contains `KEY`, `TOKEN`, `SECRET`, `PASS`, `PWD`, `CREDENTIAL`, `AUTH` or `PRIVATE`. Values shorter than 4 characters (8 for credentials learned from headers) are not masked, since masking them would corrupt unrelated data.
 
-Read a cassette before committing it all the same: a secret the run has no way to know about — one typed into the blueprint, or read with `env.get()` under a name like `SHOPIFY_STORE` — is stored as sent.
+Read a cassette before committing it all the same: a secret the run has no way to know about — one typed into the blueprint, a webhook URL whose path is the credential, or a value read with `env.get()` under a name like `SHOPIFY_STORE` — is stored as sent.
 
 ## Limits
 
