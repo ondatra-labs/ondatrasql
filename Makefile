@@ -9,7 +9,7 @@ RAPID_PKGS = ./internal/backfill ./internal/dag ./internal/duckdb \
 OTHER_PKGS = ./cmd/... ./internal/config ./internal/git \
              ./internal/sql ./internal/testutil
 
-.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover lint bugcheck-static build install-tools
+.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover test-blueprints record-blueprint lint bugcheck-static build install-tools
 
 # Unit tests only (no integration build tag)
 test:
@@ -35,6 +35,21 @@ test-bench:
 
 test-all:
 	go test -p 1 -race -timeout 30m -tags "integration e2e" ./...
+
+# Blueprints (blueprints/README.md): validate each one and compare its page
+# with describe blueprint, offline. With BLUEPRINT_TESTS_DIR=<dir> also
+# replay <dir>/<name>/cassettes/ and assert <dir>/<name>/expect.yaml.
+test-blueprints:
+	BLUEPRINT_TESTS_DIR="$(BLUEPRINT_TESTS_DIR)" go test -p 1 -timeout 30m -count=1 -v -tags blueprints \
+		-run 'TestBlueprints|TestHarness' ./internal/blueprinttest/
+
+# Maintainers only: record blueprint BP against its live API into
+# BLUEPRINT_TESTS_DIR/BP (needs network and the keys in its .env.example).
+record-blueprint:
+	@test -n "$(BP)" || { echo "record-blueprint: set BP=<blueprint>"; exit 1; }
+	@test -n "$(BLUEPRINT_TESTS_DIR)" || { echo "record-blueprint: set BLUEPRINT_TESTS_DIR=<dir> (outside this repo)"; exit 1; }
+	BP="$(BP)" BLUEPRINT_TESTS_DIR="$(BLUEPRINT_TESTS_DIR)" go test -p 1 -timeout 30m -count=1 -v -tags blueprints \
+		-run '^TestRecordBlueprint$$' ./internal/blueprinttest/
 
 test-cover:
 	go test -p 1 -race -timeout 30m -tags "integration e2e" -coverprofile=coverage.out ./...

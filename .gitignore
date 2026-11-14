@@ -34,3 +34,9 @@ work/
 .env
 ducklake.sqlite
 ducklake.sqlite.files/
+
+# Blueprint recordings and expected outputs are kept privately, never here
+# (blueprints/README.md); TestBlueprintsGuard fails on them as well.
+blueprints/**/cassettes/
+blueprints/**/expect.yaml
+blueprints/**/expect.yml

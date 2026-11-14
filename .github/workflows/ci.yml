@@ -63,6 +63,28 @@ jobs:
           CC: gcc
         run: go test -p 1 -race -timeout 30m -tags "integration e2e" ./...
 
+  blueprints:
+    name: Blueprints (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # Offline and without secrets: validate each blueprint, compare its
+      # page with describe blueprint, run the harness self-test. The
+      # recordings are private, so BLUEPRINT_TESTS_DIR is not set here and
+      # each blueprint's replay is reported as skipped.
+      - name: Test blueprints
+        shell: bash
+        env:
+          CGO_ENABLED: 1
+          CC: gcc
+        run: make test-blueprints
+
   # ----------------------------------------------------------------------
   # Release jobs — only run on tag pushes (v*) and ONLY after every test
   # job above has succeeded. Building binaries and publishing a release
@@ -73,7 +95,7 @@ jobs:
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [unit, integration]
+    needs: [unit, integration, blueprints]
     strategy:
       matrix:
         include:

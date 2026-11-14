@@ -178,3 +178,5 @@ checkpoint           Run all maintenance
 ## License
 
 [GNU AGPL v3](LICENSE)
+
+The blueprints under [blueprints/](blueprints/) are [MIT](blueprints/LICENSE), so they can be copied into any project.
