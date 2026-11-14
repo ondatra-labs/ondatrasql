@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 )
 
 // defaultHTTPTransport is shared across all normal (non-mTLS, non-insecure)
@@ -53,6 +55,11 @@ func DoHTTPWithRetry(ctx context.Context, method, urlStr string, body []byte, he
 				backoffMs := opts.Backoff * (1 << (attempt - 1))
 				jitter := rand.Intn(backoffMs/2 + 1)
 				wait = time.Duration(backoffMs+jitter) * time.Millisecond
+			}
+			// Replay answers from a file: waiting for a server to
+			// recover would only slow the test down.
+			if httpcassette.Replaying() {
+				wait = 0
 			}
 			select {
 			case <-ctx.Done():
@@ -126,7 +133,9 @@ func DoHTTP(ctx context.Context, method, urlStr string, body []byte, headers map
 	// leaking idle connections and goroutines. Only create a custom
 	// transport when mTLS or insecure mode requires it.
 	var transport http.RoundTripper = defaultHTTPTransport
-	if opts.Insecure || opts.ClientCert != nil {
+	// Replay needs neither TLS settings nor the client certificate files,
+	// which CI does not have.
+	if (opts.Insecure || opts.ClientCert != nil) && !httpcassette.Replaying() {
 		customTransport := defaultHTTPTransport.Clone()
 		if opts.Insecure {
 			customTransport.TLSClientConfig.InsecureSkipVerify = true
@@ -155,7 +164,7 @@ func DoHTTP(ctx context.Context, method, urlStr string, body []byte, headers map
 
 	client := &http.Client{
 		Timeout:   opts.Timeout,
-		Transport: transport,
+		Transport: httpcassette.Transport(transport),
 	}
 
 	resp, err := client.Do(req)

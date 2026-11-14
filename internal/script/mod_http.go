@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
@@ -104,8 +105,14 @@ func resolveEnvValue(v any) string {
 //	{"service_account": {"env": "GCP_SA_PATH"}, "scope": "..."} — Google service account
 //	{"user": {"env": "USER"}, "pass": {"env": "PASS"}}          — Basic auth
 func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *string, cfg *apiHTTPConfig) error {
-	// service_account: Google service account key file
+	// service_account: Google service account key file. Replay needs
+	// neither the key file nor the token exchange: requests are answered
+	// from the cassette whatever credential they carry.
 	if sa := auth["service_account"]; sa != nil {
+		if httpcassette.Replaying() {
+			headers["Authorization"] = "Bearer " + httpcassette.Placeholder
+			return nil
+		}
 		keyFile := resolveEnvValue(sa)
 		if keyFile == "" {
 			return fmt.Errorf("auth: service_account resolved to empty value")
@@ -118,6 +125,8 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 		if err := json.Unmarshal(keyData, &key); err != nil {
 			return fmt.Errorf("auth: parse service_account %q: %w", keyFile, err)
 		}
+		httpcassette.RegisterSecret(key.PrivateKey)
+		httpcassette.RegisterSecret(key.PrivateKeyID)
 		scope, _ := auth["scope"].(string)
 		tp := &tokenProvider{
 			ctx:         cfg.Ctx,
@@ -128,12 +137,17 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 		if err != nil {
 			return fmt.Errorf("auth: google service account: %w", err)
 		}
+		httpcassette.RegisterSecret(tok)
 		headers["Authorization"] = "Bearer " + tok
 		return nil
 	}
 
 	// provider: OAuth2 token via the local flow (refreshes automatically)
 	if provider, ok := auth["provider"].(string); ok && provider != "" {
+		if httpcassette.Replaying() {
+			headers["Authorization"] = "Bearer " + httpcassette.Placeholder
+			return nil
+		}
 		tp := &tokenProvider{
 			ctx:      cfg.Ctx,
 			provider: provider,
@@ -143,6 +157,7 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 		if err != nil {
 			return fmt.Errorf("auth: oauth token for %q: %w", provider, err)
 		}
+		httpcassette.RegisterSecret(tok)
 		headers["Authorization"] = "Bearer " + tok
 		return nil
 	}
@@ -151,6 +166,7 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 	if auth["user"] != nil && auth["pass"] != nil {
 		user := resolveEnvValue(auth["user"])
 		pass := resolveEnvValue(auth["pass"])
+		httpcassette.RegisterSecret(pass)
 		if user != "" {
 			headers["Authorization"] = BasicAuth(user, pass)
 		}
@@ -160,6 +176,7 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 	// env: API key from environment variable
 	if envKey, ok := auth["env"].(string); ok && envKey != "" {
 		token := os.Getenv(envKey)
+		httpcassette.RegisterSecret(token)
 		if token != "" {
 			if param, ok := auth["param"].(string); ok && param != "" {
 				// Query parameter auth
@@ -181,6 +198,18 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 	}
 
 	return nil
+}
+
+// withAuthNames tells the cassette transport which header and query
+// parameter carry the API dict's credential, so they are masked on record
+// and ignored in replay. ctx is returned as is when no cassette is active.
+func withAuthNames(ctx context.Context, cfg *apiHTTPConfig) context.Context {
+	if cfg == nil || cfg.Auth == nil || httpcassette.Current() == httpcassette.Off {
+		return ctx
+	}
+	header, _ := cfg.Auth["header"].(string)
+	param, _ := cfg.Auth["param"].(string)
+	return httpcassette.WithAuthNames(ctx, header, param)
 }
 
 // httpRequest creates a unified handler for all HTTP methods using kwargs.
@@ -405,6 +434,7 @@ func httpRequest(ctx context.Context, method string, apiCfg *apiHTTPConfig) func
 			if user == "" {
 				return nil, fmt.Errorf("%s: auth username must be a non-empty string", fn.Name())
 			}
+			httpcassette.RegisterSecret(pass)
 
 			scheme := "basic"
 			if n == 3 {
@@ -438,7 +468,7 @@ func httpRequest(ctx context.Context, method string, apiCfg *apiHTTPConfig) func
 			}
 		}
 
-		resp, err := DoHTTPWithRetry(ctx, method, urlStr, body, headers, opts)
+		resp, err := DoHTTPWithRetry(withAuthNames(ctx, apiCfg), method, urlStr, body, headers, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -607,6 +637,7 @@ func httpUpload(ctx context.Context, apiCfg *apiHTTPConfig) func(thread *starlar
 			if !ok {
 				return nil, fmt.Errorf("%s: auth password must be string", fn.Name())
 			}
+			httpcassette.RegisterSecret(pass)
 
 			scheme := "basic"
 			if n == 3 {
@@ -630,7 +661,7 @@ func httpUpload(ctx context.Context, apiCfg *apiHTTPConfig) func(thread *starlar
 			}
 		}
 
-		resp, err := DoMultipartUpload(ctx, urlStr, filePath, field, filename, headers, extraFields, opts)
+		resp, err := DoMultipartUpload(withAuthNames(ctx, apiCfg), urlStr, filePath, field, filename, headers, extraFields, opts)
 		if err != nil {
 			return nil, err
 		}

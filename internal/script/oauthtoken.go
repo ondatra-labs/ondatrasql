@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"github.com/ondatra-labs/ondatrasql/internal/oauth2host"
 	"go.starlark.net/starlark"
 )
@@ -93,6 +94,7 @@ func (tp *tokenProvider) AccessToken() (string, error) {
 	if !ok || tok == "" {
 		return "", fmt.Errorf("token response missing access_token")
 	}
+	httpcassette.RegisterSecret(tok)
 	tp.accessToken = tok
 
 	// Parse expires_in (seconds)
@@ -133,6 +135,7 @@ func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
 	// caller must inject a token whose lifetime covers the run (for runs longer
 	// than the provider's token TTL, use the local flow instead).
 	if envTok := strings.TrimSpace(os.Getenv("ONDATRA_OAUTH_TOKEN_" + oauth2host.ProviderEnvPrefix(tp.provider))); envTok != "" {
+		httpcassette.RegisterSecret(envTok)
 		return map[string]interface{}{"access_token": envTok}, nil
 	}
 
@@ -162,11 +165,14 @@ func (tp *tokenProvider) fetchProviderToken() (map[string]interface{}, error) {
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("%s_CLIENT_ID and %s_CLIENT_SECRET must be set in .env", prefix, prefix)
 	}
+	httpcassette.RegisterSecret(clientSecret)
+	httpcassette.RegisterSecret(tokenFile.RefreshToken)
 	result, err := oauth2host.RefreshLocal(tp.ctx, tokenFile.TokenURL, clientID, clientSecret, tokenFile.RefreshToken)
 	if err != nil {
 		return nil, fmt.Errorf("refresh %s token: %w", tp.provider, err)
 	}
 	// Save the rotated refresh token.
+	httpcassette.RegisterSecret(result.RefreshToken)
 	if result.RefreshToken != "" {
 		if err := oauth2host.WriteLocalToken(tp.stateDB, tp.provider, result.RefreshToken, tokenFile.TokenURL); err != nil {
 			return nil, fmt.Errorf("save refreshed token for %s: %w", tp.provider, err)
@@ -189,6 +195,7 @@ func (tp *tokenProvider) fetchClientCredentials() (map[string]interface{}, error
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", tp.clientID)
 	form.Set("client_secret", tp.clientSecret)
+	httpcassette.RegisterSecret(tp.clientSecret)
 	if tp.scope != "" {
 		form.Set("scope", tp.scope)
 	}
@@ -200,6 +207,7 @@ func (tp *tokenProvider) fetchGoogleToken() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create JWT: %w", err)
 	}
+	httpcassette.RegisterSecret(jwt)
 	return ExchangeJWTForToken(tp.ctx, tp.googleSAKey.TokenURI, jwt)
 }
 

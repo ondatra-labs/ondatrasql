@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
@@ -80,7 +81,9 @@ func (r *Runner) executePush(ctx context.Context, model *parser.Model, result *R
 		rl:                 rl,
 	}
 
-	return se.run(ctx)
+	// Every request push(), finalize() and poll() make goes to the
+	// cassette of this model and sink lib when HTTP record/replay is on.
+	return se.run(httpcassette.WithScope(ctx, model.Target, model.Push))
 }
 
 func (se *pushExecutor) run(ctx context.Context) error {
@@ -959,11 +962,16 @@ func (se *pushExecutor) pollAsyncJob(ctx context.Context, jobRef map[string]any,
 			return allOK(events)
 		}
 
-		// Sleep after polling (not before) so crash recovery polls immediately
+		// Sleep after polling (not before) so crash recovery polls immediately.
+		// HTTP replay skips the wait: the job's progress is in the cassette.
+		wait := pollInterval
+		if httpcassette.Replaying() {
+			wait = 0
+		}
 		select {
 		case <-ctx.Done():
 			return nackAll(store, claimID, batchNum, events, ctx.Err())
-		case <-time.After(pollInterval):
+		case <-time.After(wait):
 		}
 	}
 	return nackAll(store, claimID, batchNum, events, fmt.Errorf("poll: timeout after %s", pollTimeout))

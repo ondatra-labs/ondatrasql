@@ -21,6 +21,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"github.com/ondatra-labs/ondatrasql/internal/libcall"
 	"github.com/ondatra-labs/ondatrasql/internal/libregistry"
 	"github.com/ondatra-labs/ondatrasql/internal/lineage"
@@ -731,8 +732,12 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 
 				var scriptResult *script.Result
 				var runErr error
+				// Every request this lib call makes, token exchanges
+				// included, goes to <cassette>/<model>/<lib>.json when
+				// HTTP record/replay is on.
+				libCtx := httpcassette.WithScope(ctx, model.Target, call.FuncName)
 				if call.Lib.APIConfig != nil {
-					httpCfg := httpConfigFromLib(call.Lib.APIConfig, ctx, r.stateDB())
+					httpCfg := httpConfigFromLib(call.Lib.APIConfig, libCtx, r.stateDB())
 					if call.Lib.FetchMode == "async" {
 						// Async fetch: submit() → check() → fetch_result()
 						pollInterval := 5 * time.Second
@@ -767,14 +772,14 @@ func (r *Runner) Run(ctx context.Context, model *parser.Model) (*Result, error) 
 						if call.Lib.APIConfig.FetchPollBackoff > 0 {
 							pollBackoff = call.Lib.APIConfig.FetchPollBackoff
 						}
-						scriptResult, runErr = rt.RunSourceAsync(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, pollInterval, pollTimeout, pollBackoff, httpCfg)
+						scriptResult, runErr = rt.RunSourceAsync(libCtx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, pollInterval, pollTimeout, pollBackoff, httpCfg)
 					} else {
 						// Sync fetch: paginated path (page_size=0 means single call)
-						scriptResult, runErr = rt.RunSourcePaginated(ctx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
+						scriptResult, runErr = rt.RunSourcePaginated(libCtx, libTarget, call.FuncName, kwargs, call.Lib.PageSize, httpCfg)
 					}
 				} else {
 					// Legacy TABLE dict: use save.row() contract
-					scriptResult, runErr = rt.RunSource(ctx, libTarget, call.FuncName, kwargs)
+					scriptResult, runErr = rt.RunSource(libCtx, libTarget, call.FuncName, kwargs)
 				}
 				if runErr != nil {
 					// Check for clean abort

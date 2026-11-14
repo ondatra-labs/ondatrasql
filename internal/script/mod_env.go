@@ -7,6 +7,9 @@ package script
 import (
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
@@ -32,6 +35,9 @@ func envModule() *starlarkstruct.Module {
 				if !exists && string(defaultVal) != "" {
 					value = string(defaultVal)
 				}
+				if looksSecret(name) {
+					httpcassette.RegisterSecret(value)
+				}
 
 				return starlark.String(value), nil
 			}),
@@ -50,4 +56,20 @@ func envModule() *starlarkstruct.Module {
 			}),
 		},
 	}
+}
+
+// secretNameFragments mark an environment variable as a credential. A
+// blueprint that reads one with env.get and puts it in a header or body
+// itself (rather than through the API dict's auth) still gets it masked in
+// a recorded cassette.
+var secretNameFragments = []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PWD", "CREDENTIAL", "AUTH", "PRIVATE"}
+
+func looksSecret(name string) bool {
+	n := strings.ToUpper(name)
+	for _, f := range secretNameFragments {
+		if strings.Contains(n, f) {
+			return true
+		}
+	}
+	return false
 }

@@ -14,7 +14,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/ondatra-labs/ondatrasql/internal/clock"
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/redact"
 )
@@ -124,6 +126,16 @@ func run(args []string) error {
 	cfg, err := config.Load(projectDir)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// HTTP record/replay and the frozen clock are read from the
+	// environment, .env included; a malformed value is reported before
+	// any model runs rather than at its first request.
+	if err := httpcassette.Validate(); err != nil {
+		return err
+	}
+	if err := clock.Validate(); err != nil {
+		return err
 	}
 
 	// Create root context with cancellation on signals

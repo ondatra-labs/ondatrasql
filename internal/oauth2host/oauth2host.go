@@ -20,9 +20,16 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 )
 
-var client = &http.Client{Timeout: 30 * time.Second}
+// httpClient is built per request rather than once at package init, so the
+// cassette transport sees ONDATRA_HTTP_* from the project's .env, which is
+// loaded after start-up.
+func httpClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: httpcassette.Transport(nil)}
+}
 
 // RefreshResult holds the result of a token exchange or refresh.
 type RefreshResult struct {
@@ -45,7 +52,7 @@ func ExchangeCode(ctx context.Context, tokenURL, clientID, clientSecret, code, r
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("exchange code: %w", err)
 	}
@@ -75,7 +82,7 @@ func RefreshLocal(ctx context.Context, tokenURL, clientID, clientSecret, refresh
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
