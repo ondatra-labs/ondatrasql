@@ -14,6 +14,7 @@ import (
 	"os"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"github.com/ondatra-labs/ondatrasql/internal/parser"
 	"github.com/ondatra-labs/ondatrasql/internal/script"
 	"github.com/ondatra-labs/ondatrasql/internal/validation"
@@ -181,7 +182,8 @@ func (r *Runner) runScript(ctx context.Context, model *parser.Model) (*Result, e
 
 	stepStart = time.Now()
 	var scriptResult *script.Result
-	scriptResult, err = rt.Run(ctx, model.Target, model.SQL)
+	// A script model's own HTTP requests get a cassette named after it.
+	scriptResult, err = rt.Run(httpcassette.WithScope(ctx, model.Target, "_script"), model.Target, model.SQL)
 	if err != nil {
 		// Check if this is a clean abort (no message) — early exit, not an error
 		var abortErr *script.AbortError

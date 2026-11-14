@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 )
 
 // rateLimiter implements a token bucket rate limiter.
@@ -42,8 +44,13 @@ func newRateLimiter(requests int, per string) (*rateLimiter, error) {
 	}, nil
 }
 
-// Wait blocks until a token is available or ctx is cancelled.
+// Wait blocks until a token is available or ctx is cancelled. In HTTP
+// replay it returns at once: no API is called, so there is no limit to
+// respect.
 func (rl *rateLimiter) Wait(ctx context.Context) error {
+	if httpcassette.Replaying() {
+		return ctx.Err()
+	}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()

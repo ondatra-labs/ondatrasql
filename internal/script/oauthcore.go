@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 )
 
 // ServiceAccountKey represents a Google service account JSON key file.
@@ -100,8 +102,7 @@ func ExchangeJWTForToken(ctx context.Context, tokenURL, jwt string) (map[string]
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := tokenHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token request: %w", err)
 	}
@@ -124,6 +125,12 @@ func ExchangeJWTForToken(ctx context.Context, tokenURL, jwt string) (map[string]
 	return tokenResp, nil
 }
 
+// tokenHTTPClient is the client for token exchanges. It goes through the
+// cassette transport like every other lib request.
+func tokenHTTPClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: httpcassette.Transport(nil)}
+}
+
 // DoOAuthRequest performs an OAuth token request and returns the parsed response.
 func DoOAuthRequest(ctx context.Context, tokenURL string, form url.Values) (map[string]interface{}, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(form.Encode()))
@@ -134,8 +141,7 @@ func DoOAuthRequest(ctx context.Context, tokenURL string, form url.Values) (map[
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := tokenHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("oauth request: %w", err)
 	}

@@ -23,7 +23,9 @@ import (
 	"go.starlark.net/syntax"
 
 	"github.com/ondatra-labs/ondatrasql/internal/backfill"
+	"github.com/ondatra-labs/ondatrasql/internal/clock"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 )
 
 // recoverScriptPanic converts a panic into an error written through
@@ -203,6 +205,17 @@ func adhocFileOptions() *syntax.FileOptions {
 	}
 }
 
+// applyFrozenClock makes time.now() on thread return ONDATRA_NOW when it
+// is set (or fail with the parse error when it is malformed). Unset, the
+// thread keeps starlarktime's wall clock.
+func applyFrozenClock(thread *starlark.Thread) {
+	t, ok, err := clock.Frozen()
+	if !ok {
+		return
+	}
+	starlarktime.SetNow(thread, func() (time.Time, error) { return t, err })
+}
+
 // libraryPredeclared returns the predeclared globals available to library modules.
 // This excludes save (write side effects — must be passed explicitly as a parameter).
 func (r *Runtime) libraryPredeclared(ctx context.Context, httpCfg ...*apiHTTPConfig) starlark.StringDict {
@@ -260,6 +273,10 @@ func (r *Runtime) libraryPredeclared(ctx context.Context, httpCfg ...*apiHTTPCon
 				dur = time.Duration(float64(v) * float64(time.Second))
 			default:
 				return nil, fmt.Errorf("sleep: expected int or float, got %s", seconds.Type())
+			}
+			// Replay answers from a file, so there is nothing to wait for.
+			if httpcassette.Replaying() {
+				dur = 0
 			}
 			select {
 			case <-ctx.Done():
@@ -335,6 +352,7 @@ func (r *Runtime) makeLoadFunc(ctx context.Context, libPredeclared starlark.Stri
 			},
 		}
 		libThread.SetLocal("ctx", ctx)
+		applyFrozenClock(libThread)
 		libThread.SetLocal("sess", r.sess)
 		// Share the same cache for nested loads
 		libThread.Load = r.makeLoadFunc(ctx, libPredeclared, cache)
@@ -391,6 +409,7 @@ func (r *Runtime) Run(ctx context.Context, target, code string) (result *Result,
 		},
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	// Set up context cancellation via thread.Cancel
@@ -496,6 +515,7 @@ func (r *Runtime) RunSource(ctx context.Context, target, source string, config m
 		Load: loadFunc,
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	// Set up context cancellation
@@ -620,6 +640,7 @@ func (r *Runtime) RunSourcePaginated(ctx context.Context, target, source string,
 		Load: loadFunc,
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	done := make(chan struct{})
@@ -787,6 +808,7 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 		Load: loadFunc,
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	done := make(chan struct{})
@@ -912,11 +934,16 @@ func (r *Runtime) RunSourceAsync(ctx context.Context, target, source string, con
 			return nil, fmt.Errorf("async fetch timed out after %v", pollTimeout)
 		}
 
-		// Context-aware sleep — responds to cancellation during poll interval
+		// Context-aware sleep — responds to cancellation during poll
+		// interval. Replay skips it: the job's progress is in the cassette.
+		wait := currentInterval
+		if httpcassette.Replaying() {
+			wait = 0
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(currentInterval):
+		case <-time.After(wait):
 		}
 
 		checkRet, err := starlark.Call(thread, checkFn, nil, filterKwargs(checkFn, checkKwargs))
@@ -1107,6 +1134,7 @@ func (r *Runtime) RunPush(ctx context.Context, sinkName string, rows []map[strin
 		Load: loadFunc,
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	done := make(chan struct{})
@@ -1283,6 +1311,7 @@ func (r *Runtime) RunPushFinalize(ctx context.Context, sinkName string, succeede
 		Load: loadFunc,
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	done := make(chan struct{})
@@ -1342,6 +1371,7 @@ func (r *Runtime) RunPushPoll(ctx context.Context, sinkName string, jobRef map[s
 		Load: loadFunc,
 	}
 	thread.SetLocal("ctx", ctx)
+	applyFrozenClock(thread)
 	thread.SetLocal("sess", r.sess)
 
 	doneC := make(chan struct{})
