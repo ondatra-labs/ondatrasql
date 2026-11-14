@@ -13,3 +13,4 @@ Step-by-step guides. Each guide walks through a specific task.
 - [Preview Changes](/guides/preview-changes/): run the full pipeline against a temporary catalog
 - [Maintain DuckLake Storage](/guides/maintain-ducklake-storage/): compact files, expire snapshots, clean up
 - [Mask Sensitive Columns](/guides/mask-sensitive-columns/): apply mask, hash, or redact tags
+- [Test a Blueprint Offline](/guides/test-a-blueprint-offline/): record API traffic once, replay it without network or credentials
