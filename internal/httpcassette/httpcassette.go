@@ -31,6 +31,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/ondatra-labs/ondatrasql/internal/clock"
 )
 
 // Environment variables read by this package.
@@ -53,14 +55,14 @@ type config struct {
 	mode Mode
 	dir  string
 	err  error
+	now  string // ONDATRA_NOW when the config was read, stored in recorded files
 }
 
 var (
-	mu       sync.Mutex
-	cfg      *config
-	open     = map[string]*cassette{}
-	secrets  = map[string]bool{}
-	nowValue string // ONDATRA_NOW at the time the config was read, stored in recorded files
+	mu      sync.Mutex
+	cfg     *config
+	open    = map[string]*cassette{}
+	secrets = map[string]bool{}
 )
 
 // loadConfig reads the environment once per process (or per Reset).
@@ -76,10 +78,9 @@ func loadConfigLocked() *config {
 	if cfg != nil {
 		return cfg
 	}
-	c := &config{}
+	c := &config{now: os.Getenv(clock.EnvNow)}
 	dir := os.Getenv(EnvDir)
 	mode := os.Getenv(EnvMode)
-	nowValue = os.Getenv("ONDATRA_NOW")
 	switch {
 	case dir == "" && mode == "":
 		c.mode = Off

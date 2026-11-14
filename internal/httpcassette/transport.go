@@ -29,7 +29,8 @@ type cassette struct {
 	path string
 	file *File
 	used []bool
-	err  error // load error, reported on every request in replay
+	err  error  // load error, reported on every request in replay
+	now  string // ONDATRA_NOW of this run, compared with the recorded one
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -125,9 +126,9 @@ func getCassette(c *config, sc scope) *cassette {
 	if cas, ok := open[path]; ok {
 		return cas
 	}
-	cas := &cassette{path: path}
+	cas := &cassette{path: path, now: c.now}
 	if c.mode == Record {
-		cas.file = &File{Version: formatVersion, Model: sc.model, Lib: sc.lib, Now: nowValue, Interactions: []Interaction{}}
+		cas.file = &File{Version: formatVersion, Model: sc.model, Lib: sc.lib, Now: c.now, Interactions: []Interaction{}}
 	} else {
 		f, err := readFile(path)
 		switch {
@@ -199,8 +200,8 @@ func (cas *cassette) unmatched(rec Request, want matchKey) error {
 			fmt.Fprintf(&b, ", identical but already replayed: the run made this request more often than the recording did")
 		}
 	}
-	if cas.file.Now != nowValue {
-		fmt.Fprintf(&b, "; recorded with ONDATRA_NOW=%q, replaying with ONDATRA_NOW=%q, so URLs built from time.now() differ", cas.file.Now, nowValue)
+	if cas.file.Now != cas.now {
+		fmt.Fprintf(&b, "; recorded with ONDATRA_NOW=%q, replaying with ONDATRA_NOW=%q, so URLs built from time.now() differ", cas.file.Now, cas.now)
 	}
 	return errors.New(b.String())
 }
