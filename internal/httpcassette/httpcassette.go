@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -140,6 +141,49 @@ func Transport(base http.RoundTripper) http.RoundTripper {
 		return base
 	}
 	return &transport{base: base}
+}
+
+// Use is how much of one cassette a replay served.
+type Use struct {
+	Path     string // relative to ONDATRA_HTTP_CASSETTE, slash-separated
+	Replayed int    // interactions answered so far
+	Recorded int    // interactions in the file
+}
+
+// Summary lists, sorted by path, every cassette a replay has opened in
+// this process and how many of its interactions were served. A run that
+// made no request opens none. Nil unless replaying.
+func Summary() []Use {
+	c := loadConfig()
+	if c.mode != Replay || c.err != nil {
+		return nil
+	}
+	mu.Lock()
+	cs := make([]*cassette, 0, len(open))
+	for _, cas := range open {
+		cs = append(cs, cas)
+	}
+	mu.Unlock()
+	out := make([]Use, 0, len(cs))
+	for _, cas := range cs {
+		cas.mu.Lock()
+		u := Use{Path: cas.path}
+		if rel, err := filepath.Rel(c.dir, cas.path); err == nil {
+			u.Path = filepath.ToSlash(rel)
+		}
+		if cas.file != nil {
+			u.Recorded = len(cas.file.Interactions)
+		}
+		for _, used := range cas.used {
+			if used {
+				u.Replayed++
+			}
+		}
+		cas.mu.Unlock()
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
 }
 
 // RegisterSecret marks s as a credential: every occurrence of it (raw,

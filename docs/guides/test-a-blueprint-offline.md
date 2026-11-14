@@ -49,6 +49,17 @@ The error names the method, the URL with credentials masked, a hash of the reque
 
 Replay also skips every wait that only matters against a live API: retry backoff and `Retry-After`, the push `rate_limit`, the poll interval of async fetch and async push, and `sleep()`.
 
+After a replayed `ondatrasql run`, the run says how many recorded interactions it used:
+
+```
+http replay: 2 requests answered from testdata/cassettes
+  raw.orders/orders_api.json: 2 of 3 recorded interactions
+```
+
+With `--json` this is a `{"kind": "http_replay", ...}` line on stdout (see [CLI](/reference/pipeline/cli/#http-replay-envelope)). A test can assert from it that an up-to-date incremental run made no request (`0 requests`), and that a run still makes every request its recording holds. A cassette the run never opened is not listed.
+
+A push batch whose body differs from every recorded one gets no response. As with any failed batch, the sink reports it as a warning (`sink crm_push: 1 succeeded, 2 failed`), and the model still ends `ok`. Check the warnings and the request count, not only the exit code.
+
 ## What is covered
 
 Every HTTP request a lib function makes:

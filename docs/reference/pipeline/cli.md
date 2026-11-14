@@ -257,10 +257,11 @@ StandardOutput=file:/var/log/ondatrasql.json
 StandardError=file:/var/log/ondatrasql.err
 ```
 
-The `--json` stream may carry two record shapes, distinguishable by the presence of `kind`:
+The `--json` stream may carry three record shapes:
 
-- **Model-result envelopes** (most common). One per model that the runner attempted. No `kind` field; carry `schema_version: 2`.
-- **DAG-level warnings**. Non-fatal issues not tied to a specific model. Tagged `kind: "dag_warning"`; carry their own independent `schema_version: 1`. See the next subsection.
+- **Model-result envelopes** (most common). One per model that the runner attempted. Carry `model`, and `schema_version: 2`.
+- **DAG-level warnings**. Non-fatal issues not tied to a specific model. Tagged `kind: "dag_warning"`; carry their own independent `schema_version: 1`. See the subsection below.
+- **HTTP replay summary**. Only from `run` with `ONDATRA_HTTP_MODE=replay`, once at the end. Tagged `kind: "http_replay"`; `schema_version: 1`. See the last subsection.
 
 `schema_version` is per-envelope: each shape versions independently, so a bump in one doesn't force a re-encode of the other.
 
@@ -297,6 +298,26 @@ Both `run --json` and `sandbox --json` may emit a separate envelope tagged with 
 | `message`        | Human-readable warning text                                                        |
 
 A `dag_warning` always coincides with exit `1` since GC failure is a non-invocation runtime error per the exit-code contract below.
+
+### HTTP replay envelope
+
+`run --json` in replay mode ([Test a Blueprint Offline](/guides/test-a-blueprint-offline/)) ends with one envelope saying how many recorded interactions the run used, per cassette the run opened:
+
+```json
+{"schema_version": 1, "kind": "http_replay", "requests": 2, "cassettes": [{"path": "raw.orders/orders_api.json", "replayed": 2, "recorded": 3}]}
+```
+
+| Field            | Description                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `schema_version` | `1`. Bump signals breaking shape change.                                    |
+| `kind`           | `http_replay`                                                               |
+| `requests`       | Recorded interactions answered in this run, over all cassettes              |
+| `cassettes`      | One entry per cassette opened, sorted by `path` (`[]` when none was opened) |
+| `cassettes[].path` | `<model>/<lib>.json`, relative to `ONDATRA_HTTP_CASSETTE`                 |
+| `cassettes[].replayed` | Interactions answered from it                                        |
+| `cassettes[].recorded` | Interactions in the file                                             |
+
+Without `--json` the same is printed as `http replay: N requests answered from <dir>`, then one line per cassette.
 
 ## version
 
