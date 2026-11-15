@@ -24,13 +24,21 @@ type saTokenKey struct {
 	audience   string
 }
 
-// saTokenEntry holds the cached token of one key. Its mutex is held for
-// the whole exchange, so concurrent requests for the same key wait for
+// saTokenEntry holds the cached token of one key and the exchange in
+// flight for it, if any. Concurrent requests for the same key share that
 // one exchange instead of starting their own.
 type saTokenEntry struct {
 	mu        sync.Mutex
 	token     string
 	expiresAt time.Time
+	inflight  *saTokenCall
+}
+
+// saTokenCall is one token exchange. done is closed when tok or err is set.
+type saTokenCall struct {
+	done chan struct{}
+	tok  string
+	err  error
 }
 
 // saTokens caches service account access tokens for the process, so a run
@@ -69,34 +77,66 @@ func saNow() time.Time {
 }
 
 // serviceAccountToken returns a cached access token for key and scope, or
-// exchanges a JWT for one. ctx carries the cassette scope of the request
-// that triggers the exchange.
+// exchanges a JWT for one. The exchange runs on its own, with ctx's values
+// (the cassette scope of the request that starts it) but not its
+// cancellation, and is bounded by the token client's timeout; every caller
+// waits for it or for its own ctx, whichever comes first. A failed
+// exchange is returned to every caller waiting for it and not cached, so
+// the next call exchanges again.
 func serviceAccountToken(ctx context.Context, key *ServiceAccountKey, scope string) (string, error) {
 	e := saTokenEntryFor(serviceAccountKeyOf(key, scope))
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	now := saNow()
-	if e.token != "" && now.Before(e.expiresAt.Add(-refreshMargin)) {
-		return e.token, nil
+	if e.token != "" && saNow().Before(e.expiresAt.Add(-refreshMargin)) {
+		tok := e.token
+		e.mu.Unlock()
+		return tok, nil
 	}
+	c := e.inflight
+	if c == nil {
+		c = &saTokenCall{done: make(chan struct{})}
+		e.inflight = c
+		go e.exchange(context.WithoutCancel(ctx), c, key, scope)
+	}
+	e.mu.Unlock()
 
+	select {
+	case <-c.done:
+		return c.tok, c.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// exchange performs call c and caches its token on success.
+func (e *saTokenEntry) exchange(ctx context.Context, c *saTokenCall, key *ServiceAccountKey, scope string) {
+	now := saNow()
+	tok, expiresAt, err := fetchServiceAccountToken(ctx, key, scope, now)
+	e.mu.Lock()
+	if err == nil {
+		e.token, e.expiresAt = tok, expiresAt
+	}
+	e.inflight = nil
+	c.tok, c.err = tok, err
+	e.mu.Unlock()
+	close(c.done)
+}
+
+func fetchServiceAccountToken(ctx context.Context, key *ServiceAccountKey, scope string, now time.Time) (string, time.Time, error) {
 	tp := &tokenProvider{ctx: ctx, googleSAKey: key, scope: scope}
 	tokenResp, err := tp.fetchGoogleToken()
 	if err != nil {
-		return "", fmt.Errorf("token refresh: %w", err)
+		return "", time.Time{}, fmt.Errorf("token refresh: %w", err)
 	}
 	tok, ok := tokenResp["access_token"].(string)
 	if !ok || tok == "" {
-		return "", fmt.Errorf("token response missing access_token")
+		return "", time.Time{}, fmt.Errorf("token response missing access_token")
 	}
 	httpcassette.RegisterSecret(tok)
-	e.token = tok
-	e.expiresAt = now.Add(3600 * time.Second) // default 1h, as tokenProvider
+	expiresAt := now.Add(3600 * time.Second) // default 1h, as tokenProvider
 	if ei, ok := tokenResp["expires_in"].(float64); ok && ei > 0 {
-		e.expiresAt = now.Add(time.Duration(ei) * time.Second)
+		expiresAt = now.Add(time.Duration(ei) * time.Second)
 	}
-	return tok, nil
+	return tok, expiresAt, nil
 }
 
 // invalidateServiceAccountToken drops the cached token for key and scope

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,10 @@ type fakeGoogle struct {
 	mu        sync.Mutex
 	reject    map[string]bool
 	scopes    []string
+	// hold, when set, keeps every token exchange waiting until it is
+	// closed; fail makes the token endpoint answer 500.
+	hold chan struct{}
+	fail atomic.Bool
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
@@ -48,6 +53,17 @@ func newFakeGoogle(t *testing.T) *fakeGoogle {
 				f.mu.Unlock()
 			}
 			n := f.exchanges.Add(1)
+			f.mu.Lock()
+			hold := f.hold
+			f.mu.Unlock()
+			if hold != nil {
+				<-hold
+			}
+			if f.fail.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `{"error":"backend_error"}`)
+				return
+			}
 			// Slow enough that parallel callers overlap with it.
 			time.Sleep(20 * time.Millisecond)
 			fmt.Fprintf(w, `{"access_token":"tok-%d","expires_in":%d,"token_type":"Bearer"}`, n, f.expiresIn)
@@ -192,6 +208,143 @@ func TestServiceAccountToken_ParallelColdCache(t *testing.T) {
 	}
 }
 
+// TestServiceAccountToken_FailedExchangeReleasesAll: N callers waiting
+// for one exchange that fails all get its error; nothing is cached and the
+// next call exchanges again.
+func TestServiceAccountToken_FailedExchangeReleasesAll(t *testing.T) {
+	isolateSATokens(t)
+	f := newFakeGoogle(t)
+	f.fail.Store(true)
+	hold := make(chan struct{})
+	f.hold = hold
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release) // a failed test must not leave the handler blocking srv.Close
+	cfg := saConfig(t, f, context.Background(), "s")
+	key, scope, err := loadServiceAccount(cfg.Auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 10
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := serviceAccountToken(context.Background(), key, scope)
+			errs <- err
+		}()
+	}
+	// All n wait on the one exchange the first started.
+	for deadline := time.Now().Add(5 * time.Second); f.exchanges.Load() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("no exchange started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // let the other callers join it
+	release()
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-errs:
+			if err == nil || !strings.Contains(err.Error(), "500") {
+				t.Fatalf("caller %d: err = %v, want the token endpoint's 500", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("caller %d still waiting after the exchange failed", i)
+		}
+	}
+	if got := f.exchanges.Load(); got != 1 {
+		t.Fatalf("%d exchanges for %d callers, want 1", got, n)
+	}
+
+	f.mu.Lock()
+	f.hold = nil
+	f.mu.Unlock()
+	f.fail.Store(false)
+	tok, err := serviceAccountToken(context.Background(), key, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "tok-2" || f.exchanges.Load() != 2 {
+		t.Fatalf("after the failure: %q after %d exchanges, want tok-2 after 2 (the error is not cached)", tok, f.exchanges.Load())
+	}
+}
+
+// TestServiceAccountToken_CancelledWaiter: a caller whose context ends
+// while the exchange is still running returns ctx.Err() at once; the
+// exchange goes on for the others and its token is cached.
+func TestServiceAccountToken_CancelledWaiter(t *testing.T) {
+	isolateSATokens(t)
+	f := newFakeGoogle(t)
+	hold := make(chan struct{})
+	f.hold = hold
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release) // a failed test must not leave the handler blocking srv.Close
+	cfg := saConfig(t, f, context.Background(), "s")
+	key, scope, err := loadServiceAccount(cfg.Auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The caller that starts the exchange and one that joins it both
+	// give up; a third keeps waiting.
+	type result struct {
+		tok string
+		err error
+	}
+	starterCtx, cancelStarter := context.WithCancel(context.Background())
+	joinerCtx, cancelJoiner := context.WithCancel(context.Background())
+	starter, joiner, patient := make(chan result, 1), make(chan result, 1), make(chan result, 1)
+	call := func(ctx context.Context, out chan<- result) {
+		tok, err := serviceAccountToken(ctx, key, scope)
+		out <- result{tok: tok, err: err}
+	}
+	go call(starterCtx, starter)
+	for f.exchanges.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	go call(joinerCtx, joiner)
+	go call(context.Background(), patient)
+	time.Sleep(50 * time.Millisecond)
+
+	for _, c := range []struct {
+		name   string
+		cancel context.CancelFunc
+		out    chan result
+	}{{"starter", cancelStarter, starter}, {"joiner", cancelJoiner, joiner}} {
+		start := time.Now()
+		c.cancel()
+		select {
+		case r := <-c.out:
+			if !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("%s: err = %v, want context.Canceled", c.name, r.err)
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("%s returned %v after cancel", c.name, d)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s still waiting after its context was cancelled", c.name)
+		}
+	}
+	select {
+	case r := <-patient:
+		t.Fatalf("patient caller returned before the exchange finished: %+v", r)
+	default:
+	}
+
+	release()
+	select {
+	case r := <-patient:
+		if r.err != nil || r.tok != "tok-1" {
+			t.Fatalf("patient caller: %q, %v", r.tok, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("patient caller never got the token")
+	}
+	if tok, err := serviceAccountToken(context.Background(), key, scope); err != nil || tok != "tok-1" || f.exchanges.Load() != 1 {
+		t.Fatalf("after: %q, %v, %d exchanges; want the cached tok-1 from 1 exchange", tok, err, f.exchanges.Load())
+	}
+}
+
 // TestServiceAccountToken_Expiry: the token is reused until refreshMargin
 // before expires_in, then exchanged again.
 func TestServiceAccountToken_Expiry(t *testing.T) {
@@ -233,6 +386,22 @@ func TestServiceAccountToken_Expiry(t *testing.T) {
 	}
 	if n := f.exchanges.Load(); n != 2 {
 		t.Fatalf("%d exchanges, want 2", n)
+	}
+}
+
+// TestServiceAccountToken_ShortLivedNotCached: a token with expires_in of
+// refreshMargin or less is not reused, as api-dict.md says.
+func TestServiceAccountToken_ShortLivedNotCached(t *testing.T) {
+	isolateSATokens(t)
+	f := newFakeGoogle(t)
+	f.expiresIn = int(refreshMargin / time.Second)
+	cfg := saConfig(t, f, context.Background(), "s")
+	v, err := runLib(t, context.Background(), cfg, `out = [http.get("/values").json["token"] for i in range(2)]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.String() != `["tok-1", "tok-2"]` || f.exchanges.Load() != 2 {
+		t.Fatalf("tokens %s after %d exchanges, want one exchange per request", v, f.exchanges.Load())
 	}
 }
 
