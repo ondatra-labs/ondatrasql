@@ -108,6 +108,7 @@ For each blueprint `<name>`, the directory holds:
 ```
 <dir>/<name>/cassettes/<model>/<lib>.json   the recorded requests and responses
 <dir>/<name>/expect.yaml                    the runs to make and what each leaves behind
+<dir>/<name>/data/                          optional: the files the blueprint reads from the project
 ```
 
 With `BLUEPRINT_TESTS_DIR` set, each blueprint is also run, in a fresh project, once per entry in `expect.yaml`. Each run uses that entry's `ONDATRA_NOW`, answers every request from the cassettes and has the blueprint's keys unset. A request that is not in the recording fails the run. For push blueprints, that includes a request whose body differs from the recorded one. After each run the harness asserts:
@@ -119,6 +120,12 @@ With `BLUEPRINT_TESTS_DIR` set, each blueprint is also run, in a fresh project, 
 A blueprint with no `<dir>/<name>/` fails, naming it. Without `BLUEPRINT_TESTS_DIR` the replay is skipped, and the output says so for each blueprint.
 
 "Offline" means the blueprint's API is never called. DuckDB still downloads its `ducklake` and `sqlite` extensions on a machine that has not cached them.
+
+### data/
+
+A blueprint that reads its input from the project, such as `mistral-ocr` with `FROM mistral_ocr('data/invoices/*.pdf')`, needs those files to run. They are kept in `<dir>/<name>/data/`, private like the recordings, and never under `blueprints/`. Record and replay copy that directory into the test project as `data/`, so both runs see the same files, and a lib that hashes or uploads them sends the same requests both times. Change a file after recording and its request no longer matches: re-record. The offline check has no `BLUEPRINT_TESTS_DIR` and runs without `data/`.
+
+Put only made-up files there, never a real document: a recording made from a file carries what the API extracted from it.
 
 ### expect.yaml
 
@@ -157,7 +164,7 @@ make record-blueprint BP=<name> BLUEPRINT_TESTS_DIR=/path/to/recordings
 
 Recording calls the live API, so it needs network and every key in the blueprint's `.env.example` set in the environment. It writes only into `BLUEPRINT_TESTS_DIR/<name>/`, never into this repository:
 
-- it runs the offline check first, then replaces `cassettes/` with the requests of the runs in the existing `expect.yaml` (without one, two runs at the current time);
+- it runs the offline check first, then replaces `cassettes/` (never `data/`) with the requests of the runs in the existing `expect.yaml` (without one, two runs at the current time);
 - it then replays the new recording and prints the `expect.yaml` that replay produced. If there was no `expect.yaml`, the draft is written there, and you must review it before you trust it. If there was one, it is asserted, and a difference fails the run, with the draft beside it.
 
 Before committing a recording to the private repository, read it: the recorder masks credentials it knows about, but not values it cannot know are secret (see [What is never written](../docs/guides/test-a-blueprint-offline.md#what-is-never-written)).
