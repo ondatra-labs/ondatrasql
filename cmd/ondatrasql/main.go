@@ -16,6 +16,7 @@ import (
 
 	"github.com/ondatra-labs/ondatrasql/internal/clock"
 	"github.com/ondatra-labs/ondatrasql/internal/config"
+	"github.com/ondatra-labs/ondatrasql/internal/deprecation"
 	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 	"github.com/ondatra-labs/ondatrasql/internal/output"
 	"github.com/ondatra-labs/ondatrasql/internal/redact"
@@ -72,6 +73,16 @@ func run(args []string) error {
 	args = filteredArgs
 	output.Init(jsonMode)
 
+	// Deprecated forms are judged against this binary's version, and each
+	// one in use is reported once per command (validate turns them into
+	// findings instead). Only run and sandbox stream JSON lines, so only
+	// they may put a notice on stdout; a command that prints one JSON
+	// document keeps stdout to that document.
+	deprecation.SetVersion(version)
+	deprecation.Reset()
+	streaming := len(args) > 0 && (args[0] == "run" || args[0] == "sandbox")
+	deprecation.SetReporter(func(u deprecation.Usage) { reportDeprecation(u, streaming) })
+
 	// No args = show help (safe default)
 	if len(args) == 0 {
 		printHelp()
@@ -103,6 +114,9 @@ func run(args []string) error {
 			// Try to load .env from current project for local provider detection
 			if cwd, err := os.Getwd(); err == nil {
 				if root, err := config.FindProjectRoot(cwd); err == nil {
+					if err := config.CheckMinVersion(root, version); err != nil {
+						return err
+					}
 					if err := config.LoadEnvFile(filepath.Join(root, ".env")); err != nil && !os.IsNotExist(err) {
 						return fmt.Errorf("load .env: %w", err)
 					}
@@ -120,6 +134,11 @@ func run(args []string) error {
 	projectDir, err := config.FindProjectRoot(cwd)
 	if err != nil {
 		return fmt.Errorf("not in an ondatrasql project: %w", err)
+	}
+	// A project pinned to a newer ondatrasql is refused before anything
+	// else reads it.
+	if err := config.CheckMinVersion(projectDir, version); err != nil {
+		return err
 	}
 
 	// Load config
@@ -411,4 +430,30 @@ func reportReplay() {
 	for _, u := range uses {
 		output.Fprintf("  %s: %d of %d recorded interactions\n", u.Path, u.Replayed, u.Recorded)
 	}
+}
+
+// reportDeprecation prints a deprecated form in use, once per feature per
+// command: a WARN line on the human stream (stderr under --json), or, for
+// a streaming command under --json, a "deprecation" JSON line.
+func reportDeprecation(u deprecation.Usage, streaming bool) {
+	if output.JSONEnabled && streaming {
+		output.EmitJSON(map[string]any{
+			"schema_version": 1,
+			"kind":           "deprecation",
+			"feature":        string(u.Feature.ID),
+			"level":          u.Level.String(),
+			"path":           u.Path,
+			"line":           u.Line,
+			"message":        u.Message(),
+		})
+		return
+	}
+	where := u.Path
+	if where != "" && u.Line > 0 {
+		where = fmt.Sprintf("%s:%d", where, u.Line)
+	}
+	if where != "" {
+		where += ": "
+	}
+	output.Fprintf("WARN deprecated: %s%s\n", where, u.Message())
 }

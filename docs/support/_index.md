@@ -10,3 +10,4 @@ When something doesn't work, start here.
 - [Troubleshooting](/support/troubleshooting/) — common errors and how to fix them
 - [FAQ](/support/faq/) — frequently asked questions
 - [Moving to DuckDB 2.0](/support/duckdb-2-migration/) — what changes for a project on DuckDB 2.0
+- [Deprecations](/support/deprecations/) — how features are retired, and the ones on their way out

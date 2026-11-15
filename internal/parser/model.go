@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/ondatra-labs/ondatrasql/internal/deprecation"
 )
 
 // ScriptType indicates the type of script for a model.
@@ -363,6 +365,13 @@ func ParseModel(path, projectDir string) (*Model, error) {
 		// behavior and easy to miss; reject it instead.
 		if !inHeader && isDirectiveLine(trimmed) {
 			return nil, fmt.Errorf("directive %q appears after SQL body — directives must be in the header before any SQL", trimmed)
+		}
+
+		// `#` and `//` header comments are left over from Starlark models.
+		if inHeader && (strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//")) {
+			if err := deprecation.Use(deprecation.ModelHashComment, relFilePath, lineNum); err != nil {
+				return nil, fmt.Errorf("line %d: %w", lineNum, err)
+			}
 		}
 
 		switch {

@@ -59,12 +59,13 @@ func TestSeverityFor_ExternalRefsAreInfo(t *testing.T) {
 // TestSeverityContract_WARNRulesAreValidateNamespaced pins the invariant
 // documented in docs/reference/pipeline/cli.md: every WARN rule belongs
 // to the `validate.*` namespace (signals "validate's own analysis was
-// degraded"). Adding a non-validate WARN rule means either (a) the doc
-// table needs updating, or (b) the rule belongs in BLOCKER/INFO. This
-// test forces that conversation.
+// degraded"), except deprecation.warn (a deprecated form that still
+// works), which the same paragraph names. Adding another non-validate
+// WARN rule means either (a) the doc table needs updating, or (b) the
+// rule belongs in BLOCKER/INFO. This test forces that conversation.
 func TestSeverityContract_WARNRulesAreValidateNamespaced(t *testing.T) {
 	for id, sev := range severityOverrides {
-		if sev != SeverityWarn {
+		if sev != SeverityWarn || id == RuleDeprecationWarn {
 			continue
 		}
 		if !strings.HasPrefix(string(id), "validate.") {
@@ -95,7 +96,7 @@ func TestSeverityContract_DocumentedValidateWARNRules(t *testing.T) {
 	// list — fails the test until docs/reference/pipeline/cli.md and
 	// `documented` above are updated together.
 	for id, sev := range severityOverrides {
-		if sev != SeverityWarn {
+		if sev != SeverityWarn || !strings.HasPrefix(string(id), "validate.") {
 			continue
 		}
 		if _, ok := documented[id]; !ok {
@@ -240,12 +241,12 @@ func TestRender_Human_FindingHasMarkerAndRuleID(t *testing.T) {
 	}
 }
 
-// TestSchemaVersion_Is4 pins the schema version. Bump only when
+// TestSchemaVersion_Is5 pins the schema version. Bump only when
 // rule-IDs/severity/output structure change. The test exists so a casual
 // edit doesn't silently regress consumers' expectations.
-func TestSchemaVersion_Is4(t *testing.T) {
-	if SchemaVersion != 4 {
-		t.Errorf("SchemaVersion = %d, want 4 (parser.events_missing_columns removed in v4)", SchemaVersion)
+func TestSchemaVersion_Is5(t *testing.T) {
+	if SchemaVersion != 5 {
+		t.Errorf("SchemaVersion = %d, want 5 (deprecation.warn and deprecation.error added in v5)", SchemaVersion)
 	}
 }
 

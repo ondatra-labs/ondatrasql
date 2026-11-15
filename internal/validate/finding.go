@@ -24,7 +24,8 @@ package validate
 //     validate.builtin_introspection_failed)
 //   - 3: removed parser.expose_on_non_table (OData support removed in v0.32)
 //   - 4: removed parser.events_missing_columns (events kind removed in v0.33)
-const SchemaVersion = 4
+//   - 5: added deprecation.warn and deprecation.error
+const SchemaVersion = 5
 
 // Severity classifies a Finding by how much attention it demands.
 type Severity string
@@ -35,11 +36,13 @@ const (
 	SeverityBlocker Severity = "BLOCKER"
 	// SeverityWarn signals that validate's own analysis was degraded
 	// (extension load failed, blueprint parse error, walk skipped,
-	// builtin introspection failed, lineage extract failed). Triggers
-	// exit code 1 unconditionally — a degraded run can't be treated
-	// as clean by CI, regardless of `--strict`. Deprecated directives
-	// are NOT WARN; they are BLOCKER (parser rejects them outright at
-	// run-time, see severityOverrides comment in rules.go).
+	// builtin introspection failed, lineage extract failed), which
+	// triggers exit code 1 unconditionally — a degraded run can't be
+	// treated as clean by CI, regardless of `--strict` — or that a
+	// deprecated form still works (deprecation.warn, exit 1 only with
+	// `--strict`). Removed directives are NOT WARN; they are BLOCKER
+	// (parser rejects them outright at run-time, see severityOverrides
+	// comment in rules.go).
 	SeverityWarn Severity = "WARN"
 	// SeverityInfo means the validator could not verify a property without
 	// extern state (e.g. external table references, helper-libs without
@@ -120,6 +123,31 @@ func (r *Report) AddFile(fr FileResult) {
 			r.Summary.Infos++
 		}
 	}
+}
+
+// Attach adds f to the first file in the report with f.Path, or to a new
+// file entry when there is none, keeping Summary in step.
+func (r *Report) Attach(f Finding) {
+	for i := range r.Files {
+		if r.Files[i].Path != f.Path {
+			continue
+		}
+		if len(r.Files[i].Findings) == 0 && r.Summary.Clean > 0 {
+			r.Summary.Clean--
+		}
+		r.Files[i].Findings = append(r.Files[i].Findings, f)
+		r.Files[i].Status = "fail"
+		switch f.Severity {
+		case SeverityBlocker:
+			r.Summary.Blockers++
+		case SeverityWarn:
+			r.Summary.Warns++
+		case SeverityInfo:
+			r.Summary.Infos++
+		}
+		return
+	}
+	r.AddFile(FileResult{Path: f.Path, Status: "fail", Findings: []Finding{f}})
 }
 
 // NewReport returns an empty Report with the current SchemaVersion set.
