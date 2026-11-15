@@ -10,10 +10,12 @@
 # before the newest date already loaded a run fetches again, since Ad
 # Manager revises recent days.
 #
-# Async: submit() creates and runs one report per network, check() polls the
-# runs until all are done, fetch_result() reads the rows page by page. Each
-# row carries its network, the date, every dimension and every metric under
-# its API name in lower case, and row_key, which the model merges on.
+# Async: submit() runs one hidden report per network, named "ondatrasql
+# <model>" and reused from run to run (updated with this run's dates, created
+# only on the first), check() polls the runs until all are done,
+# fetch_result() reads the rows page by page. Each row carries its network,
+# the date, every dimension and every metric under its API name in lower
+# case, and row_key, which the model merges on.
 API = {
     "base_url": "https://admanager.googleapis.com/v1",
     "auth": {
@@ -69,6 +71,39 @@ def _networks(networks):
         fail("google_ad_manager: the service account is an API user on no network; add it in Ad Manager (Admin > Global settings)")
     return codes
 
+def _find(code, name):
+    # the report named name on network code, or "" when there is none
+    token = ""
+    for _ in range(100):
+        params = {"filter": 'displayName = "' + name + '"', "pageSize": "1000"}
+        if token:
+            params["pageToken"] = token
+        resp = http.get("/networks/" + code + "/reports", params=params)
+        if not resp.ok:
+            fail("google_ad_manager: list reports on network " + code + ": " + str(resp.status_code) + " " + resp.text)
+        for r in resp.json.get("reports", []):
+            if r.get("displayName") == name:
+                return "/" + r["name"]
+        token = resp.json.get("nextPageToken", "")
+        if not token:
+            break
+    return ""
+
+def _report(code, name, definition):
+    # the path of the lib's report on network code, with this run's
+    # definition: the existing one patched, or a new one
+    report = _find(code, name)
+    if report:
+        resp = http.patch(report, params={"updateMask": "reportDefinition"}, json={"reportDefinition": definition})
+        if not resp.ok:
+            fail("google_ad_manager: update " + report + ": " + str(resp.status_code) + " " + resp.text)
+        return report
+    body = {"displayName": name, "visibility": "HIDDEN", "reportDefinition": definition}
+    resp = http.post("/networks/" + code + "/reports", json=body)
+    if not resp.ok:
+        fail("google_ad_manager: create report on network " + code + ": " + str(resp.status_code) + " " + resp.text)
+    return "/networks/" + code + "/reports/" + str(resp.json["reportId"])
+
 def submit(networks, dimensions, metrics, days, target="", is_backfill=True, last_value="", initial_value=""):
     dims = [d for d in _names(dimensions) if d != "DATE"]
     mets = _names(metrics)
@@ -88,23 +123,19 @@ def submit(networks, dimensions, metrics, days, target="", is_backfill=True, las
     if _fmt(start) > _fmt(end):
         abort()
 
+    # one report per network and model, reused on every run: the API has
+    # no way to delete a report
+    name = "ondatrasql " + (target or "google_ad_manager")
+    definition = {
+        "dimensions": ["DATE"] + dims,
+        "metrics": mets,
+        "reportType": "HISTORICAL",
+        "timeZoneSource": "PUBLISHER",
+        "dateRange": {"fixed": {"startDate": _ymd(start), "endDate": _ymd(end)}},
+    }
     jobs = []
     for code in _networks(networks):
-        body = {
-            "displayName": "ondatrasql " + (target or "google_ad_manager") + " " + _fmt(start) + ".." + _fmt(end),
-            "visibility": "HIDDEN",
-            "reportDefinition": {
-                "dimensions": ["DATE"] + dims,
-                "metrics": mets,
-                "reportType": "HISTORICAL",
-                "timeZoneSource": "PUBLISHER",
-                "dateRange": {"fixed": {"startDate": _ymd(start), "endDate": _ymd(end)}},
-            },
-        }
-        resp = http.post("/networks/" + code + "/reports", json=body)
-        if not resp.ok:
-            fail("google_ad_manager: create report on network " + code + ": " + str(resp.status_code) + " " + resp.text)
-        report = "/networks/" + code + "/reports/" + str(resp.json["reportId"])
+        report = _report(code, name, definition)
         resp = http.post(report + ":run", json={})
         if not resp.ok:
             fail("google_ad_manager: run " + report + ": " + str(resp.status_code) + " " + resp.text)

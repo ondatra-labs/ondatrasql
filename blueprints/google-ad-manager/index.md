@@ -22,7 +22,8 @@ Runs a historical report in [Google Ad Manager](https://admanager.google.com) th
 ## What it does
 
 - `FROM google_ad_manager('', 'AD_UNIT_NAME', 'AD_SERVER_IMPRESSIONS,AD_SERVER_CLICKS,AD_SERVER_REVENUE', 3)` takes four arguments: the network codes, the dimensions, the metrics and the days to fetch again.
-- For each network it creates a hidden report (`visibility: HIDDEN`, so it does not show up in the Ad Manager UI) with `DATE` as the first dimension, runs it, polls the run until it is done and reads the result 10,000 rows per page.
+- For each network it runs a hidden report (`visibility: HIDDEN`, so it does not show up in the Ad Manager UI) with `DATE` as the first dimension, polls the run until it is done and reads the result 10,000 rows per page.
+- It keeps one such report per network and model, named `ondatrasql <model>`: `ondatrasql raw.gam_report` for the model below. The first run creates it; every later run finds it by that name and updates its dates, dimensions and metrics before running it. The Ad Manager API cannot delete a report, so creating a new one each run would pile them up.
 - The network codes are comma separated. An empty string means every network the service account is an API user on.
 - The first run reports from `@incremental_initial` up to yesterday. A later run starts `days` days before the newest `date` it already has, because Ad Manager keeps revising the last few days. Yesterday is the end of every run: today is still filling up.
 - Dates are in the network's time zone (`timeZoneSource: PUBLISHER`), and money is in the network's currency.
@@ -76,5 +77,5 @@ Run it again tomorrow, and it fetches the last three days again plus the new one
 
 - A row that disappears from Ad Manager after you loaded it (a dimension combination whose numbers were revised away) stays in the table: the merge replaces and adds rows, it does not delete them.
 - Changing the dimensions changes `row_key`. Rows loaded with the old key stay next to the new ones, so start over from `@incremental_initial` after such a change (`ondatrasql run` rebuilds a model whose SQL changed).
-- Every run creates new hidden reports in each network. The blueprint does not delete them.
+- Renaming the model (or its target) gives it a new report name, so a new report is created and the old one stays in the network, unused. Do not give a report of your own the name `ondatrasql <model>`: the blueprint would take it over and change its definition.
 - A report run that fails stops the run with the error Ad Manager gave, and nothing is loaded.
