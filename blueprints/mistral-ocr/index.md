@@ -11,6 +11,7 @@ tags:
 auth_method: api_key
 source_type: fetch
 model_kind: tracked
+min_version: v0.47.1
 args:
   - pattern
 ---

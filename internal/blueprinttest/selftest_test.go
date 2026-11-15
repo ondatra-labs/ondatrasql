@@ -295,6 +295,7 @@ tags: [test]
 auth_method: api_key
 source_type: fetch
 model_kind: table
+min_version: v0.47.0
 args: [pattern]
 ---
 {{< bp-file "lib/fakedocs.star" >}}
