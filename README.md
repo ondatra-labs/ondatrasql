@@ -169,7 +169,7 @@ flush                Flush inlined data to Parquet
 checkpoint           Run all maintenance
 ```
 
-[Full CLI reference →](https://ondatra.sh/cli/)
+[Full CLI reference →](https://ondatra.sh/reference/pipeline/cli/)
 
 ## Documentation
 
