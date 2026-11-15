@@ -12,6 +12,7 @@ source_type: fetch
 model_kind: merge
 args:
   - series
+min_version: v0.47.0
 ---
 Fetches daily observations from the [Riksbank SWEA API](https://api.riksbank.se/swea/v1): exchange rates such as SEK per EUR and USD, the policy rate, market rates, government bond yields, and every other series the Riksbank publishes. The API is public, so the blueprint needs no key.
 
