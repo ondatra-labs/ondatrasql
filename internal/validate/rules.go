@@ -47,6 +47,11 @@ const (
 	RuleParserDeprecatedSinkDetectDeletes RuleID = "parser.deprecated_sink_detect_deletes"
 	RuleParserDeprecatedSinkDeleteThresh  RuleID = "parser.deprecated_sink_delete_threshold"
 
+	// deprecation.* — a deprecated form (internal/deprecation) in use:
+	// warn while it still works, error once it no longer does.
+	RuleDeprecationWarn  RuleID = "deprecation.warn"
+	RuleDeprecationError RuleID = "deprecation.error"
+
 	// strict_fetch.* — bound to validateStrictLibSchema, validateFetchTopLevel,
 	// validateSelectProjections (in fetch mode).
 	RuleStrictFetchCastRequired      RuleID = "strict_fetch.cast_required"
@@ -125,6 +130,9 @@ var severityOverrides = map[RuleID]Severity{
 	RuleDagExternalRef:            SeverityInfo,
 	RuleBlueprintHelperWithoutAPI: SeverityInfo,
 	RuleBlueprintUncheckedStatus:  SeverityInfo, // heuristic — may false-negative if status checked in a helper
+
+	// WARN: a deprecated form that still works (exit 1 only with --strict).
+	RuleDeprecationWarn: SeverityWarn,
 
 	// WARN: validate's own environment is degraded — findings downstream
 	// may be incomplete, but the report itself is still actionable.

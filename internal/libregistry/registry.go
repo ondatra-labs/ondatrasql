@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"go.starlark.net/syntax"
+
+	"github.com/ondatra-labs/ondatrasql/internal/deprecation"
 )
 
 // Column describes a column that a lib function can produce.
@@ -506,6 +508,10 @@ func parseAPIDict(name, relPath string, dictExpr *syntax.DictExpr, f *syntax.Fil
 					lf.PageSize = v
 				}
 			case "mode":
+				pos, _ := kv.Key.Span()
+				if err := deprecation.Use(deprecation.LibFetchMode, relPath, int(pos.Line)); err != nil {
+					return nil, err
+				}
 				if v := literalString(kv.Value); v != "" {
 					lf.FetchMode = v
 				}

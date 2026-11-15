@@ -27,3 +27,15 @@ SET TimeZone = 'Europe/Stockholm';
 | `TimeZone` | System timezone | Timestamp interpretation |
 
 For the full list, see the [DuckDB configuration reference](https://duckdb.org/docs/stable/configuration/overview).
+
+## Minimum ondatrasql version
+
+A project can declare the oldest ondatrasql it runs on:
+
+```sql
+SET VARIABLE ondatrasql_min_version = '0.48.0';
+```
+
+ondatrasql reads this line before it does anything else in the project. An older binary exits with an error that names both versions, such as `this project needs ondatrasql 0.48.0 or newer (ondatrasql_min_version in config/settings.sql), but this binary is 0.47.0`. The value is a quoted `MAJOR.MINOR[.PATCH]`; anything else is an error. DuckDB runs the statement like any other, so `getvariable('ondatrasql_min_version')` returns it in SQL.
+
+Binaries older than the one that introduced the setting do not check it. Pin a version when the project starts relying on a feature, or once it no longer uses a [deprecated](/support/deprecations/) form that the next releases remove.
