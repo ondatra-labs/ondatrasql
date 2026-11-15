@@ -6,6 +6,7 @@ package httpcassette
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -52,10 +53,10 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if c.mode == Replay {
 		return cas.replay(req, rec)
 	}
-	return t.record(req, body, red, rec, cas)
+	return t.record(req, body, red, rec, cas, c.mask)
 }
 
-func (t *transport) record(req *http.Request, body []byte, red *redactor, rec Request, cas *cassette) (*http.Response, error) {
+func (t *transport) record(req *http.Request, body []byte, red *redactor, rec Request, cas *cassette, mask map[string]bool) (*http.Response, error) {
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
@@ -77,7 +78,15 @@ func (t *transport) record(req *http.Request, body []byte, red *redactor, rec Re
 			return nil, err
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		enc, raw := encodeBody(red.redactBody(respBody, resp.Header.Get("Content-Type")))
+		stored := red.redactBody(respBody, resp.Header.Get("Content-Type"))
+		if len(mask) > 0 && json.Valid(stored) {
+			// json.Valid makes an error here unreachable; were it not,
+			// storing the unmasked body would be the wrong way to fail.
+			if stored, err = maskJSON(stored, mask); err != nil {
+				return nil, fmt.Errorf("http cassette: mask response body: %w", err)
+			}
+		}
+		enc, raw := encodeBody(stored)
 		in.Response = &Response{
 			Status:       resp.StatusCode,
 			Headers:      red.redactResponseHeaders(resp.Header),

@@ -11,6 +11,7 @@
 //	ONDATRA_HTTP_CASSETTE=<dir>   where the cassette files live
 //	ONDATRA_HTTP_MODE=record      perform each request and append it to a file
 //	ONDATRA_HTTP_MODE=replay      answer each request from a file, no network
+//	ONDATRA_HTTP_MASK=a,b         in record mode, mask these JSON fields in responses
 //
 // With neither set, Transport returns its base unchanged and every other
 // function here is a no-op, so behaviour is exactly what it was without the
@@ -40,6 +41,7 @@ import (
 const (
 	EnvDir  = "ONDATRA_HTTP_CASSETTE"
 	EnvMode = "ONDATRA_HTTP_MODE"
+	EnvMask = "ONDATRA_HTTP_MASK"
 )
 
 // Mode is what the transport does with a request.
@@ -57,6 +59,9 @@ type config struct {
 	dir  string
 	err  error
 	now  string // ONDATRA_NOW when the config was read, stored in recorded files
+	// mask are the JSON field names (lower case) whose values are masked
+	// in recorded response bodies; see maskJSON.
+	mask map[string]bool
 }
 
 var (
@@ -101,8 +106,26 @@ func loadConfigLocked() *config {
 		// every request fails with the error instead.
 		c.mode = Replay
 	}
+	if c.mode == Record {
+		c.mask = parseMask(os.Getenv(EnvMask))
+	}
 	cfg = c
 	return c
+}
+
+// parseMask reads ONDATRA_HTTP_MASK: field names separated by commas,
+// matched without regard to case. Nil when it names none.
+func parseMask(v string) map[string]bool {
+	var m map[string]bool
+	for _, f := range strings.Split(v, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			if m == nil {
+				m = map[string]bool{}
+			}
+			m[strings.ToLower(f)] = true
+		}
+	}
+	return m
 }
 
 // Validate reports a malformed ONDATRA_HTTP_CASSETTE / ONDATRA_HTTP_MODE
