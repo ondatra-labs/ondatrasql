@@ -6,11 +6,13 @@ package httpcassette
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -117,4 +119,29 @@ func TestRecord_MaskedResponse(t *testing.T) {
 	if strings.Contains(got, "ada@x.io") || !strings.Contains(got, MaskString("bo@x.io")) {
 		t.Fatalf("replayed %s", got)
 	}
+}
+
+// Any JSON document masks without error into a JSON document of the same
+// shape: with nothing to mask, equal to the input.
+func FuzzMaskJSON(f *testing.F) {
+	for _, s := range []string{`{"email":"a","n":[1,{"email":{"x":true}}]}`, `[null,"s",1e3]`, `"x"`, `{"Email":-0.5}`} {
+		f.Add(s, "email")
+	}
+	f.Fuzz(func(t *testing.T, in, fields string) {
+		if !json.Valid([]byte(in)) {
+			return
+		}
+		out, err := maskJSON([]byte(in), parseMask(fields))
+		if err != nil || !json.Valid(out) {
+			t.Fatalf("maskJSON(%q, %q) = %q, %v", in, fields, out, err)
+		}
+		same, err := maskJSON([]byte(in), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a, b any
+		if json.Unmarshal([]byte(in), &a) != nil || json.Unmarshal(same, &b) != nil || !reflect.DeepEqual(a, b) {
+			t.Fatalf("maskJSON(%q) without a mask changed it to %q", in, same)
+		}
+	})
 }
