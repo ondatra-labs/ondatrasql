@@ -1,0 +1,39 @@
+title: "Blueprint: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A blueprint loads one public API into DuckLake. Upvote existing requests instead of opening a duplicate.
+  - type: input
+    id: api
+    attributes:
+      label: API documentation URL
+      placeholder: https://...
+    validations:
+      required: true
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Does the API need a login or key?
+      options:
+        - No, it is open
+        - Free API key
+        - OAuth or service account
+        - Paid account
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: What would you load?
+      description: The endpoints or data you want as tables, and how often.
+    validations:
+      required: true
+  - type: checkboxes
+    id: build
+    attributes:
+      label: Building it
+      options:
+        - label: I would like to build this blueprint myself
