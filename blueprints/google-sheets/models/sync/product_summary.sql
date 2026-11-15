@@ -1,5 +1,5 @@
 -- @kind: table
--- @push: google_sheets('YOUR_SPREADSHEET_ID', 'Summary')
+-- @push: google_sheets('Summary')
 -- One row per product, written over the Summary tab on every run. The
 -- aliases become the header row of the tab.
 SELECT

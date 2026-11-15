@@ -10,8 +10,8 @@ auth_method: service_account
 source_type: fetch
 model_kind: table
 args:
-  - spreadsheet_id
   - range
+  - spreadsheet_id
 ---
 Reads a range of a spreadsheet through the [Google Sheets API v4](https://developers.google.com/sheets/api/reference/rest) into a table, and pushes the rows of a model back to another range of it. The blueprint signs in as a Google service account: share the spreadsheet with the account's email and the pipeline runs headless, with no browser and no user login.
 
@@ -19,11 +19,11 @@ The example reads an `Orders` tab (one row per order) and writes a summary per p
 
 ## What it does
 
-- `FROM google_sheets('<spreadsheet id>', 'Orders!A:E')` reads the range in one request. Its first row is the header, and every later row becomes a row keyed by it, so the names inside the casts of the raw model are the sheet's column headers.
+- `FROM google_sheets('Orders!A:E')` reads the range in one request. Its first row is the header, and every later row becomes a row keyed by it, so the names inside the casts of the raw model are the sheet's column headers.
 - Cells are read unformatted: a number formatted as `$19.90` arrives as `19.9`, and the cast in the model types it. Date cells arrive as the text they show.
 - A column the model asks for that is not in the header fails the run, naming the header it found. Columns the model does not ask for are ignored.
 - Empty rows are skipped. A range with a header and no rows gives an empty table.
-- `-- @push: google_sheets('<spreadsheet id>', 'Summary')` replaces the range with the model's rows: it clears the range, then writes the header (the model's column aliases) and the rows from its top-left cell. Clearing first matters: writing alone would leave old rows below a result that got shorter.
+- `-- @push: google_sheets('Summary')` replaces the range with the model's rows: it clears the range, then writes the header (the model's column aliases) and the rows from its top-left cell. Clearing first matters: writing alone would leave old rows below a result that got shorter.
 - The rows are written sorted by the first column, then the second, and so on (NULLs last). Put the column to sort by first.
 - Values are written as they are (`valueInputOption=RAW`): a string that looks like a number or a formula stays text.
 
@@ -41,9 +41,10 @@ The example reads an `Orders` tab (one row per order) and writes a summary per p
 mkdir sheets && cd sheets
 ondatrasql init
 echo "GOOGLE_SHEETS_KEY_FILE=/path/to/service-account.json" >> .env
+echo "GOOGLE_SHEETS_SPREADSHEET_ID=1AbC…xYz" >> .env
 ```
 
-Give the spreadsheet a tab `Orders` with the header `id`, `product`, `quantity`, `price`, `updated` in row 1 and a few orders below it (`updated` as `2026-11-01`), and an empty tab `Summary`. Copy the three files below into the project, keeping their paths, put your spreadsheet id in place of `YOUR_SPREADSHEET_ID` in both models, then run:
+Give the spreadsheet a tab `Orders` with the header `id`, `product`, `quantity`, `price`, `updated` in row 1 and a few orders below it (`updated` as `2026-11-01`), and an empty tab `Summary`. Copy the three files below into the project, keeping their paths, then run:
 
 ```bash
 ondatrasql run
@@ -66,6 +67,7 @@ The `Summary` tab now holds the same rows.
 
 ## Customisation
 
+- **The spreadsheet:** either put its id in the model as the second argument, `google_sheets('Orders!A:E', '1AbC…xYz')`, or leave it out and set `GOOGLE_SHEETS_SPREADSHEET_ID` in `.env`, as the models here do. An empty `''` also means the variable. The variable suits one spreadsheet per environment (a test copy and the real one); ids in the models let each model use its own spreadsheet.
 - **Another sheet:** change the range in `FROM google_sheets(…)` to any A1 range whose first row is the header: `Orders` (the whole tab), `Orders!A:E`, `'Order data'!B3:F`. Quote a tab name that has spaces, as Sheets does.
 - **Columns:** each column of the raw model is `header::TYPE AS name`. Quote a header with spaces or capitals, `"Unit price"::DOUBLE AS unit_price`. A header the model does not name is ignored.
 - **Dates:** a date cell is read as the text it shows, so `::DATE` needs it shown as `yyyy-mm-dd` (Format > Number > Custom date and time). For another format, read it as `VARCHAR` in raw and parse it with `strptime` downstream.

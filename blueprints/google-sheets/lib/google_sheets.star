@@ -2,8 +2,11 @@
 # a range. Sheets API v4, authenticated as a Google service account:
 # https://developers.google.com/sheets/api/reference/rest
 #
-#   FROM google_sheets('<spreadsheet id>', 'Orders!A:E')        -- @fetch
-#   -- @push: google_sheets('<spreadsheet id>', 'Summary')     -- @push
+#   FROM google_sheets('Orders!A:E', '<spreadsheet id>')        -- @fetch
+#   -- @push: google_sheets('Summary', '<spreadsheet id>')     -- @push
+#
+# Without a spreadsheet id (or with ''), GOOGLE_SHEETS_SPREADSHEET_ID names
+# it. The id comes last so it can be left out: @push drops an empty ''.
 #
 # Share the spreadsheet with the service account's email (Editor to push,
 # Viewer is enough to read). GOOGLE_SHEETS_KEY_FILE is the path of its JSON
@@ -29,9 +32,9 @@ API = {
     "backoff": 2,
     # the read quota is 60 requests per minute per user
     "rate_limit": {"requests": 60, "per": "60s"},
-    "fetch": {"args": ["spreadsheet_id", "range"]},
+    "fetch": {"args": ["range", "spreadsheet_id"]},
     "push": {
-        "args": ["spreadsheet_id", "range"],
+        "args": ["range", "spreadsheet_id"],
         # a push replaces the whole range, so only a full-replace kind fits
         "supported_kinds": ["table"],
         # one batch holds the whole result (the old rows' deletes included)
@@ -58,8 +61,9 @@ def _escape(s):
     return "".join(out)
 
 def _values_url(spreadsheet_id, range):
+    spreadsheet_id = spreadsheet_id or env.get("GOOGLE_SHEETS_SPREADSHEET_ID")
     if not spreadsheet_id or not range:
-        fail("google_sheets: spreadsheet_id and range are required")
+        fail("google_sheets: a range and a spreadsheet id (or GOOGLE_SHEETS_SPREADSHEET_ID) are required")
     return "/spreadsheets/" + _escape(spreadsheet_id) + "/values/" + _escape(range)
 
 def _check(resp, what):
@@ -75,7 +79,7 @@ def _text(x):
         return "true" if x else "false"
     return str(x)
 
-def fetch(spreadsheet_id, range, columns=[]):
+def fetch(range, spreadsheet_id="", columns=[]):
     resp = http.get(_values_url(spreadsheet_id, range), params={
         "majorDimension": "ROWS",
         "valueRenderOption": "UNFORMATTED_VALUE",
@@ -123,7 +127,7 @@ def _sort_key(r, names):
     # rows arrive unordered: sort by the columns in order, NULLs last
     return [(r.get(n) == None, r.get(n) if r.get(n) != None else 0) for n in names]
 
-def push(rows=[], batch_number=1, columns=[], spreadsheet_id="", range=""):
+def push(rows=[], batch_number=1, columns=[], range="", spreadsheet_id=""):
     url = _values_url(spreadsheet_id, range)
     names = [c["name"] for c in columns]
     if not names and rows:
