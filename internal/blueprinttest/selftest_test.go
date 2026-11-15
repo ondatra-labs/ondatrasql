@@ -114,6 +114,7 @@ auth_method: api_key
 source_type: fetch
 model_kind: merge
 args: [resource]
+min_version: v0.47.0
 ---
 Orders, incrementally by day.
 
@@ -195,6 +196,7 @@ auth_method: api_key
 source_type: push
 model_kind: merge
 args: []
+min_version: v0.47.0
 ---
 {{< bp-file "lib/fakecrm.star" >}}
 
@@ -364,7 +366,7 @@ func TestHarness_SelfTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{bin: ondatrasqlBinary(t), shared: shared}
+	h := &harness{bin: ondatrasqlBinary(t), shared: shared, mainVersion: mainVersion(t)}
 
 	var shopHits, crmHits, docsHits atomic.Int32
 	shop := fakeShop(&shopHits)
@@ -559,6 +561,25 @@ func TestHarness_SelfTest(t *testing.T) {
 			`auth_method "none"`, `args ["resource" "since"]`, `model_kind "append", models/raw/orders.sql is @kind: merge`,
 			`bp-file "models/raw/order.sql" does not exist`, "models/raw/orders.sql is not shown")
 	})
+	t.Run("min_version", func(t *testing.T) {
+		m := versionRe.FindStringSubmatch(h.mainVersion)
+		patch, _ := strconv.Atoi(m[3]) // versionRe matched digits
+		above := fmt.Sprintf("v%s.%s.%d", m[1], m[2], patch+1)
+		for _, c := range []struct{ line, want string }{
+			{"", "frontmatter min_version is missing"},
+			{"min_version: 0.47.0", `min_version "0.47.0" is not vX.Y.Z`},
+			{"min_version: v0.47", `min_version "v0.47" is not vX.Y.Z`},
+			{"min_version: v0.47.0-rc1", `min_version "v0.47.0-rc1" is not vX.Y.Z`},
+			{"min_version: " + above, "min_version " + above + " is above " + h.mainVersion + ", the version in cmd/ondatrasql/main.go"},
+		} {
+			bp := copyBlueprint(t, shopDir, map[string]string{"index.md": strings.Replace(fakeShopPage, "min_version: v0.47.0", c.line, 1)})
+			wantErr(t, "min_version "+c.line, h.check(t, bp), c.want)
+		}
+		bp := copyBlueprint(t, shopDir, map[string]string{"index.md": strings.Replace(fakeShopPage, "min_version: v0.47.0", "min_version: "+h.mainVersion, 1)})
+		if err := h.check(t, bp); err != nil {
+			t.Errorf("min_version equal to main's: %v", err)
+		}
+	})
 	t.Run("env example", func(t *testing.T) {
 		bp := copyBlueprint(t, shopDir, map[string]string{".env.example": "OTHER=\n"})
 		wantErr(t, "env missing", h.check(t, bp), "FAKESHOP_KEY (read by the API dict's auth) is missing")
@@ -571,4 +592,21 @@ func TestHarness_SelfTest(t *testing.T) {
 			"amount::DECIMAL(10, 2) AS amount", "amount", 1)})
 		wantErr(t, "validate", h.check(t, bp), "validate --strict")
 	})
+}
+
+func TestHarness_CompareVersions(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"v0.47.0", "v0.47.0", 0},
+		{"v0.46.1", "v0.47.0", -1},
+		{"v0.10.0", "v0.9.0", 1},
+		{"v1.0.0", "v0.99.99", 1},
+		{"v0.47.10", "v0.47.9", 1},
+	} {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%s, %s) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
 }

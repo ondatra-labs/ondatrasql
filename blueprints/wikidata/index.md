@@ -12,6 +12,7 @@ source_type: fetch
 model_kind: table
 args:
   - query
+min_version: v0.47.1
 ---
 Runs a SPARQL `SELECT` query against the [Wikidata Query Service](https://query.wikidata.org) and loads the result as a table: one row per result, one column per variable. Wikidata is the open knowledge base behind Wikipedia, with over a hundred million items: companies, people, places, works, and the identifiers that link them to other datasets. The service is public, so the blueprint needs no key.
 

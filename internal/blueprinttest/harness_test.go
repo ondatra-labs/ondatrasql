@@ -7,7 +7,8 @@
 package blueprinttest
 
 // The blueprint harness. It runs the ondatrasql binary, built once from
-// this checkout, against a copy of a blueprint in a temporary project:
+// this checkout or named by ONDATRASQL_BIN, against a copy of a blueprint
+// in a temporary project:
 //
 //   - check: validate --strict is clean, the page's frontmatter agrees
 //     with --json describe blueprint, .env.example names the auth
@@ -39,6 +40,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +52,10 @@ import (
 // EnvTestsDir names the directory holding the private recordings:
 // <dir>/<blueprint>/cassettes/ and <dir>/<blueprint>/expect.yaml.
 const EnvTestsDir = "BLUEPRINT_TESTS_DIR"
+
+// EnvBinary names an ondatrasql binary to run instead of building
+// cmd/ondatrasql: CI sets it to the latest released binary.
+const EnvBinary = "ONDATRASQL_BIN"
 
 var (
 	binOnce sync.Once
@@ -67,10 +73,15 @@ func TestMain(m *testing.M) {
 }
 
 // ondatrasqlBinary builds cmd/ondatrasql from this checkout once per test
-// process, so the harness runs the CLI exactly as a user would.
+// process, so the harness runs the CLI exactly as a user would. With
+// ONDATRASQL_BIN set it returns that binary instead.
 func ondatrasqlBinary(t testing.TB) string {
 	t.Helper()
 	binOnce.Do(func() {
+		if bin := os.Getenv(EnvBinary); bin != "" {
+			binPath, binErr = filepath.Abs(bin)
+			return
+		}
 		binDir, binErr = os.MkdirTemp("", "ondatrasql-bp-")
 		if binErr != nil {
 			return
@@ -89,10 +100,65 @@ func ondatrasqlBinary(t testing.TB) string {
 }
 
 // harness runs one ondatrasql binary against blueprints that take their
-// local config from shared (blueprints/_shared).
+// local config from shared (blueprints/_shared). mainVersion is the
+// version in cmd/ondatrasql/main.go, vX.Y.Z: no min_version is above it.
 type harness struct {
-	bin    string
-	shared string
+	bin         string
+	shared      string
+	mainVersion string
+}
+
+// ---------------------------------------------------------------------
+// Versions: min_version, main's and the binary's
+// ---------------------------------------------------------------------
+
+// versionRe is vX.Y.Z, the form of a release tag and of min_version.
+var versionRe = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+func validVersion(v string) bool { return versionRe.MatchString(v) }
+
+// compareVersions compares two valid versions like strings.Compare.
+func compareVersions(a, b string) int {
+	parse := func(v string) []int {
+		var n []int
+		for _, s := range versionRe.FindStringSubmatch(v)[1:] {
+			i, _ := strconv.Atoi(s) // versionRe matched digits
+			n = append(n, i)
+		}
+		return n
+	}
+	return slices.Compare(parse(a), parse(b))
+}
+
+var mainVersionRe = regexp.MustCompile(`(?m)^var version = "([^"]+)"$`)
+
+// mainVersion reads the version cmd/ondatrasql/main.go carries on this
+// checkout, as vX.Y.Z.
+func mainVersion(t testing.TB) string {
+	t.Helper()
+	data, err := os.ReadFile("../../cmd/ondatrasql/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := mainVersionRe.FindSubmatch(data)
+	if m == nil || !validVersion("v"+string(m[1])) {
+		t.Fatal(`cmd/ondatrasql/main.go: no var version = "X.Y.Z"`)
+	}
+	return "v" + string(m[1])
+}
+
+// checkMinVersion: min_version is required, vX.Y.Z, and at most main's
+// version, so a blueprint never needs a version that does not exist.
+func checkMinVersion(minVersion, mainVersion string) error {
+	switch {
+	case minVersion == "":
+		return errors.New("frontmatter min_version is missing (vX.Y.Z, the oldest release that runs the blueprint)")
+	case !validVersion(minVersion):
+		return fmt.Errorf("frontmatter min_version %q is not vX.Y.Z", minVersion)
+	case compareVersions(minVersion, mainVersion) > 0:
+		return fmt.Errorf("frontmatter min_version %s is above %s, the version in cmd/ondatrasql/main.go; a blueprint waits for the release it needs and never bumps the version (blueprints/README.md)", minVersion, mainVersion)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------
@@ -224,6 +290,7 @@ type frontmatter struct {
 	SourceType  string   `yaml:"source_type"`
 	ModelKind   string   `yaml:"model_kind"`
 	Args        []string `yaml:"args"`
+	MinVersion  string   `yaml:"min_version"`
 }
 
 // describedBlueprint is the part of --json describe blueprint <name> the
@@ -409,6 +476,9 @@ func (h *harness) check(t testing.TB, bpDir string) error {
 	}
 	if fm.Args == nil {
 		fail("index.md: frontmatter args is missing (use [] for none)")
+	}
+	if err := checkMinVersion(fm.MinVersion, h.mainVersion); err != nil {
+		fail("index.md: %v", err)
 	}
 
 	// Every code file is shown on the page, and every reference exists.

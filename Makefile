@@ -9,7 +9,7 @@ RAPID_PKGS = ./internal/backfill ./internal/dag ./internal/duckdb \
 OTHER_PKGS = ./cmd/... ./internal/config ./internal/git \
              ./internal/sql ./internal/testutil
 
-.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover test-blueprints record-blueprint lint bugcheck-static build install-tools
+.PHONY: test test-short test-ci test-integration test-e2e test-bench test-all test-cover test-blueprints test-blueprints-bin record-blueprint lint bugcheck-static build install-tools
 
 # Unit tests only (no integration build tag)
 test:
@@ -40,8 +40,16 @@ test-all:
 # with describe blueprint, offline. With BLUEPRINT_TESTS_DIR=<dir> also
 # replay <dir>/<name>/cassettes/ and assert <dir>/<name>/expect.yaml.
 test-blueprints:
-	BLUEPRINT_TESTS_DIR="$(BLUEPRINT_TESTS_DIR)" go test -p 1 -timeout 30m -count=1 -v -tags blueprints \
+	ONDATRASQL_BIN= BLUEPRINT_TESTS_DIR="$(BLUEPRINT_TESTS_DIR)" go test -p 1 -timeout 30m -count=1 -v -tags blueprints \
 		-run 'TestBlueprints|TestHarness' ./internal/blueprinttest/
+
+# The same offline check with the binary ONDATRASQL_BIN names, such as the
+# latest release (CI downloads it). A blueprint whose min_version is above
+# that binary's version is skipped and reported as tested against main only.
+test-blueprints-bin:
+	@test -n "$(ONDATRASQL_BIN)" || { echo "test-blueprints-bin: set ONDATRASQL_BIN=<ondatrasql binary>"; exit 1; }
+	ONDATRASQL_BIN="$(ONDATRASQL_BIN)" BLUEPRINT_TESTS_DIR= go test -p 1 -timeout 30m -count=1 -v -tags blueprints \
+		-run '^TestBlueprints$$' ./internal/blueprinttest/
 
 # Maintainers only: record blueprint BP against its live API into
 # BLUEPRINT_TESTS_DIR/BP (needs network and the keys in its .env.example).
