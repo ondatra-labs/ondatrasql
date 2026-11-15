@@ -57,6 +57,7 @@ auth_method: none
 source_type: fetch
 model_kind: table
 args: [sheet_id]
+min_version: v0.47.0
 ---
 {{< bp-file "lib/fakesheet.star" >}}
 
@@ -68,7 +69,7 @@ func TestHarness_ExpectEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{bin: ondatrasqlBinary(t), shared: shared}
+	h := &harness{bin: ondatrasqlBinary(t), shared: shared, mainVersion: mainVersion(t)}
 
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

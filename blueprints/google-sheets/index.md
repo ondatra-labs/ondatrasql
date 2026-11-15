@@ -12,6 +12,7 @@ model_kind: table
 args:
   - range
   - spreadsheet_id
+min_version: v0.47.1
 ---
 Reads a range of a spreadsheet through the [Google Sheets API v4](https://developers.google.com/sheets/api/reference/rest) into a table, and pushes the rows of a model back to another range of it. The blueprint signs in as a Google service account: share the spreadsheet with the account's email and the pipeline runs headless, with no browser and no user login.
 
