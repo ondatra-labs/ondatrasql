@@ -14,6 +14,7 @@ args:
   - dataset
   - countries
   - codelist_url
+min_version: v0.47.1
 ---
 Fetches the business entities registered as Peppol receivers from the [Peppol Directory](https://directory.peppol.eu), the public register of who can receive e-invoices and other documents over Peppol, together with the participant identifier scheme code list from the [Peppol code lists](https://docs.peppol.eu/edelivery/codelists/). Both are public, so the blueprint needs no key.
 

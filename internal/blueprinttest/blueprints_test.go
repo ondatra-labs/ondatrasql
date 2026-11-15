@@ -8,8 +8,10 @@ package blueprinttest
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,11 +47,24 @@ func repoHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{bin: ondatrasqlBinary(t), shared: shared}
+	return &harness{bin: ondatrasqlBinary(t), shared: shared, mainVersion: mainVersion(t)}
+}
+
+// binaryVersion asks the binary for its version, as vX.Y.Z.
+func (h *harness) binaryVersion(t testing.TB) string {
+	t.Helper()
+	out, err := exec.Command(h.bin, "version").Output()
+	v := "v" + strings.TrimSpace(string(out))
+	if err != nil || !validVersion(v) {
+		t.Fatalf("%s version: %q %v", h.bin, out, err)
+	}
+	return v
 }
 
 // TestBlueprints checks every blueprint offline and, with
-// BLUEPRINT_TESTS_DIR set, replays its recording.
+// BLUEPRINT_TESTS_DIR set, replays its recording. With ONDATRASQL_BIN set
+// (a released binary), a blueprint whose min_version is above that
+// binary's version is skipped: it is tested against main only.
 func TestBlueprints(t *testing.T) {
 	h := repoHarness(t)
 	rec := testsDir(t)
@@ -57,6 +72,14 @@ func TestBlueprints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	binVersion := h.binaryVersion(t)
+	external := os.Getenv(EnvBinary) != ""
+	with := fmt.Sprintf("ondatrasql %s built from this checkout", binVersion)
+	if external {
+		with = fmt.Sprintf("ondatrasql %s from %s=%s", binVersion, EnvBinary, os.Getenv(EnvBinary))
+	}
+	var report []string
+	defer func() { t.Logf("blueprints and the binary each was proven with:\n%s", strings.Join(report, "\n")) }()
 	for _, name := range names {
 		bpDir, err := filepath.Abs(filepath.Join(blueprintsRoot, name))
 		if err != nil {
@@ -64,9 +87,20 @@ func TestBlueprints(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Run("check", func(t *testing.T) {
-				if err := h.check(t, bpDir); err != nil {
-					t.Errorf("%s: %v", name, err)
+				if external {
+					fm, _, err := readPage(bpDir)
+					if err == nil && validVersion(fm.MinVersion) && compareVersions(fm.MinVersion, binVersion) > 0 {
+						report = append(report, fmt.Sprintf("  %s: main only (min_version %s is above %s)", name, fm.MinVersion, binVersion))
+						t.Skipf("%s: not proven with %s: its min_version %s is above it; tested against main only", name, with, fm.MinVersion)
+					}
 				}
+				if err := h.check(t, bpDir); err != nil {
+					report = append(report, fmt.Sprintf("  %s: FAILED with %s", name, with))
+					t.Errorf("%s: %v", name, err)
+					return
+				}
+				report = append(report, fmt.Sprintf("  %s: proven with %s", name, with))
+				t.Logf("%s: proven with %s", name, with)
 			})
 			t.Run("replay", func(t *testing.T) {
 				if rec == "" {
