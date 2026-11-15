@@ -131,9 +131,6 @@ func Current() Mode { return loadConfig().mode }
 // credential lookups that only matter against a live API.
 func Replaying() bool { return loadConfig().mode == Replay }
 
-// Recording reports whether requests are being written to cassettes.
-func Recording() bool { return loadConfig().mode == Record }
-
 // Transport wraps base (nil means http.DefaultTransport) so that requests
 // are recorded or replayed. With the package off it returns base itself.
 func Transport(base http.RoundTripper) http.RoundTripper {

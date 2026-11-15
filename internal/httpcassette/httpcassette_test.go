@@ -66,7 +66,7 @@ func TestOff_TransportIsBase(t *testing.T) {
 	if got := Transport(nil); got != nil {
 		t.Fatalf("Transport(nil) with no env set = %T, want nil", got)
 	}
-	if Replaying() || Recording() {
+	if Current() != Off {
 		t.Fatal("mode should be off")
 	}
 	RegisterSecret("would-be-secret")
