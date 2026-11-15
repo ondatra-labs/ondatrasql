@@ -156,15 +156,28 @@ Sample values are written as DuckDB prints them cast to `VARCHAR` (`DECIMAL(10,4
 
 Every run replays from `cassettes/` unless it names a subdirectory with `cassettes: run2`. A later run that makes requests the first one did not make, such as a run on a later `now`, needs its own subdirectory, because recording it into `cassettes/` would replace the first run's files.
 
+An optional `env:` map sets variables for every run, in record and replay alike:
+
+```yaml
+env:
+  GOOGLE_SHEETS_SPREADSHEET_ID: "1AbC…xYz"   # the test sheet's id
+runs:
+  - now: "2026-11-15T12:00:00Z"
+    ...
+```
+
+It is for values that are not secret but belong to the account the recording was made with, such as the id of a test spreadsheet that a blueprint reads with `env.get()` and puts in its URLs. Replay unsets the variables in `.env.example`, so without `env:` that URL would change and no longer match the recording. The values are stored in `expect.yaml` as written and never masked, so never put a credential here. A name that `env.get()` treats as a secret (one containing `KEY`, `TOKEN`, `SECRET`, `PASS`, `PWD`, `CREDENTIAL`, `AUTH` or `PRIVATE`) is masked in the cassette and cannot replay this way. A variable in `env:` need not be set in the shell to record, and `ONDATRA_*` names are refused.
+
 ## Record (maintainers)
 
 ```bash
 make record-blueprint BP=<name> BLUEPRINT_TESTS_DIR=/path/to/recordings
 ```
 
-Recording calls the live API, so it needs network and every key in the blueprint's `.env.example` set in the environment. It writes only into `BLUEPRINT_TESTS_DIR/<name>/`, never into this repository:
+Recording calls the live API, so it needs network and every key in the blueprint's `.env.example` set in the environment (or in `expect.yaml`'s `env:`). It writes only into `BLUEPRINT_TESTS_DIR/<name>/`, never into this repository:
 
 - it runs the offline check first, then replaces `cassettes/` (never `data/`) with the requests of the runs in the existing `expect.yaml` (without one, two runs at the current time);
 - it then replays the new recording and prints the `expect.yaml` that replay produced. If there was no `expect.yaml`, the draft is written there, and you must review it before you trust it. If there was one, it is asserted, and a difference fails the run, with the draft beside it.
+- an `expect.yaml` whose runs assert nothing (only `now` and `cassettes`), or that has only `env:`, is a seed for a first recording: its `env:` and runs are used (two runs at the current time if it lists none), and the draft replaces it. Write one when the blueprint needs `env:`, or when its second run makes requests and needs `cassettes: run2`.
 
 Before committing a recording to the private repository, read it: the recorder masks credentials it knows about, but not values it cannot know are secret (see [What is never written](../docs/guides/test-a-blueprint-offline.md#what-is-never-written)).
