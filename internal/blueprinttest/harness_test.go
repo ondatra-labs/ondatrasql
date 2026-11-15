@@ -47,6 +47,8 @@ import (
 	"time"
 
 	"github.com/goccy/go-yaml"
+
+	"github.com/ondatra-labs/ondatrasql/internal/httpcassette"
 )
 
 // EnvTestsDir names the directory holding the private recordings:
@@ -233,7 +235,7 @@ func recordingData(rec string) string {
 // without drop, plus extra.
 func cliEnv(drop []string, extra []string) []string {
 	skip := map[string]bool{
-		"ONDATRA_HTTP_CASSETTE": true, "ONDATRA_HTTP_MODE": true,
+		"ONDATRA_HTTP_CASSETTE": true, "ONDATRA_HTTP_MODE": true, "ONDATRA_HTTP_MASK": true,
 		"ONDATRA_NOW": true, "ONDATRA_STATE_KEY": true,
 	}
 	for _, d := range drop {
@@ -583,8 +585,13 @@ type expectFile struct {
 	// Env are variables set for every run, in record and replay alike:
 	// values that are not secret but differ per account, such as the id
 	// of a test spreadsheet the blueprint reads from env.get().
-	Env  map[string]string `yaml:"env,omitempty"`
-	Runs []expectRun       `yaml:"runs"`
+	Env map[string]string `yaml:"env,omitempty"`
+	// Mask are JSON field names whose values the recorder replaces in
+	// response bodies before a cassette is written (ONDATRA_HTTP_MASK):
+	// personal and business data the blueprint's tables need not keep.
+	// Replay ignores it; the cassettes are already masked.
+	Mask []string    `yaml:"mask,omitempty"`
+	Runs []expectRun `yaml:"runs"`
 }
 
 type expectRun struct {
@@ -717,13 +724,14 @@ type modelResult struct {
 }
 
 // doRun makes one ondatrasql --json run in mode (record or replay) with
-// cassette dir cas and ONDATRA_NOW now. drop are variables to unset.
-func (h *harness) doRun(p *project, mode, cas, now string, drop []string) (*runOutcome, error) {
-	env := cliEnv(drop, []string{
+// cassette dir cas and ONDATRA_NOW now. drop are variables to unset,
+// extra more to set.
+func (h *harness) doRun(p *project, mode, cas, now string, drop []string, extra ...string) (*runOutcome, error) {
+	env := cliEnv(drop, append([]string{
 		"ONDATRA_HTTP_MODE=" + mode,
 		"ONDATRA_HTTP_CASSETTE=" + cas,
 		"ONDATRA_NOW=" + now,
-	})
+	}, extra...))
 	stdout, stderr, err := h.exec(p, env, "--json", "run")
 	out := &runOutcome{models: map[string]modelResult{}, stdout: stdout, stderr: stderr}
 	for _, line := range strings.Split(stdout, "\n") {
@@ -986,11 +994,17 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 	case errors.Is(err, fs.ErrNotExist) || seed && len(exp.Runs) == 0:
 		now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 		var env map[string]string
+		var mask []string
 		if exp != nil {
-			env = exp.Env
+			env, mask = exp.Env, exp.Mask
 		}
-		exp = &expectFile{Env: env, Runs: []expectRun{{Now: now}, {Now: now}}}
+		exp = &expectFile{Env: env, Mask: mask, Runs: []expectRun{{Now: now}, {Now: now}}}
 	case err != nil:
+		return nil, err
+	}
+
+	maskEnv, err := maskVar(exp.Mask)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1022,13 +1036,23 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 			// would replace the first run's files, so it must record none.
 			dir = filepath.Join(t.TempDir(), "later-run")
 		}
-		if _, err := h.doRun(p, "record", dir, r.Now, nil); err != nil {
+		if _, err := h.doRun(p, "record", dir, r.Now, nil, maskEnv...); err != nil {
 			return nil, fmt.Errorf("record run %d: %w", i+1, err)
 		}
 		if i > 0 && r.Cassettes == "" {
 			if entries, _ := os.ReadDir(dir); len(entries) > 0 {
 				return nil, fmt.Errorf("record run %d made requests; give it cassettes: run%d in expect.yaml so they are kept apart", i+1, i+1)
 			}
+		}
+	}
+
+	if len(exp.Mask) > 0 {
+		unmasked, err := nonJSONResponses(casRoot)
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range unmasked {
+			t.Logf("mask: %s: the response body is not JSON, so mask: left it as recorded", u)
 		}
 	}
 
@@ -1044,6 +1068,47 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 	return draft, nil
 }
 
+// maskVar is the ONDATRA_HTTP_MASK setting for expect.yaml's mask:, none
+// when it is empty.
+func maskVar(mask []string) ([]string, error) {
+	for _, f := range mask {
+		if strings.TrimSpace(f) == "" || strings.Contains(f, ",") {
+			return nil, fmt.Errorf("expect.yaml: mask %q: not a JSON field name", f)
+		}
+	}
+	if len(mask) == 0 {
+		return nil, nil
+	}
+	return []string{httpcassette.EnvMask + "=" + strings.Join(mask, ",")}, nil
+}
+
+// nonJSONResponses lists the recorded responses under casRoot whose body
+// is not JSON, as "<cassette> #<n>": mask: does not reach into them.
+func nonJSONResponses(casRoot string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(casRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".json" {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var f httpcassette.File
+		if err := json.Unmarshal(data, &f); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		rel, _ := filepath.Rel(casRoot, path)
+		for i, in := range f.Interactions {
+			if in.Response != nil && in.Response.BodyEncoding != "" && in.Response.BodyEncoding != "json" {
+				out = append(out, fmt.Sprintf("%s #%d (%s)", filepath.ToSlash(rel), i+1, in.Request.URL))
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 // draftExpect replays the runs of exp from casRoot, with data (if any)
 // in the project, and writes down what they produced: an expect.yaml to
 // review, not to accept blindly.
@@ -1057,7 +1122,7 @@ func (h *harness) draftExpect(t testing.TB, bpDir, casRoot, data string, exp *ex
 		return nil, err
 	}
 	keys, _ := envExampleKeys(bpDir) // read without error by record
-	out := expectFile{Env: exp.Env}
+	out := expectFile{Env: exp.Env, Mask: exp.Mask}
 	for i, r := range exp.Runs {
 		res, err := h.doRun(p, "replay", filepath.Join(casRoot, r.Cassettes), r.Now, keys)
 		if err != nil {
