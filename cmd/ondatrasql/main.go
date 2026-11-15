@@ -75,10 +75,13 @@ func run(args []string) error {
 
 	// Deprecated forms are judged against this binary's version, and each
 	// one in use is reported once per command (validate turns them into
-	// findings instead).
+	// findings instead). Only run and sandbox stream JSON lines, so only
+	// they may put a notice on stdout; a command that prints one JSON
+	// document keeps stdout to that document.
 	deprecation.SetVersion(version)
 	deprecation.Reset()
-	deprecation.SetReporter(reportDeprecation)
+	streaming := len(args) > 0 && (args[0] == "run" || args[0] == "sandbox")
+	deprecation.SetReporter(func(u deprecation.Usage) { reportDeprecation(u, streaming) })
 
 	// No args = show help (safe default)
 	if len(args) == 0 {
@@ -430,9 +433,10 @@ func reportReplay() {
 }
 
 // reportDeprecation prints a deprecated form in use, once per feature per
-// command: a WARN line, or with --json a "deprecation" JSON line.
-func reportDeprecation(u deprecation.Usage) {
-	if output.JSONEnabled {
+// command: a WARN line on the human stream (stderr under --json), or, for
+// a streaming command under --json, a "deprecation" JSON line.
+func reportDeprecation(u deprecation.Usage, streaming bool) {
+	if output.JSONEnabled && streaming {
 		output.EmitJSON(map[string]any{
 			"schema_version": 1,
 			"kind":           "deprecation",

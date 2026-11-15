@@ -264,7 +264,7 @@ The `--json` stream may carry four record shapes:
 - **Model-result envelopes** (most common). One per model that the runner attempted. Carry `model`, and `schema_version: 2`.
 - **DAG-level warnings**. Non-fatal issues not tied to a specific model. Tagged `kind: "dag_warning"`; carry their own independent `schema_version: 1`. See the subsection below.
 - **HTTP replay summary**. Only from `run` with `ONDATRA_HTTP_MODE=replay`, once at the end. Tagged `kind: "http_replay"`; `schema_version: 1`. See the subsection below.
-- **Deprecation notices**. One per deprecated feature the command met, the first time it meets it. Tagged `kind: "deprecation"`; `schema_version: 1`. See the last subsection.
+- **Deprecation notices**. Only from `run` and `sandbox`: one per deprecated feature the run met, the first time it meets it. Tagged `kind: "deprecation"`; `schema_version: 1`. See the last subsection.
 
 `schema_version` is per-envelope: each shape versions independently, so a bump in one doesn't force a re-encode of the other.
 
@@ -324,7 +324,7 @@ Without `--json` the same is printed as `http replay: N requests answered from <
 
 ### Deprecation envelope
 
-Any command that meets a [deprecated](/support/deprecations/) form in its warning phase (`validate` excepted, which reports `deprecation.warn` findings instead) emits one envelope per feature:
+`run --json` and `sandbox --json` emit one envelope per [deprecated](/support/deprecations/) feature they meet in its warning phase:
 
 ```json
 {"schema_version": 1, "kind": "deprecation", "feature": "lib.fetch_mode", "level": "warn", "path": "lib/orders.star", "line": 4, "message": "`API.fetch.mode` is deprecated since 0.48 and stops working in 0.51; replace it with ..."}
@@ -339,7 +339,7 @@ Any command that meets a [deprecated](/support/deprecations/) form in its warnin
 | `path`, `line`   | Where the first use is; `""` and `0` for a CLI flag or command        |
 | `message`        | The same text as the human `WARN deprecated:` line                    |
 
-A use past the warning phase is not an envelope: the command fails with the message as its error.
+A use past the warning phase is not an envelope: the command fails with the message as its error. Commands that print a single JSON document (`describe`, `describe blueprint`, `lineage`, `stats`, ...) keep stdout to that document and print the `WARN deprecated:` line on stderr instead; `validate` reports `deprecation.warn` findings.
 
 ## version
 

@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,9 +194,9 @@ func TestDeprecation_ValidateFindings(t *testing.T) {
 	}
 }
 
-func TestDeprecation_FetchModeInValidate(t *testing.T) {
-	p := testutil.NewProject(t)
-	testutil.WriteFile(t, p.Dir, "lib/orders.star", `API = {
+// asyncFetchModeLib is a valid async blueprint that turns async on with
+// the deprecated `"mode": "async"` (line 5).
+const asyncFetchModeLib = `API = {
     "base_url": "https://example.com",
     "fetch": {
         "args": [],
@@ -211,7 +212,11 @@ def check(job_ref):
 
 def fetch_result(result_ref, page):
     return {"rows": [], "next": None}
-`)
+`
+
+func TestDeprecation_FetchModeInValidate(t *testing.T) {
+	p := testutil.NewProject(t)
+	testutil.WriteFile(t, p.Dir, "lib/orders.star", asyncFetchModeLib)
 	since := featureSince(t, deprecation.LibFetchMode)
 	inProject(t, p.Dir, minorsAfter(since, 0))
 	byRule, err := validateFindings(t)
@@ -230,6 +235,110 @@ def fetch_result(result_ref, page):
 	byRule, err = validateFindings(t)
 	if !errors.Is(err, errFindings) || len(byRule[validate.RuleDeprecationError]) != 1 || len(byRule) != 1 {
 		t.Fatalf("error phase: err=%v findings=%v, want one deprecation.error", err, byRule)
+	}
+}
+
+// A scoped validate reports deprecated forms only in the files it covers,
+// although it parses every blueprint.
+func TestDeprecation_ScopedValidateIgnoresOtherFiles(t *testing.T) {
+	p := hashCommentProject(t)
+	p.AddModel("staging/c.sql", "-- @kind: table\nSELECT 3 AS id\n")
+	testutil.WriteFile(t, p.Dir, "lib/orders.star", asyncFetchModeLib)
+	inProject(t, p.Dir, minorsAfter(featureSince(t, deprecation.ModelHashComment), 0))
+
+	var err error
+	stdout := captureAll(t, func() { err = run([]string{"--json", "validate", "--strict", "models/staging/c.sql"}) })
+	if err != nil {
+		t.Fatalf("validate --strict of a clean file failed: %v\n%s", err, stdout)
+	}
+	var report validate.Report
+	if jerr := json.Unmarshal([]byte(stdout), &report); jerr != nil {
+		t.Fatal(jerr)
+	}
+	if report.Summary.Files != 1 || report.Summary.Warns != 0 || len(report.Files) != 1 || report.Files[0].Path != "models/staging/c.sql" {
+		t.Errorf("scoped report = %+v, want only models/staging/c.sql, clean", report)
+	}
+
+	byRule, err := validateFindings(t, "--strict", "models/staging/a.sql")
+	if !errors.Is(err, errFindings) || len(byRule[validate.RuleDeprecationWarn]) != 1 || len(byRule) != 1 {
+		t.Errorf("validate of a.sql: err=%v findings=%v, want its one deprecation.warn", err, byRule)
+	}
+}
+
+// captureStreams runs f with os.Stdout and os.Stderr each on a pipe and
+// returns what was written to them.
+func captureStreams(t *testing.T, f func()) (stdout, stderr string) {
+	t.Helper()
+	read := func(r *os.File, out *string, done chan<- struct{}) {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		*out = b.String()
+		close(done)
+	}
+	oldOut, oldErr, oldHuman := os.Stdout, os.Stderr, output.Human
+	outR, outW, _ := os.Pipe()
+	errR, errW, _ := os.Pipe()
+	outDone, errDone := make(chan struct{}), make(chan struct{})
+	go read(outR, &stdout, outDone)
+	go read(errR, &stderr, errDone)
+	os.Stdout, os.Stderr, output.Human = outW, errW, outW
+	defer func() {
+		os.Stdout, os.Stderr, output.Human = oldOut, oldErr, oldHuman
+	}()
+	f()
+	outW.Close()
+	errW.Close()
+	<-outDone
+	<-errDone
+	return stdout, stderr
+}
+
+// Commands that print one JSON document keep stdout to that document when
+// the project uses deprecated forms; the notice goes to stderr.
+func TestDeprecation_SingleDocumentJSONStaysParseable(t *testing.T) {
+	p := hashCommentProject(t)
+	testutil.WriteFile(t, p.Dir, "lib/orders.star", asyncFetchModeLib)
+	inProject(t, p.Dir, minorsAfter(featureSince(t, deprecation.ModelHashComment), 0))
+	if out, _ := captureStreams(t, func() {
+		if err := run([]string{"run"}); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	}); !strings.Contains(out, "WARN deprecated:") {
+		t.Fatalf("run printed no deprecation warning:\n%s", out)
+	}
+
+	for _, args := range [][]string{
+		{"describe", "staging.a"},
+		{"describe", "blueprint", "orders"},
+		{"lineage", "staging.a"},
+		{"stats"},
+	} {
+		var err error
+		stdout, stderr := captureStreams(t, func() { err = run(append([]string{"--json"}, args...)) })
+		if err != nil {
+			t.Errorf("%v: %v", args, err)
+			continue
+		}
+		if args[0] == "lineage" {
+			// lineage has no JSON form: under --json its view goes to
+			// stderr and stdout stays empty.
+			if strings.TrimSpace(stdout) != "" {
+				t.Errorf("%v: stdout = %q, want empty", args, stdout)
+			}
+		} else {
+			dec := json.NewDecoder(strings.NewReader(stdout))
+			var doc any
+			if derr := dec.Decode(&doc); derr != nil {
+				t.Errorf("%v: stdout is not JSON: %v\n%s", args, derr, stdout)
+				continue
+			}
+			if derr := dec.Decode(&doc); derr != io.EOF {
+				t.Errorf("%v: stdout holds more than one JSON value (%v):\n%s", args, derr, stdout)
+			}
+		}
+		if !strings.Contains(stderr, "WARN deprecated:") {
+			t.Errorf("%v: no deprecation warning on stderr:\n%s", args, stderr)
+		}
 	}
 }
 

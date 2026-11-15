@@ -63,7 +63,7 @@ Tests in `internal/deprecation` hold this together: every registered ID has exac
 
 ## Release notes
 
-The notes of every release carry a `## Deprecations` section, written from the registry at the tag commit:
+The notes of every release carry a `## Deprecations` section. Whoever writes the notes fills it in by hand from `internal/deprecation/registry.go` at the tag commit; nothing generates it:
 
 ```markdown
 ## Deprecations

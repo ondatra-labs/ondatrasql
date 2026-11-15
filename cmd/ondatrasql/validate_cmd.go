@@ -431,7 +431,22 @@ func runValidatePipeline(cfg *config.Config, opts *validateOpts) (*validate.Repo
 		runPushCompatValidation(models, reg, report)
 	}
 
-	attachDeprecations(report, deprecation.Drain())
+	// ScanLenient parses every blueprint, so a scoped validate meets
+	// deprecated forms in files outside its scope; report only those in it.
+	var scope map[string]bool
+	if len(opts.paths) > 0 {
+		scope = map[string]bool{}
+		// files are symlink-resolved; a use carries the path relative to
+		// the project dir as given, so accept either base.
+		for _, f := range files {
+			for _, base := range []string{cfg.ProjectDir, canonicaliseProjectDir(cfg.ProjectDir)} {
+				if rel, err := filepath.Rel(base, f); err == nil {
+					scope[rel] = true
+				}
+			}
+		}
+	}
+	attachDeprecations(report, deprecation.Drain(), scope)
 
 	return report, nil
 }
@@ -440,10 +455,14 @@ func runValidatePipeline(cfg *config.Config, opts *validateOpts) (*validate.Repo
 // deprecation.warn or deprecation.error finding on its file. Models and
 // blueprints are parsed more than once, so a use is reported once per
 // file and line, and an error-phase use is skipped where the parse error
-// it caused is already a finding.
-func attachDeprecations(report *validate.Report, uses []deprecation.Usage) {
+// it caused is already a finding. A non-nil scope holds the project-relative
+// files a scoped validate covers; uses elsewhere are left out.
+func attachDeprecations(report *validate.Report, uses []deprecation.Usage, scope map[string]bool) {
 	seen := map[string]bool{}
 	for _, u := range uses {
+		if scope != nil && !scope[u.Path] {
+			continue
+		}
 		path := u.Path
 		if path == "" {
 			path = "<cli>"

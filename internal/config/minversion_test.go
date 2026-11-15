@@ -26,12 +26,19 @@ func writeSettings(t *testing.T, content string) string {
 func TestMinVersion(t *testing.T) {
 	cases := map[string]string{
 		"SET threads = 4;": "",
-		"SET VARIABLE ondatrasql_min_version = '0.48.0';":      "0.48.0",
-		"set variable ONDATRASQL_MIN_VERSION to '0.48';":       "0.48",
-		"SET VARIABLE\n  ondatrasql_min_version =\n  '1.2.3'":  "1.2.3",
-		"-- SET VARIABLE ondatrasql_min_version = '9.0.0';":    "",
-		"SET VARIABLE ondatrasql_min_version = '0.48.0'; -- x": "0.48.0",
-		"SET VARIABLE other_min_version = '9.0.0';":            "",
+		"SET VARIABLE ondatrasql_min_version = '0.48.0';":                          "0.48.0",
+		"set variable ONDATRASQL_MIN_VERSION to '0.48';":                           "0.48",
+		"SET VARIABLE\n  ondatrasql_min_version =\n  '1.2.3'":                      "1.2.3",
+		"-- SET VARIABLE ondatrasql_min_version = '9.0.0';":                        "",
+		"SET VARIABLE ondatrasql_min_version = '0.48.0'; -- x":                     "0.48.0",
+		"SET VARIABLE other_min_version = '9.0.0';":                                "",
+		"/* SET VARIABLE ondatrasql_min_version = '9.0.0'; */":                     "",
+		"/*\nSET VARIABLE ondatrasql_min_version = '9.0.0';\n*/ SET threads = 2;":  "",
+		"/* old: '9.0.0' */ SET VARIABLE ondatrasql_min_version = '0.48.0';":       "0.48.0",
+		"SET VARIABLE ondatrasql_min_version /* pin */ = '0.48.0';":                "0.48.0",
+		"SET x = 'a--b /* c */';\nSET VARIABLE ondatrasql_min_version = '0.48.0';": "0.48.0",
+		"SET x = 'it''s -- not';\nSET VARIABLE ondatrasql_min_version = '0.48.0';": "0.48.0",
+		"/* unterminated\nSET VARIABLE ondatrasql_min_version = '9.0.0';":          "",
 	}
 	for content, want := range cases {
 		got, err := MinVersion(writeSettings(t, content))
