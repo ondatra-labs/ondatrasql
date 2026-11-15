@@ -15,6 +15,7 @@ args:
   - dimensions
   - metrics
   - days
+min_version: v0.47.1
 ---
 Runs a historical report in [Google Ad Manager](https://admanager.google.com) through the [Ad Manager REST API](https://developers.google.com/ad-manager/api/beta) (v1) and loads its rows, one per network, date and combination of the dimensions you choose. It signs in with a Google service account, so there is no browser login and no token to refresh by hand.
 
