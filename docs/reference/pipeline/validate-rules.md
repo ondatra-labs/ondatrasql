@@ -4,7 +4,7 @@ draft: false
 title: Validate Rule IDs
 weight: 15
 ---
-Each finding of [`ondatrasql validate`](/reference/pipeline/cli/#validate) carries one of these rule IDs. They are public contract: a rule ID is never renamed or removed without a `schema_version` bump. `BLOCKER` fails at `run`; `WARN` means validate's own analysis was degraded; `INFO` cannot be verified without external state.
+Each finding of [`ondatrasql validate`](/reference/pipeline/cli/#validate) carries one of these rule IDs. They are public contract: a rule ID is never renamed or removed without a `schema_version` bump. `BLOCKER` fails at `run`; `WARN` means validate's own analysis was degraded, or that a deprecated form still works; `INFO` cannot be verified without external state.
 
 | Rule ID | Severity | Reported when |
 |---|---|---|
@@ -24,6 +24,8 @@ Each finding of [`ondatrasql validate`](/reference/pipeline/cli/#validate) carri
 | `parser.deprecated_sink_detect_deletes` | BLOCKER | The removed `@sink_detect_deletes` directive |
 | `parser.deprecated_sink_delete_threshold` | BLOCKER | The removed `@sink_delete_threshold` directive |
 | `parser.other` | BLOCKER | Any other parse failure: SQL DuckDB cannot serialize (such as a top-level or dynamic `PIVOT`), source tables or, for append and merge, column lineage that cannot be read, or lib-call arguments that cannot be read from the AST (reported as `cross_ast.args_mismatch` before DuckDB 2.0) |
+| `deprecation.warn` | WARN | A [deprecated](/support/deprecations/) form that still works; the message names the replacement and the version it stops working in. Fails validate only with `--strict` |
+| `deprecation.error` | BLOCKER | A [deprecated](/support/deprecations/) form past its warning phase; `run` fails with the same message |
 | `strict_fetch.cast_required` | BLOCKER | A `@fetch` projection is not cast |
 | `strict_fetch.alias_required` | BLOCKER | A `@fetch` cast has no alias |
 | `strict_fetch.where_clause_disallowed` | BLOCKER | A `@fetch` model has a WHERE clause |
