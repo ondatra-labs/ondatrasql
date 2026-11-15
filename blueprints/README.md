@@ -6,6 +6,7 @@ Each directory here is a complete, runnable OndatraSQL mini project for one API:
 
 ```
 blueprints/
+  go.mod               the Go module github.com/ondatra-labs/ondatrasql/blueprints, no Go code
   LICENSE              MIT, for everything under blueprints/
   README.md            this file
   _shared/config/      the local config ondatrasql init writes (no secrets.sql)
@@ -32,6 +33,7 @@ The page is a Hugo page. Its frontmatter:
 | `source_type` | `fetch` or `push`, the section the API dict has |
 | `model_kind` | The `@kind` of every model that calls the lib, within the API dict's `supported_kinds` if it has them |
 | `args` | The `fetch.args` (or `push.args`) of the API dict, in order; `[]` for none |
+| `min_version` | The oldest ondatrasql release that runs the blueprint, as `vX.Y.Z`: `v0.47.0`. See [min_version](#min_version) |
 
 Then the prose: what it does, a quick start, customisation, notes. The code is never pasted into the page. Each file is shown by reference, so the page cannot drift from the code:
 
@@ -49,10 +51,36 @@ One `NAME=` line per variable the blueprint reads (`auth.env`, basic-auth `user`
 
 `_shared/config/` is the `config/` that `ondatrasql init` writes, without `secrets.sql`. The harness copies it into each test project under the blueprint's `lib/` and `models/`, the same project a user gets after `ondatrasql init` and copying the blueprint in. A test keeps it identical to what `init` writes; when `init` changes, copy the files over from a fresh `ondatrasql init`.
 
+## min_version
+
+Version numbers describe the ondatrasql binary. Blueprints are not part of the binary, so they are not released with it: `blueprints/` is its own Go module, `github.com/ondatra-labs/ondatrasql/blueprints` (a `go.mod` with no Go code), and [ondatra.sh](https://ondatra.sh/blueprints/) imports it at the latest commit on `main`. Adding or changing a blueprint never bumps the version in `cmd/ondatrasql/main.go`, and never needs a release.
+
+What the site must never show is a blueprint that the release a user can install cannot run. So every blueprint declares in `min_version` the oldest release that runs it, and the site lists only the blueprints whose `min_version` is at most the latest release.
+
+- `min_version` is required and has the form `vX.Y.Z`, like a release tag. `make test-blueprints` fails a blueprint without it, with another form, or with one above the version in `cmd/ondatrasql/main.go`.
+- Set it to the release that added the newest feature the blueprint uses. When unsure, the release the blueprint was written against is safe; a lower one is only right when CI proves it (below).
+- CI checks every blueprint twice, offline: with the binary built from the branch (`make test-blueprints`), and with the latest GitHub release (`make test-blueprints-bin`, with the release's Linux binary downloaded). A blueprint whose `min_version` is at most that release is proven with it; one above it is skipped and reported as tested against main only, until that release is published. The log ends with each blueprint and the binary it was proven with:
+
+  ```
+  blueprints and the binary each was proven with:
+    riksbank: proven with ondatrasql v0.47.1 from ONDATRASQL_BIN=...
+  ```
+
+### A blueprint that needs an unreleased feature
+
+A blueprint can only name a version that `main` already carries. If it needs a feature that is on `main` but not yet in a release, its `min_version` is the next version, which `cmd/ondatrasql/main.go` does not have yet, so the harness fails it. The blueprint waits in its pull request until the release commit sets that version on `main`; then it can be merged, and the site shows it once the release is published. Never bump the version to get a blueprint in: the version changes only when the binary does.
+
+To run the check with any binary yourself:
+
+```bash
+make test-blueprints-bin ONDATRASQL_BIN=/path/to/ondatrasql
+```
+
 ## Add a blueprint
 
-1. Create `blueprints/<name>/` with `lib/`, `models/`, `.env.example` and `index.md` as above. Copy `riksbank/` as a starting point.
+1. Create `blueprints/<name>/` with `lib/`, `models/`, `.env.example` and `index.md` as above, `min_version` included. Copy `riksbank/` as a starting point.
 2. Run `make test-blueprints`. It checks every blueprint offline, with no secrets:
+   - `min_version` is `vX.Y.Z` and at most the version in `cmd/ondatrasql/main.go`;
    - `ondatrasql validate --strict` reports 0 BLOCKER and 0 WARN;
    - the frontmatter's `auth_method`, `source_type`, `args` and `model_kind` agree with `ondatrasql --json describe blueprint <lib>` and the models' `@kind`;
    - `.env.example` names every variable the API dict's `auth` reads, without values;
