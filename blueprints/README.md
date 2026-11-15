@@ -168,6 +168,19 @@ runs:
 
 It is for values that are not secret but belong to the account the recording was made with, such as the id of a test spreadsheet that a blueprint reads with `env.get()` and puts in its URLs. Replay unsets the variables in `.env.example`, so without `env:` that URL would change and no longer match the recording. The values are stored in `expect.yaml` as written and never masked, so never put a credential here. A name that `env.get()` treats as a secret (one containing `KEY`, `TOKEN`, `SECRET`, `PASS`, `PWD`, `CREDENTIAL`, `AUTH` or `PRIVATE`) is masked in the cassette and cannot replay this way. A variable in `env:` need not be set in the shell to record, and `ONDATRA_*` names are refused.
 
+An optional `mask:` list names JSON fields whose values the recorder masks in response bodies before a cassette is written:
+
+```yaml
+mask: [email, username, hourly_rate_in_cents, billable_amount_in_cents]
+runs:
+  - now: "2026-11-15T12:00:00Z"
+    ...
+```
+
+A cassette stores each response whole, so it keeps fields the blueprint's models never select: people's email addresses and user names, rates and amounts. A private repository's history keeps them for good. Each field named here is matched at any depth, without regard to case: a string becomes `masked-` and the first 8 hex digits of its SHA-256 (equal values stay equal, so a value used as a key still joins), a number `0`, a boolean `false`, and `null` stays `null`; an object or array under the name keeps its shape with every value in it masked. The draft `expect.yaml` is replayed from the masked cassettes, so its samples show the placeholders and replay matches it. Only JSON response bodies are masked: the recorder lists every response that is not JSON, which it leaves as recorded, and requests and headers are not touched (credentials are masked anyway). Do not mask a field whose value the blueprint sends back in a later request, such as an id in a URL: that request no longer matches the recording, and the recorder's replay fails.
+
+`mask:` lives in the private `expect.yaml`, never in `blueprints/`, for the same reason the recordings do: which fields of an account's data are personal or sensitive is decided per recording, and the list itself describes that account's data. A blueprint's files stay the same whether its recording is masked or not.
+
 ## Record (maintainers)
 
 ```bash
@@ -178,6 +191,6 @@ Recording calls the live API, so it needs network and every key in the blueprint
 
 - it runs the offline check first, then replaces `cassettes/` (never `data/`) with the requests of the runs in the existing `expect.yaml` (without one, two runs at the current time);
 - it then replays the new recording and prints the `expect.yaml` that replay produced. If there was no `expect.yaml`, the draft is written there, and you must review it before you trust it. If there was one, it is asserted, and a difference fails the run, with the draft beside it.
-- an `expect.yaml` whose runs assert nothing (only `now` and `cassettes`), or that has only `env:`, is a seed for a first recording: its `env:` and runs are used (two runs at the current time if it lists none), and the draft replaces it. Write one when the blueprint needs `env:`, or when its second run makes requests and needs `cassettes: run2`.
+- an `expect.yaml` whose runs assert nothing (only `now` and `cassettes`), or that has only `env:` and `mask:`, is a seed for a first recording: its `env:`, `mask:` and runs are used (two runs at the current time if it lists none), and the draft, which keeps `env:` and `mask:`, replaces it. Write one when the blueprint needs `env:` or `mask:`, or when its second run makes requests and needs `cassettes: run2`.
 
-Before committing a recording to the private repository, read it: the recorder masks credentials it knows about, but not values it cannot know are secret (see [What is never written](../docs/guides/test-a-blueprint-offline.md#what-is-never-written)).
+Before committing a recording to the private repository, read it: the recorder masks credentials it knows about, and the fields in `mask:`, but not values it cannot know are secret or personal (see [What is never written](../docs/guides/test-a-blueprint-offline.md#what-is-never-written)).

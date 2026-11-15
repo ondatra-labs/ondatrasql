@@ -6,13 +6,14 @@ weight: 10
 ---
 Record the HTTP traffic of a fetch or push blueprint once, where the API keys are, and replay it anywhere else: no network, no credentials, same rows. Together with a frozen clock this makes `ondatrasql run` of a blueprint deterministic, so a test can run it on every change.
 
-Three environment variables control it (also listed in [Environment Variables](/reference/pipeline/env/#testing-variables)):
+Three environment variables control it, and a fourth masks data while recording (also listed in [Environment Variables](/reference/pipeline/env/#testing-variables)):
 
 | Variable | Value |
 |---|---|
 | `ONDATRA_HTTP_CASSETTE` | Directory the recordings ("cassettes") are written to and read from |
 | `ONDATRA_HTTP_MODE` | `record` or `replay` |
 | `ONDATRA_NOW` | RFC 3339 timestamp, e.g. `2026-03-01T08:30:00Z`; Starlark `time.now()` returns it |
+| `ONDATRA_HTTP_MASK` | Record only: JSON field names, comma-separated, whose values are masked in recorded response bodies (see [Masking data](#masking-data)) |
 
 With none of them set, nothing changes. Setting only one of `ONDATRA_HTTP_CASSETTE` and `ONDATRA_HTTP_MODE`, a mode other than `record` or `replay`, or an `ONDATRA_NOW` that is not RFC 3339 stops the run before any model executes.
 
@@ -136,6 +137,24 @@ Recording masks credentials with `[REDACTED]` before anything reaches the file:
 - every value the run knows is a secret, wherever it appears (URL, any header, any body, raw, URL-encoded or JSON-escaped): the `auth.env` value, the basic-auth password, `http.*(auth=…)` passwords, the service account's private key and the JWT, OAuth client secrets, refresh and access tokens, the credential sent in any of the headers above, and any `env.get()` value whose variable name contains `KEY`, `TOKEN`, `SECRET`, `PASS`, `PWD`, `CREDENTIAL`, `AUTH` or `PRIVATE`. Values shorter than 4 characters (8 for credentials learned from headers) are not masked, since masking them would corrupt unrelated data.
 
 Read a cassette before committing it all the same: a secret the run has no way to know about — one typed into the blueprint, a webhook URL whose path is the credential, or a value read with `env.get()` under a name like `SHOPIFY_STORE` — is stored as sent.
+
+### Masking data
+
+Credentials are not the only thing a cassette should not keep. A response stored whole carries every field the API sent, including personal and business data (people's email addresses and user names, rates, amounts) that the blueprint's models may never select. `ONDATRA_HTTP_MASK` names JSON fields to mask in recorded response bodies, before the cassette is written:
+
+```bash
+ONDATRA_HTTP_CASSETTE=testdata/cassettes ONDATRA_HTTP_MODE=record \
+ONDATRA_HTTP_MASK=email,username,hourly_rate_in_cents \
+  ondatrasql run raw.users
+```
+
+A field is matched by name, at any depth and without regard to case. Its value is replaced by:
+
+- a string: `masked-` and the first 8 hex digits of its SHA-256, so equal values stay equal (a masked value used as a key still joins) and different values stay different;
+- a number: `0`; a boolean: `false`; `null` stays `null`;
+- an object or array: the same shape, with every value in it replaced as above.
+
+The run itself gets the real response; replay serves the masked one, so the rows it produces hold the placeholders. Only JSON response bodies are masked: requests, headers and text or binary responses are stored as before. Field names (object keys) are never masked, nor is the same value under a field the list does not name. A masked value that a later request sends back (an id in a URL) makes that request differ from the recording, and replay fails on it: do not mask such a field. The variable is read only in record mode.
 
 ## Limits
 
