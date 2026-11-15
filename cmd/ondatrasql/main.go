@@ -176,10 +176,14 @@ func run(args []string) error {
 		if len(args) > 2 {
 			return &invocationErr{fmt.Errorf("usage: ondatrasql run [<model>] (got %d extra args)", len(args)-2)}
 		}
+		var runErr error
 		if len(args) > 1 {
-			return runModel(ctx, cfg, args[1], false)
+			runErr = runModel(ctx, cfg, args[1], false)
+		} else {
+			runErr = runAll(ctx, cfg, false)
 		}
-		return runAll(ctx, cfg, false)
+		reportReplay()
+		return runErr
 
 	case "sandbox":
 		if len(args) > 2 {
@@ -377,4 +381,34 @@ Global Options:
   --json                  Emit JSON lines to stdout (human output to stderr)`, version)
 
 	output.Println(help)
+}
+
+// reportReplay tells, after a run in replay mode, how many recorded
+// interactions each cassette served, so a test can assert that an
+// up-to-date incremental run made no request and that a run still makes
+// every request its recording holds.
+func reportReplay() {
+	if !httpcassette.Replaying() {
+		return
+	}
+	uses := httpcassette.Summary()
+	total := 0
+	cassettes := make([]map[string]any, 0, len(uses))
+	for _, u := range uses {
+		total += u.Replayed
+		cassettes = append(cassettes, map[string]any{"path": u.Path, "replayed": u.Replayed, "recorded": u.Recorded})
+	}
+	if output.JSONEnabled {
+		output.EmitJSON(map[string]any{
+			"schema_version": 1,
+			"kind":           "http_replay",
+			"requests":       total,
+			"cassettes":      cassettes,
+		})
+		return
+	}
+	output.Fprintf("http replay: %d requests answered from %s\n", total, os.Getenv(httpcassette.EnvDir))
+	for _, u := range uses {
+		output.Fprintf("  %s: %d of %d recorded interactions\n", u.Path, u.Replayed, u.Recorded)
+	}
 }

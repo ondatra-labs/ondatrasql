@@ -438,3 +438,45 @@ func TestFileFormat_StableAndVersioned(t *testing.T) {
 		t.Fatalf("version mismatch: err=%v", err)
 	}
 }
+
+func TestSummary_CountsServedInteractions(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.URL.Path)
+	}))
+	defer srv.Close()
+	orders := WithScope(context.Background(), "raw.orders", "orders")
+	users := WithScope(context.Background(), "raw.users", "users")
+
+	setMode(t, dir, "record")
+	for _, p := range []string{"/a", "/b", "/c"} {
+		if _, _, err := do(t, orders, "GET", srv.URL+p, "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := do(t, users, "GET", srv.URL+"/u", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if s := Summary(); s != nil {
+		t.Fatalf("Summary while recording = %v, want nil", s)
+	}
+
+	setMode(t, dir, "replay")
+	if s := Summary(); len(s) != 0 {
+		t.Fatalf("Summary before any request = %v, want empty", s)
+	}
+	for _, p := range []string{"/b", "/a"} {
+		if _, _, err := do(t, orders, "GET", srv.URL+p, "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := fmt.Sprint(Summary())
+	if want := "[{raw.orders/orders.json 2 3}]"; got != want {
+		t.Fatalf("Summary = %s, want %s", got, want)
+	}
+
+	setMode(t, dir, "")
+	if s := Summary(); s != nil {
+		t.Fatalf("Summary when off = %v, want nil", s)
+	}
+}

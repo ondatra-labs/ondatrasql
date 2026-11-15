@@ -198,6 +198,10 @@ FROM staging.contacts JOIN staging.tags USING (id)
 GROUP BY id, name, email
 ```
 
+## 8. Test it
+
+Record the blueprint's HTTP traffic once and replay it offline with a frozen clock: see [Test a Blueprint Offline](/guides/test-a-blueprint-offline/). The blueprints published on this site live in the repository's [`blueprints/`](https://github.com/ondatra-labs/ondatrasql/tree/main/blueprints) directory. Its [README](https://github.com/ondatra-labs/ondatrasql/blob/main/blueprints/README.md) describes how each one is tested: `make test-blueprints` validates every blueprint and checks its page against `describe blueprint`, and with `BLUEPRINT_TESTS_DIR` set it replays the recordings, which the maintainers keep outside the repository.
+
 ## Common patterns
 
 ### Incremental fetch
@@ -296,3 +300,4 @@ def finalize(succeeded, failed):
 - [Push Contract](/reference/lib-functions/push-contract/) — change types, batch modes, return values
 - [Starlark Modules](/reference/lib-functions/starlark-modules/) — http, env, builtins, yaml, csv, xml, time
 - [Blueprints](/blueprints/) — working examples for Mistral OCR, Riksbank, Google Ad Manager
+- [blueprints/README.md](https://github.com/ondatra-labs/ondatrasql/blob/main/blueprints/README.md) — the blueprint layout, and how blueprints are tested and recorded
