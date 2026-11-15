@@ -488,7 +488,11 @@ func (h *harness) check(t testing.TB, bpDir string) error {
 // expectFile is <recording>/expect.yaml: the runs to make, in order, each
 // in the same project, and what each must leave behind.
 type expectFile struct {
-	Runs []expectRun `yaml:"runs"`
+	// Env are variables set for every run, in record and replay alike:
+	// values that are not secret but differ per account, such as the id
+	// of a test spreadsheet the blueprint reads from env.get().
+	Env  map[string]string `yaml:"env,omitempty"`
+	Runs []expectRun       `yaml:"runs"`
 }
 
 type expectRun struct {
@@ -551,6 +555,50 @@ func readExpect(path string) (*expectFile, error) {
 		}
 	}
 	return &e, nil
+}
+
+// readRecordExpect reads expect.yaml for a recording. A file whose runs
+// assert nothing (no requests, models or tables), or that has none, is a
+// seed: the env: and the runs (now, cassettes) of a first recording,
+// which the draft it writes then replaces.
+func readRecordExpect(path string) (exp *expectFile, seed bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	var e expectFile
+	if err := yaml.UnmarshalWithOptions(data, &e, yaml.Strict()); err == nil && len(e.Runs) == 0 {
+		return &e, true, nil
+	}
+	exp, err = readExpect(path)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, r := range exp.Runs {
+		if r.Requests != nil || r.Models != nil || r.Tables != nil {
+			return exp, false, nil
+		}
+	}
+	return exp, true, nil
+}
+
+// setExpectEnv sets expect.yaml's env: on every command of the project.
+// It comes after the blueprint's dropped keys, so a replay that unsets
+// .env.example still gets these. They are not credentials: the harness
+// never masks them, and they are stored in expect.yaml as written.
+func (p *project) setExpectEnv(env map[string]string) error {
+	names := make([]string, 0, len(env))
+	for name := range env {
+		if name == "" || strings.ContainsAny(name, "= \t\n") || strings.HasPrefix(name, "ONDATRA_") {
+			return fmt.Errorf("expect.yaml: env %q: not a variable a blueprint may set (ONDATRA_* is the harness's)", name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p.env = append(p.env, name+"="+env[name])
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------
@@ -790,6 +838,9 @@ func (h *harness) replay(t testing.TB, bpDir, rec string, drop []string) error {
 	if err != nil {
 		return err
 	}
+	if err := p.setExpectEnv(exp.Env); err != nil {
+		return err
+	}
 	var errs []error
 	for i, r := range exp.Runs {
 		out, err := h.doRun(p, "replay", filepath.Join(casCopy, r.Cassettes), r.Now, drop)
@@ -835,25 +886,30 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	expPath := filepath.Join(rec, "expect.yaml")
+	exp, seed, err := readRecordExpect(expPath)
+	haveExpect := err == nil && !seed
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || seed && len(exp.Runs) == 0:
+		now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+		var env map[string]string
+		if exp != nil {
+			env = exp.Env
+		}
+		exp = &expectFile{Env: env, Runs: []expectRun{{Now: now}, {Now: now}}}
+	case err != nil:
+		return nil, err
+	}
+
 	var missing []string
 	for _, k := range keys {
-		if os.Getenv(k) == "" {
+		if _, set := exp.Env[k]; !set && os.Getenv(k) == "" {
 			missing = append(missing, k)
 		}
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("recording needs %s set (see .env.example)", strings.Join(missing, ", "))
-	}
-
-	expPath := filepath.Join(rec, "expect.yaml")
-	exp, err := readExpect(expPath)
-	haveExpect := err == nil
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
-		exp = &expectFile{Runs: []expectRun{{Now: now}, {Now: now}}}
-	case err != nil:
-		return nil, err
 	}
 
 	casRoot := filepath.Join(rec, "cassettes")
@@ -862,6 +918,9 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 	}
 	p, err := h.newProject(t, bpDir)
 	if err != nil {
+		return nil, err
+	}
+	if err := p.setExpectEnv(exp.Env); err != nil {
 		return nil, err
 	}
 	for i, r := range exp.Runs {
@@ -901,8 +960,11 @@ func (h *harness) draftExpect(t testing.TB, bpDir, casRoot string, exp *expectFi
 	if err != nil {
 		return nil, err
 	}
+	if err := p.setExpectEnv(exp.Env); err != nil {
+		return nil, err
+	}
 	keys, _ := envExampleKeys(bpDir) // read without error by record
-	out := expectFile{}
+	out := expectFile{Env: exp.Env}
 	for i, r := range exp.Runs {
 		res, err := h.doRun(p, "replay", filepath.Join(casRoot, r.Cassettes), r.Now, keys)
 		if err != nil {
