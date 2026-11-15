@@ -43,6 +43,8 @@ ondatrasql run                    # All models in DAG order
 ondatrasql run staging.orders     # Single model
 ```
 
+A [deprecated](/support/deprecations/) form in the project is printed once per run as `WARN deprecated: <file>:<line>: ...`, naming its replacement; past its warning phase the run fails with the same message. A project whose `config/settings.sql` pins a newer [`ondatrasql_min_version`](/reference/configuration/config-settings/#minimum-ondatrasql-version) is refused before anything runs.
+
 ## sandbox
 
 ```bash
@@ -205,9 +207,9 @@ ondatrasql validate --output ndjson              # Stream one line per file
 ondatrasql validate --strict                     # Promote WARN to exit 1
 ```
 
-Severity levels: `BLOCKER` (would fail at `run` — includes deprecated directives, which the parser rejects outright), `WARN` (validate's own environment is degraded so downstream findings may be incomplete — extension load failed, blueprint parse error, walk skipped, etc.), `INFO` (cannot be verified without external state, e.g. external table references). Each finding carries a stable rule-ID like `parser.multi_statement` or `strict_fetch.cast_required` — these are public contract, never renamed without a `schema_version` bump. [Validate Rule IDs](/reference/pipeline/validate-rules/) lists them all.
+Severity levels: `BLOCKER` (would fail at `run` — includes removed directives, which the parser rejects outright, and `deprecation.error`, a [deprecated](/support/deprecations/) form past its warning phase), `WARN` (validate's own environment is degraded so downstream findings may be incomplete — extension load failed, blueprint parse error, walk skipped, etc. — or `deprecation.warn`, a deprecated form that still works), `INFO` (cannot be verified without external state, e.g. external table references). Each finding carries a stable rule-ID like `parser.multi_statement` or `strict_fetch.cast_required` — these are public contract, never renamed without a `schema_version` bump. [Validate Rule IDs](/reference/pipeline/validate-rules/) lists them all.
 
-`validate.*` WARN findings always trigger exit 1 regardless of `--strict` because they signal that validate's own analysis was incomplete — CI consumers can't treat a degraded run as a clean one.
+`validate.*` WARN findings always trigger exit 1 regardless of `--strict` because they signal that validate's own analysis was incomplete — CI consumers can't treat a degraded run as a clean one. `deprecation.warn` findings trigger exit 1 only with `--strict`.
 
 ## lineage
 
@@ -257,11 +259,12 @@ StandardOutput=file:/var/log/ondatrasql.json
 StandardError=file:/var/log/ondatrasql.err
 ```
 
-The `--json` stream may carry three record shapes:
+The `--json` stream may carry four record shapes:
 
 - **Model-result envelopes** (most common). One per model that the runner attempted. Carry `model`, and `schema_version: 2`.
 - **DAG-level warnings**. Non-fatal issues not tied to a specific model. Tagged `kind: "dag_warning"`; carry their own independent `schema_version: 1`. See the subsection below.
-- **HTTP replay summary**. Only from `run` with `ONDATRA_HTTP_MODE=replay`, once at the end. Tagged `kind: "http_replay"`; `schema_version: 1`. See the last subsection.
+- **HTTP replay summary**. Only from `run` with `ONDATRA_HTTP_MODE=replay`, once at the end. Tagged `kind: "http_replay"`; `schema_version: 1`. See the subsection below.
+- **Deprecation notices**. One per deprecated feature the command met, the first time it meets it. Tagged `kind: "deprecation"`; `schema_version: 1`. See the last subsection.
 
 `schema_version` is per-envelope: each shape versions independently, so a bump in one doesn't force a re-encode of the other.
 
@@ -318,6 +321,25 @@ A `dag_warning` always coincides with exit `1` since GC failure is a non-invocat
 | `cassettes[].recorded` | Interactions in the file                                             |
 
 Without `--json` the same is printed as `http replay: N requests answered from <dir>`, then one line per cassette.
+
+### Deprecation envelope
+
+Any command that meets a [deprecated](/support/deprecations/) form in its warning phase (`validate` excepted, which reports `deprecation.warn` findings instead) emits one envelope per feature:
+
+```json
+{"schema_version": 1, "kind": "deprecation", "feature": "lib.fetch_mode", "level": "warn", "path": "lib/orders.star", "line": 4, "message": "`API.fetch.mode` is deprecated since 0.48 and stops working in 0.51; replace it with ..."}
+```
+
+| Field            | Description                                                           |
+| ---------------- | --------------------------------------------------------------------- |
+| `schema_version` | `1`. Bump signals breaking shape change.                              |
+| `kind`           | `deprecation`                                                         |
+| `feature`        | The feature's ID in the [list](/support/deprecations/#current-list)   |
+| `level`          | `warn`                                                                |
+| `path`, `line`   | Where the first use is; `""` and `0` for a CLI flag or command        |
+| `message`        | The same text as the human `WARN deprecated:` line                    |
+
+A use past the warning phase is not an envelope: the command fails with the message as its error.
 
 ## version
 

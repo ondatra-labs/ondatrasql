@@ -16,6 +16,7 @@ import (
 	"github.com/ondatra-labs/ondatrasql/internal/config"
 	"github.com/ondatra-labs/ondatrasql/internal/configenv"
 	"github.com/ondatra-labs/ondatrasql/internal/dag"
+	"github.com/ondatra-labs/ondatrasql/internal/deprecation"
 	"github.com/ondatra-labs/ondatrasql/internal/duckast"
 	"github.com/ondatra-labs/ondatrasql/internal/duckdb"
 	"github.com/ondatra-labs/ondatrasql/internal/execute"
@@ -53,6 +54,8 @@ func runValidate(cfg *config.Config, args []string) error {
 		return &invocationErr{err}
 	}
 
+	// Deprecated forms become findings here rather than WARN lines.
+	deprecation.SetReporter(nil)
 	report, err := runValidatePipeline(cfg, opts)
 	if err != nil {
 		return err
@@ -428,7 +431,52 @@ func runValidatePipeline(cfg *config.Config, opts *validateOpts) (*validate.Repo
 		runPushCompatValidation(models, reg, report)
 	}
 
+	attachDeprecations(report, deprecation.Drain())
+
 	return report, nil
+}
+
+// attachDeprecations reports each deprecated form the pipeline met as a
+// deprecation.warn or deprecation.error finding on its file. Models and
+// blueprints are parsed more than once, so a use is reported once per
+// file and line, and an error-phase use is skipped where the parse error
+// it caused is already a finding.
+func attachDeprecations(report *validate.Report, uses []deprecation.Usage) {
+	seen := map[string]bool{}
+	for _, u := range uses {
+		path := u.Path
+		if path == "" {
+			path = "<cli>"
+		}
+		key := fmt.Sprintf("%s\x00%s\x00%d", u.Feature.ID, path, u.Line)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		msg := u.Message()
+		rule := validate.RuleDeprecationWarn
+		if u.Level != deprecation.LevelWarn {
+			rule = validate.RuleDeprecationError
+			if fileHasFindingWith(report, path, msg) {
+				continue
+			}
+		}
+		report.Attach(validate.NewFinding(path, u.Line, rule, msg))
+	}
+}
+
+func fileHasFindingWith(report *validate.Report, path, msg string) bool {
+	for _, fr := range report.Files {
+		if fr.Path != path {
+			continue
+		}
+		for _, f := range fr.Findings {
+			if strings.Contains(f.Message, msg) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // runPushCompatValidation invokes execute.ValidateModelPushCompat across
@@ -1158,9 +1206,12 @@ func validateBlueprintFile(_ *libregistry.Registry, fr *validate.FileResult, pro
 	lf, parseErr := libregistry.ParseLibFile(name, rel, string(src))
 	if parseErr != nil {
 		fr.Checks["blueprint"] = "fail"
+		rule := validate.RuleBlueprintInvalidAPIDict
+		if deprecation.IsError(parseErr) {
+			rule = validate.RuleDeprecationError
+		}
 		fr.Findings = append(fr.Findings, validate.NewFinding(rel, 0,
-			validate.RuleBlueprintInvalidAPIDict,
-			parseErr.Error()))
+			rule, parseErr.Error()))
 		return
 	}
 
@@ -1187,6 +1238,8 @@ func mapParserError(path string, err error) validate.Finding {
 	msg := err.Error()
 	id := validate.RuleParserOther
 	switch {
+	case deprecation.IsError(err):
+		id = validate.RuleDeprecationError
 	case strings.Contains(msg, "unterminated `/*`"):
 		id = validate.RuleParserUnterminatedBlockComment
 	case strings.Contains(msg, "multi-statement"):
