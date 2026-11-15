@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -105,35 +106,21 @@ func resolveEnvValue(v any) string {
 //	{"service_account": {"env": "GCP_SA_PATH"}, "scope": "..."} — Google service account
 //	{"user": {"env": "USER"}, "pass": {"env": "PASS"}}          — Basic auth
 func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *string, cfg *apiHTTPConfig) error {
-	// service_account: Google service account key file. Replay needs
-	// neither the key file nor the token exchange: requests are answered
-	// from the cassette whatever credential they carry.
-	if sa := auth["service_account"]; sa != nil {
+	// service_account: Google service account key file. The access token
+	// is cached per credential and scope (serviceAccountToken), so a run
+	// exchanges its JWT once, not once per request. Replay needs neither
+	// the key file nor the token exchange: requests are answered from the
+	// cassette whatever credential they carry.
+	if auth["service_account"] != nil {
 		if httpcassette.Replaying() {
 			headers["Authorization"] = "Bearer " + httpcassette.Placeholder
 			return nil
 		}
-		keyFile := resolveEnvValue(sa)
-		if keyFile == "" {
-			return fmt.Errorf("auth: service_account resolved to empty value")
-		}
-		keyData, err := os.ReadFile(keyFile)
+		key, scope, err := loadServiceAccount(auth)
 		if err != nil {
-			return fmt.Errorf("auth: read service_account %q: %w", keyFile, err)
+			return err
 		}
-		var key ServiceAccountKey
-		if err := json.Unmarshal(keyData, &key); err != nil {
-			return fmt.Errorf("auth: parse service_account %q: %w", keyFile, err)
-		}
-		httpcassette.RegisterSecret(key.PrivateKey)
-		httpcassette.RegisterSecret(key.PrivateKeyID)
-		scope, _ := auth["scope"].(string)
-		tp := &tokenProvider{
-			ctx:         cfg.Ctx,
-			googleSAKey: &key,
-			scope:       scope,
-		}
-		tok, err := tp.AccessToken()
+		tok, err := serviceAccountToken(cfg.Ctx, key, scope)
 		if err != nil {
 			return fmt.Errorf("auth: google service account: %w", err)
 		}
@@ -198,6 +185,53 @@ func injectAPIAuth(auth map[string]any, headers map[string]string, urlStr *strin
 	}
 
 	return nil
+}
+
+// loadServiceAccount reads the key file of a service_account auth config
+// and returns the key and the requested scope.
+func loadServiceAccount(auth map[string]any) (*ServiceAccountKey, string, error) {
+	keyFile := resolveEnvValue(auth["service_account"])
+	if keyFile == "" {
+		return nil, "", fmt.Errorf("auth: service_account resolved to empty value")
+	}
+	keyData, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("auth: read service_account %q: %w", keyFile, err)
+	}
+	var key ServiceAccountKey
+	if err := json.Unmarshal(keyData, &key); err != nil {
+		return nil, "", fmt.Errorf("auth: parse service_account %q: %w", keyFile, err)
+	}
+	httpcassette.RegisterSecret(key.PrivateKey)
+	httpcassette.RegisterSecret(key.PrivateKeyID)
+	scope, _ := auth["scope"].(string)
+	return &key, scope, nil
+}
+
+// reauthAfter401 reports whether a request the API answered with 401
+// should be sent once more. With service_account auth the rejected token
+// is dropped from the cache and headers get a freshly exchanged one. In
+// replay no token is exchanged, but the request is still repeated so that
+// it consumes the retry the recording holds.
+func reauthAfter401(auth map[string]any, headers map[string]string, cfg *apiHTTPConfig) (bool, error) {
+	if auth["service_account"] == nil {
+		return false, nil
+	}
+	if httpcassette.Replaying() {
+		return true, nil
+	}
+	key, scope, err := loadServiceAccount(auth)
+	if err != nil {
+		return false, err
+	}
+	invalidateServiceAccountToken(key, scope, strings.TrimPrefix(headers["Authorization"], "Bearer "))
+	tok, err := serviceAccountToken(cfg.Ctx, key, scope)
+	if err != nil {
+		return false, fmt.Errorf("auth: google service account: %w", err)
+	}
+	httpcassette.RegisterSecret(tok)
+	headers["Authorization"] = "Bearer " + tok
+	return true, nil
 }
 
 // withAuthNames tells the cassette transport which header and query
@@ -472,6 +506,17 @@ func httpRequest(ctx context.Context, method string, apiCfg *apiHTTPConfig) func
 		if err != nil {
 			return nil, err
 		}
+		if resp.StatusCode == http.StatusUnauthorized && auth == nil && apiCfg != nil && apiCfg.Auth != nil {
+			retry, err := reauthAfter401(apiCfg.Auth, headers, apiCfg)
+			if err != nil {
+				return nil, err
+			}
+			if retry {
+				if resp, err = DoHTTPWithRetry(withAuthNames(ctx, apiCfg), method, urlStr, body, headers, opts); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return httpResponseToStarlark(resp), nil
 	}
 }
@@ -664,6 +709,17 @@ func httpUpload(ctx context.Context, apiCfg *apiHTTPConfig) func(thread *starlar
 		resp, err := DoMultipartUpload(withAuthNames(ctx, apiCfg), urlStr, filePath, field, filename, headers, extraFields, opts)
 		if err != nil {
 			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && (authVal == nil || authVal == starlark.None) && apiCfg != nil && apiCfg.Auth != nil {
+			retry, err := reauthAfter401(apiCfg.Auth, headers, apiCfg)
+			if err != nil {
+				return nil, err
+			}
+			if retry {
+				if resp, err = DoMultipartUpload(withAuthNames(ctx, apiCfg), urlStr, filePath, field, filename, headers, extraFields, opts); err != nil {
+					return nil, err
+				}
+			}
 		}
 		return httpResponseToStarlark(resp), nil
 	}
