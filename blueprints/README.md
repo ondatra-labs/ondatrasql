@@ -63,7 +63,7 @@ What the site must never show is a blueprint that the release a user can install
 
   ```
   blueprints and the binary each was proven with:
-    riksbank: proven with ondatrasql v0.47.0 from ONDATRASQL_BIN=...
+    riksbank: proven with ondatrasql v0.47.1 from ONDATRASQL_BIN=...
   ```
 
 ### A blueprint that needs an unreleased feature
