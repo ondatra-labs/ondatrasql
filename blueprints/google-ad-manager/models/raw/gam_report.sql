@@ -14,5 +14,5 @@ SELECT
     ad_unit_name::VARCHAR                     AS ad_unit_name,
     ad_server_impressions::BIGINT             AS ad_server_impressions,
     ad_server_clicks::BIGINT                  AS ad_server_clicks,
-    ad_server_cpm_and_cpc_revenue::DOUBLE     AS ad_server_cpm_and_cpc_revenue
-FROM google_ad_manager('', 'AD_UNIT_NAME', 'AD_SERVER_IMPRESSIONS,AD_SERVER_CLICKS,AD_SERVER_CPM_AND_CPC_REVENUE', 3)
+    ad_server_revenue::DOUBLE                 AS ad_server_revenue
+FROM google_ad_manager('', 'AD_UNIT_NAME', 'AD_SERVER_IMPRESSIONS,AD_SERVER_CLICKS,AD_SERVER_REVENUE', 3)

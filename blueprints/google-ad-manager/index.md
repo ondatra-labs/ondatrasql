@@ -21,7 +21,7 @@ Runs a historical report in [Google Ad Manager](https://admanager.google.com) th
 
 ## What it does
 
-- `FROM google_ad_manager('', 'AD_UNIT_NAME', 'AD_SERVER_IMPRESSIONS,AD_SERVER_CLICKS,AD_SERVER_CPM_AND_CPC_REVENUE', 3)` takes four arguments: the network codes, the dimensions, the metrics and the days to fetch again.
+- `FROM google_ad_manager('', 'AD_UNIT_NAME', 'AD_SERVER_IMPRESSIONS,AD_SERVER_CLICKS,AD_SERVER_REVENUE', 3)` takes four arguments: the network codes, the dimensions, the metrics and the days to fetch again.
 - For each network it creates a hidden report (`visibility: HIDDEN`, so it does not show up in the Ad Manager UI) with `DATE` as the first dimension, runs it, polls the run until it is done and reads the result 10,000 rows per page.
 - The network codes are comma separated. An empty string means every network the service account is an API user on.
 - The first run reports from `@incremental_initial` up to yesterday. A later run starts `days` days before the newest `date` it already has, because Ad Manager keeps revising the last few days. Yesterday is the end of every run: today is still filling up.
