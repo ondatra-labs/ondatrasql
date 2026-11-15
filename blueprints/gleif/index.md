@@ -13,6 +13,7 @@ model_kind: merge
 args:
   - dataset
   - countries
+min_version: v0.47.1
 ---
 Fetches [Legal Entity Identifier](https://www.gleif.org/en/about-lei/introducing-the-legal-entity-identifier-lei) (LEI) records from the [GLEIF API](https://api.gleif.org/api/v1) for the countries you list, plus GLEIF's list of registration authorities. GLEIF covers about 2.7 million legal entities worldwide. Each record links an entity's LEI to its local registration number (`registered_as`, such as a Swedish organisationsnummer) and to the register that number comes from (`registered_at`, an RA code such as `RA000544`). The API is public, so the blueprint needs no key.
 
