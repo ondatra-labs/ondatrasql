@@ -40,6 +40,7 @@ Record a blueprint's HTTP traffic and replay it offline with a frozen clock. See
 |---|---|
 | `ONDATRA_HTTP_CASSETTE` | Directory for HTTP recordings: one JSON file per lib function per model, `<dir>/<model>/<lib>.json`. Requires `ONDATRA_HTTP_MODE`. |
 | `ONDATRA_HTTP_MODE` | `record`: every HTTP request a lib function makes (`http.*`, OAuth and service-account token exchanges) goes to the API and is appended to its cassette, credentials replaced by `[REDACTED]`. `replay`: no request leaves the machine; each is answered from the cassette, an unrecorded one fails the run, `service_account` and `provider` auth need no credentials, and retry backoff, `rate_limit`, poll intervals and `sleep()` do not wait. Requires `ONDATRA_HTTP_CASSETTE`. |
+| `ONDATRA_HTTP_MASK` | Comma-separated JSON field names whose values `record` mode masks in response bodies before the cassette is written: strings become `masked-<8 hex digits of their SHA-256>`, numbers `0`, booleans `false`. Ignored in `replay`. See [Masking data](/guides/test-a-blueprint-offline/#masking-data). |
 | `ONDATRA_NOW` | RFC 3339 timestamp (`2026-03-01T08:30:00Z`). Starlark `time.now()` returns this instant for the whole run. Does not affect `last_run` or SQL `now()`. |
 
 ## OAuth2 Provider Variables
