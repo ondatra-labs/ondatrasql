@@ -70,7 +70,7 @@ The runtime handles token refresh, header injection, and caching. Auth is only i
 }
 ```
 
-`service_account` resolves the key file path from `.env` via the `{"env": "..."}` pattern. The runtime handles JWT signing and token refresh automatically.
+`service_account` resolves the key file path from `.env` via the `{"env": "..."}` pattern. The runtime handles JWT signing and token refresh automatically: the access token is exchanged once per key file and scope and reused by every request of the run (all pages, all lib calls, parallel requests) until 60 seconds before it expires. A `401` from the API drops the token, exchanges a new one and repeats the request once.
 
 ### OAuth2 provider (browser-based SaaS APIs)
 

@@ -67,7 +67,7 @@ Every HTTP request a lib function makes:
 - `http.get`, `http.post`, `http.put`, `http.patch`, `http.delete` and `http.upload`, including retries and the Digest challenge;
 - the token exchanges behind the API dict's `auth`: the Google `service_account` JWT exchange and the `provider` OAuth refresh.
 
-In replay, `service_account` and `provider` auth need no key file, no stored token and no `ONDATRA_OAUTH_TOKEN_*`: the token exchange is skipped, and requests carry `Authorization: Bearer [REDACTED]`, which is never compared. A `cert`/`key`/`ca` client certificate is not read either.
+In replay, `service_account` and `provider` auth need no key file, no stored token and no `ONDATRA_OAUTH_TOKEN_*`: the token exchange is skipped, and requests carry `Authorization: Bearer [REDACTED]`, which is never compared. A `cert`/`key`/`ca` client certificate is not read either. A recording holds one `service_account` exchange per key, scope and token lifetime (plus one after a `401`); recordings made before this cache hold one per request and still replay, since replay uses none of them. Re-record to drop them.
 
 Not covered: DuckDB's own HTTP (`httpfs`, `read_json('https://…')`), and anything that is not an HTTP request (`uuid()`, DuckLake snapshot times).
 
