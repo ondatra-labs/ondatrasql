@@ -15,8 +15,9 @@
 # The first run (and a rebuild) fetches the 16 months Search Console keeps,
 # or from @incremental_initial when that is later. Each row carries site,
 # date, every dimension (searchAppearance as search_appearance), clicks,
-# impressions, ctr, position and row_key, a JSON list of the date and the
-# dimension values, which the model merges on.
+# impressions, ctr and position (as text, for the model to cast), and
+# row_key, a JSON list of the date and the dimension values, which the model
+# merges on.
 API = {
     "base_url": "https://searchconsole.googleapis.com/webmasters/v3",
     "auth": {
@@ -69,6 +70,16 @@ def _months_back(t, n):
 
 def _column(d):
     return "search_appearance" if d == "searchAppearance" else d
+
+def _text(x):
+    # every metric as text, typed by the model's cast: the API sends 0 and
+    # 1 as integers and 0.25 as a float in the same column, and the runtime
+    # types a column by its first value
+    if x == None:
+        return None
+    if type(x) == "float" and x == int(x) and abs(x) < 1e15:
+        return str(int(x))
+    return str(x)
 
 def _dimensions(s):
     dims = []
@@ -136,10 +147,10 @@ def fetch(site, dimensions, days, page, is_backfill = True, last_value = "", ini
         row = {"site": site, "date": keys[0]}
         for i, d in enumerate(dims):
             row[_column(d)] = keys[i + 1]
-        row["clicks"] = r.get("clicks")
-        row["impressions"] = r.get("impressions")
-        row["ctr"] = r.get("ctr")
-        row["position"] = r.get("position")
+        row["clicks"] = _text(r.get("clicks"))
+        row["impressions"] = _text(r.get("impressions"))
+        row["ctr"] = _text(r.get("ctr"))
+        row["position"] = _text(r.get("position"))
         # the merge key is built here: a @fetch model may only cast columns
         row["row_key"] = json.encode(keys)
         rows.append(row)

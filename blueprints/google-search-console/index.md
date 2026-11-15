@@ -27,6 +27,7 @@ Loads the Search Analytics of one [Google Search Console](https://search.google.
 - The first run loads the 16 months Search Console keeps, up to yesterday. A later run starts `days` days before the newest `date` it already has, and ends yesterday.
 - Only final data is asked for (`dataState: final`). Search Console finishes a day about two days later, so the newest days come back empty and the next run picks them up.
 - Each row carries `site`, `date`, each dimension (`searchAppearance` as `search_appearance`), `clicks`, `impressions`, `ctr` (0.05 is 5%), `position` (1 is the top), and `row_key`, a JSON list of the date and the dimension values: `["2026-11-10","ondatrasql"]`. The models merge on `row_key`, so a day fetched again replaces its rows instead of adding them twice.
+- The four metrics leave the lib as text and the model's casts type them: the API sends `ctr` 0 and `position` 2 as whole numbers and 8.8 as a fraction in the same column, and the runtime would type a column by its first rows.
 
 ### Three tables that do not add up
 
