@@ -9,6 +9,7 @@ package blueprinttest
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,6 +232,98 @@ const fakeCRMExpect = `runs:
       sync.contacts: {rows: 3}
 `
 
+const fakeDocsKey = "fd_selftest_1c2d3e4f5a"
+
+// fakeDocs answers POST /docs, a multipart upload of one text file, with
+// the number of words in it, to requests with the key.
+func fakeDocs(hits *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("Authorization") != "Bearer "+fakeDocsKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		f, _, err := r.FormFile("file")
+		if r.URL.Path != "/docs" || err != nil {
+			http.Error(w, fmt.Sprintf("bad request %s: %v", r.URL, err), http.StatusBadRequest)
+			return
+		}
+		defer f.Close()
+		var buf strings.Builder
+		if _, err := io.Copy(&buf, f); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"words": len(strings.Fields(buf.String()))}) // test server
+	}))
+}
+
+// fakeDocsLib reads its input from the project, as the mistral-ocr
+// blueprint does: every file the glob matches is hashed and uploaded.
+const fakeDocsLib = `API = {
+    "base_url": %q,
+    "auth": {"env": "FAKEDOCS_KEY"},
+    "fetch": {"args": ["pattern"]},
+}
+
+def fetch(pattern, page):
+    rows = []
+    for f in glob(pattern):
+        digest = md5_file(f)
+        resp = http.upload("/docs", file=f, fields={"md5": digest})
+        if not resp.ok:
+            fail("fakedocs " + f + ": " + str(resp.status_code) + " " + resp.text)
+        rows.append({"file": f, "md5": digest, "words": resp.json["words"]})
+    return {"rows": rows, "next": None}
+`
+
+const fakeDocsModel = `-- @kind: table
+-- @fetch
+SELECT
+    file::VARCHAR  AS file,
+    md5::VARCHAR   AS md5,
+    words::BIGINT  AS words
+FROM fakedocs('data/*.txt')
+`
+
+const fakeDocsPage = `---
+title: Fake Docs
+description: Word counts of the text files in data/, from a fake API the self-test starts.
+vendor: Self-test
+tags: [test]
+auth_method: api_key
+source_type: fetch
+model_kind: table
+min_version: v0.47.0
+args: [pattern]
+---
+{{< bp-file "lib/fakedocs.star" >}}
+
+{{< bp-file "models/raw/docs.sql" >}}
+`
+
+// fakeDocsData is the one input file, kept with the recording in data/.
+const fakeDocsData = "four words of text\n"
+
+// fakeDocsExpect: the one file in data/ is uploaded once, and its words
+// counted, which only happens when record and replay both have data/.
+const fakeDocsExpect = `runs:
+  - now: "2026-03-03T12:00:00Z"
+    requests: 1
+    models:
+      raw.docs: {run_type: backfill, rows: 1}
+    tables:
+      raw.docs:
+        columns:
+          - file VARCHAR
+          - md5 VARCHAR
+          - words BIGINT
+        rows: 1
+        sample:
+          - {file: "data/note.txt", words: "4"}
+`
+
 func writeFiles(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
 	for rel, content := range files {
@@ -276,9 +369,11 @@ func TestHarness_SelfTest(t *testing.T) {
 	}
 	h := &harness{bin: ondatrasqlBinary(t), shared: shared, mainVersion: mainVersion(t)}
 
-	var shopHits, crmHits atomic.Int32
+	var shopHits, crmHits, docsHits atomic.Int32
 	shop := fakeShop(&shopHits)
 	defer shop.Close()
+	docs := fakeDocs(&docsHits)
+	defer docs.Close()
 	var pushed atomic.Int32
 	crm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		crmHits.Add(1)
@@ -312,14 +407,23 @@ func TestHarness_SelfTest(t *testing.T) {
 		"models/raw/contacts.sql":  fakeCRMSource,
 		"models/sync/contacts.sql": fakeCRMSync,
 	})
+	docsDir := filepath.Join(root, "fakedocs")
+	writeFiles(t, docsDir, map[string]string{
+		"index.md":            fakeDocsPage,
+		".env.example":        "FAKEDOCS_KEY=\n",
+		"lib/fakedocs.star":   fmt.Sprintf(fakeDocsLib, docs.URL),
+		"models/raw/docs.sql": fakeDocsModel,
+	})
 	tests := t.TempDir()
 	writeFiles(t, tests, map[string]string{
-		"fakeshop/expect.yaml": fakeShopExpect,
-		"fakecrm/expect.yaml":  fakeCRMExpect,
+		"fakeshop/expect.yaml":   fakeShopExpect,
+		"fakecrm/expect.yaml":    fakeCRMExpect,
+		"fakedocs/expect.yaml":   fakeDocsExpect,
+		"fakedocs/data/note.txt": fakeDocsData,
 	})
 
-	// The offline check passes for both.
-	for _, dir := range []string{shopDir, crmDir} {
+	// The offline check passes for all three; fakedocs has no data/ there.
+	for _, dir := range []string{shopDir, crmDir, docsDir} {
 		if err := h.check(t, dir); err != nil {
 			t.Fatalf("check %s: %v", filepath.Base(dir), err)
 		}
@@ -336,6 +440,7 @@ func TestHarness_SelfTest(t *testing.T) {
 	// Record both against the fake servers, with the keys.
 	t.Setenv("FAKESHOP_KEY", fakeShopKey)
 	t.Setenv("FAKECRM_KEY", fakeCRMKey)
+	t.Setenv("FAKEDOCS_KEY", fakeDocsKey)
 	draft, err := h.record(t, shopDir, filepath.Join(tests, "fakeshop"))
 	if err != nil {
 		t.Fatalf("record fakeshop: %v", err)
@@ -349,12 +454,19 @@ func TestHarness_SelfTest(t *testing.T) {
 	if pushed.Load() != 3 {
 		t.Fatalf("record fakecrm pushed %d rows, want 3", pushed.Load())
 	}
-	for _, f := range []string{"fakeshop/cassettes/raw.orders/fakeshop.json", "fakeshop/cassettes/run3/raw.orders/fakeshop.json", "fakecrm/cassettes/sync.contacts/fakecrm.json"} {
+	// fakedocs records with data/ copied in: the upload reaches the server.
+	if _, err := h.record(t, docsDir, filepath.Join(tests, "fakedocs")); err != nil {
+		t.Fatalf("record fakedocs: %v", err)
+	}
+	if docsHits.Load() != 1 {
+		t.Fatalf("record fakedocs made %d requests, want 1 (data/note.txt uploaded)", docsHits.Load())
+	}
+	for _, f := range []string{"fakeshop/cassettes/raw.orders/fakeshop.json", "fakeshop/cassettes/run3/raw.orders/fakeshop.json", "fakecrm/cassettes/sync.contacts/fakecrm.json", "fakedocs/cassettes/raw.docs/fakedocs.json"} {
 		data, err := os.ReadFile(filepath.Join(tests, f))
 		if err != nil {
 			t.Fatalf("recording %s: %v", f, err)
 		}
-		if strings.Contains(string(data), fakeShopKey) || strings.Contains(string(data), fakeCRMKey) {
+		if strings.Contains(string(data), fakeShopKey) || strings.Contains(string(data), fakeCRMKey) || strings.Contains(string(data), fakeDocsKey) {
 			t.Fatalf("recording %s contains a key", f)
 		}
 	}
@@ -362,15 +474,17 @@ func TestHarness_SelfTest(t *testing.T) {
 	// Replay: servers closed, keys unset (replay drops them as well).
 	shop.Close()
 	crm.Close()
-	before := shopHits.Load() + crmHits.Load()
+	docs.Close()
+	before := shopHits.Load() + crmHits.Load() + docsHits.Load()
 	t.Setenv("FAKESHOP_KEY", "")
 	t.Setenv("FAKECRM_KEY", "")
-	for _, name := range []string{"fakeshop", "fakecrm"} {
+	t.Setenv("FAKEDOCS_KEY", "")
+	for _, name := range []string{"fakeshop", "fakecrm", "fakedocs"} {
 		if err := h.replayBlueprint(t, name, filepath.Join(root, name), tests); err != nil {
 			t.Fatalf("replay: %v", err)
 		}
 	}
-	if shopHits.Load()+crmHits.Load() != before {
+	if shopHits.Load()+crmHits.Load()+docsHits.Load() != before {
 		t.Fatalf("replay reached a server")
 	}
 
@@ -418,6 +532,24 @@ func TestHarness_SelfTest(t *testing.T) {
 		// sink reports it as a warning, which fails the replay.
 		wantErr(t, "push body", h.replayBlueprint(t, "fakecrm", bp, tests),
 			"model sync.contacts: warning: sink fakecrm", "1 requests replayed, want 2")
+	})
+	t.Run("data file differs at replay", func(t *testing.T) {
+		rec := t.TempDir()
+		if err := copyTree(filepath.Join(tests, "fakedocs"), filepath.Join(rec, "fakedocs")); err != nil {
+			t.Fatal(err)
+		}
+		writeFiles(t, rec, map[string]string{"fakedocs/data/note.txt": "five words of other text\n"})
+		wantErr(t, "data differs", h.replayBlueprint(t, "fakedocs", docsDir, rec), "no recorded interaction for POST", "/docs")
+	})
+	t.Run("data missing at replay", func(t *testing.T) {
+		rec := t.TempDir()
+		if err := copyTree(filepath.Join(tests, "fakedocs"), filepath.Join(rec, "fakedocs")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(rec, "fakedocs", "data")); err != nil {
+			t.Fatal(err)
+		}
+		wantErr(t, "data missing", h.replayBlueprint(t, "fakedocs", docsDir, rec), "0 requests replayed, want 1")
 	})
 	t.Run("page out of step with describe blueprint", func(t *testing.T) {
 		bp := copyBlueprint(t, shopDir, map[string]string{"index.md": strings.NewReplacer(

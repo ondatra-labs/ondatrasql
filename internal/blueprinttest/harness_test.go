@@ -18,6 +18,10 @@ package blueprinttest
 //     row counts, sample rows, run types and request count asserted;
 //   - record: the same runs against the live API, writing the cassettes.
 //
+// Record and replay copy <recording>/data/, when there is one, into the
+// project as data/: the files a blueprint reads from the project (PDFs to
+// OCR, a CSV to push). The offline check has no recording and no data/.
+//
 // Every function returns its findings as an error instead of failing the
 // test, so the self-test can show that a broken blueprint is caught.
 
@@ -184,13 +188,14 @@ func copyTree(src, dst string) error {
 
 // project is a blueprint copied into a fresh directory with the shared
 // config, as a user gets it after ondatrasql init and copying lib/ and
-// models/ in.
+// models/ in, plus the files it reads from data/ when the recording has
+// them.
 type project struct {
 	dir string
 	env []string // the variables every command of this project gets
 }
 
-func (h *harness) newProject(t testing.TB, bpDir string) (*project, error) {
+func (h *harness) newProject(t testing.TB, bpDir, data string) (*project, error) {
 	t.Helper()
 	dir := t.TempDir()
 	if err := copyTree(h.shared, dir); err != nil {
@@ -201,9 +206,26 @@ func (h *harness) newProject(t testing.TB, bpDir string) (*project, error) {
 			return nil, err
 		}
 	}
+	if data != "" {
+		if err := copyTree(data, filepath.Join(dir, "data")); err != nil {
+			return nil, err
+		}
+	}
 	key := make([]byte, 32)
 	_, _ = rand.Read(key) // crypto/rand.Read never returns an error
 	return &project{dir: dir, env: []string{"ONDATRA_STATE_KEY=" + base64.StdEncoding.EncodeToString(key)}}, nil
+}
+
+// recordingData is rec/data, the files the blueprint reads from the
+// project's data/ (kept with the recording, never in this repo), or ""
+// when the recording has none. Record and replay copy the same files, so
+// what the lib derives from them (a hash, an upload) matches the cassettes.
+func recordingData(rec string) string {
+	data := filepath.Join(rec, "data")
+	if st, err := os.Stat(data); err == nil && st.IsDir() {
+		return data
+	}
+	return ""
 }
 
 // cliEnv is the environment of the test process without the variables
@@ -412,7 +434,7 @@ func (h *harness) check(t testing.TB, bpDir string) error {
 	var errs []error
 	fail := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
-	p, err := h.newProject(t, bpDir)
+	p, err := h.newProject(t, bpDir, "")
 	if err != nil {
 		return err
 	}
@@ -856,7 +878,7 @@ func (h *harness) replay(t testing.TB, bpDir, rec string, drop []string) error {
 	if err := copyTree(casRoot, casCopy); err != nil {
 		return err
 	}
-	p, err := h.newProject(t, bpDir)
+	p, err := h.newProject(t, bpDir, recordingData(rec))
 	if err != nil {
 		return err
 	}
@@ -930,7 +952,7 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 	if err := os.RemoveAll(casRoot); err != nil {
 		return nil, err
 	}
-	p, err := h.newProject(t, bpDir)
+	p, err := h.newProject(t, bpDir, recordingData(rec))
 	if err != nil {
 		return nil, err
 	}
@@ -951,7 +973,7 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 		}
 	}
 
-	draft, err := h.draftExpect(t, bpDir, casRoot, exp)
+	draft, err := h.draftExpect(t, bpDir, casRoot, recordingData(rec), exp)
 	if err != nil {
 		return nil, err
 	}
@@ -963,11 +985,12 @@ func (h *harness) record(t testing.TB, bpDir, rec string) ([]byte, error) {
 	return draft, nil
 }
 
-// draftExpect replays the runs of exp from casRoot and writes down what
-// they produced: an expect.yaml to review, not to accept blindly.
-func (h *harness) draftExpect(t testing.TB, bpDir, casRoot string, exp *expectFile) ([]byte, error) {
+// draftExpect replays the runs of exp from casRoot, with data (if any)
+// in the project, and writes down what they produced: an expect.yaml to
+// review, not to accept blindly.
+func (h *harness) draftExpect(t testing.TB, bpDir, casRoot, data string, exp *expectFile) ([]byte, error) {
 	t.Helper()
-	p, err := h.newProject(t, bpDir)
+	p, err := h.newProject(t, bpDir, data)
 	if err != nil {
 		return nil, err
 	}
