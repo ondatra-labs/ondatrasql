@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://ondatra.sh">Documentation</a> &middot;
   <a href="https://github.com/ondatra-labs/ondatrasql/discussions">Discussions</a> &middot;
+  <a href="https://discord.gg/uYr4MTEZH">Discord</a> &middot;
   <a href="https://ondatra.sh/blueprints/">Blueprints</a>
 </p>
 
