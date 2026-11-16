@@ -118,12 +118,17 @@ jobs:
     needs: [unit, integration]
     strategy:
       matrix:
+        # Linux builds are pinned to ubuntu-24.04: a cgo binary needs the glibc it
+        # was linked against or newer. ubuntu-latest moved to a glibc 2.43 image and
+        # v0.47.2's linux binary failed to start on Ubuntu 24.04 (GLIBC_2.43 not
+        # found). v0.46.1, built on 24.04, needs 2.38. The glibc check below holds
+        # the floor at 2.39 (Ubuntu 24.04).
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             goos: linux
             goarch: amd64
             cc: gcc
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             goos: linux
             goarch: arm64
             cc: aarch64-linux-gnu-gcc
@@ -159,6 +164,18 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           go build -ldflags "-s -w -X main.version=${VERSION}" -o ondatrasql ./cmd/ondatrasql
+
+      - name: glibc floor (linux)
+        if: matrix.goos == 'linux'
+        shell: bash
+        run: |
+          # Highest GLIBC_x.y symbol version the binary needs; 2.39 = Ubuntu 24.04.
+          # readelf reads the arm64 binary on this x86 runner too.
+          max=$(readelf -V --wide ondatrasql | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "ondatrasql needs glibc $max"
+          if [ -z "$max" ] || [ "$(printf '%s\n%s\n' "$max" 2.39 | sort -V | tail -1)" != 2.39 ]; then
+            echo "::error::ondatrasql needs glibc ${max:-?}, above the 2.39 floor (Ubuntu 24.04)"; exit 1
+          fi
 
       - name: Package
         shell: bash
