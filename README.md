@@ -11,7 +11,8 @@
 
 <p align="center">
   <a href="https://ondatra.sh">Documentation</a> &middot;
-  <a href="https://discord.gg/TQEqsa9q">Discord</a> &middot;
+  <a href="https://github.com/ondatra-labs/ondatrasql/discussions">Discussions</a> &middot;
+  <a href="https://discord.gg/WqBMzBQZvp">Discord</a> &middot;
   <a href="https://ondatra.sh/blueprints/">Blueprints</a>
 </p>
 
@@ -34,6 +35,8 @@ curl -fsSL https://ondatra.sh/install.sh | sh
 ```
 
 Supports Linux, macOS, and Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
+
+Try it on a real API with no key: the [Riksbank blueprint](https://ondatra.sh/blueprints/riksbank/).
 
 ## Quick Start
 
@@ -134,6 +137,10 @@ Models are SQL files. Starlark is used in `lib/` for API transport (HTTP, auth, 
 
 All models execute in the same pipeline and share the same dependency graph.
 
+## Test Ingestion Offline
+
+Record the HTTP traffic of a run once, then replay it with no network and no credentials. `ONDATRA_NOW` freezes the clock, so a replayed run sends the same requests it recorded. See [Test a Blueprint Offline](https://ondatra.sh/guides/test-a-blueprint-offline/).
+
 ## Key Capabilities
 
 | Capability | How it works |
@@ -174,6 +181,10 @@ checkpoint           Run all maintenance
 ## Documentation
 
 **[ondatra.sh](https://ondatra.sh)**
+
+## Contributing
+
+Blueprints for public APIs are the easiest place to start. See [CONTRIBUTING.md](CONTRIBUTING.md), the [Contributor License Agreement](CLA.md) and the [code of conduct](CODE_OF_CONDUCT.md). Request a blueprint or ask a question in [Discussions](https://github.com/ondatra-labs/ondatrasql/discussions).
 
 ## License
 
